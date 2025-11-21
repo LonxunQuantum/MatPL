@@ -38,10 +38,6 @@ echo "Using MAKE_CMD = $MAKE_CMD"
 
 mkdir -p bin
 mkdir -p lib
-make -C pre_data/gen_feature
-make -C pre_data/fit
-make -C pre_data/fortran_code  # spack load gcc@7.5.0
-make -C md/fortran_code
 
 # make nep-cpu interface
 cd feature/nep_find_neigh
@@ -60,35 +56,12 @@ cp nep3_module*.so nep_gpu.so
 cd ../../../
 
 cd bin
-
-#ln -s ../pre_data/mlff.py .
-#ln -s ../pre_data/seper.py .
-#ln -s ../pre_data/gen_data.py .
-#ln -s ../pre_data/data_loader_2type.py .
-#ln -s ../../utils/read_torch_wij.py . 
-#ln -s ../../utils/plot_nn_test.py . 
-#ln -s ../../utils/plot_mlff_inference.py .
-#ln -s ../../utils/read_torch_wij_dp.py . 
-ln -s ../md/fortran_code/main_MD.x .
-
 ln -s ../../main.py ./MATPL
 ln -s ../../main.py ./matpl
 ln -s ../../main.py ./MatPL
 ln -s ../../main.py ./PWMLFF
 ln -s ../../main.py ./pwmlff
 ln -s ../../main_mnode.py ./MNEP
-
-#chmod +x ./mlff.py
-#chmod +x ./seper.py
-#chmod +x ./gen_data.py
-#chmod +x ./data_loader_2type.py
-#chmod +x ./train.py
-#chmod +x ./test.py
-#chmod +x ./predict.py
-#chmod +x ./read_torch_wij.py
-#chmod +x ./read_torch_wij_dp.py
-#chmod +x ./plot_nn_test.py
-#chmod +x ./plot_mlff_inference.py 
 
 cd ..            # back to src dir
 

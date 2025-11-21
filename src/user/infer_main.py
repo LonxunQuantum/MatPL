@@ -44,9 +44,7 @@ def infer_main(sys_cmd:list[str]):
     else:
         trajs = [structures_file]
     for ti, traj in enumerate(trajs):
-        if infer.model_type == "DP":
-            infer.inference(traj, format, atom_types)
-        elif infer.model_type == "NEP":
+        if infer.model_type == "NEP":
             infer.inference_nep_txt(traj, format, atom_types)
 
 def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list[str]=None):
@@ -94,9 +92,7 @@ def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list
             ei_i[id] = []
             Etot_i[id] = []
             
-            if model.model_type == "DP":
-                _etot_list, _ei_list, _force_list, _virial_list = model.inference(traj, format, atom_names=atom_types, do_deviation=True)
-            elif model.model_type == "NEP":
+            if model.model_type == "NEP":
                 _etot_list, _ei_list, _force_list, _virial_list = model.inference_nep_txt(traj, format, atom_names=atom_types, do_deviation=True)
             
             for idj in range(0, len(_etot_list)):
@@ -109,41 +105,6 @@ def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list
             ei = np.squeeze(np.array([ei_i[_][idj] for _ in range(0, len(model_lists))]))
             force = np.squeeze(np.array([force_i[_][idj] for _ in range(0, len(model_lists))]))
             etot = np.squeeze(np.array([Etot_i[_][idj] for _ in range(0, len(model_lists))]))
-
-            # this code for max model_devi without average
-            # avg_force = np.mean(force, axis=0)
-            # # max_force = np.full([len(ckpt_file_list), avg_force.shape[0]], 0)
-            # max_force = []
-            # min_force = []
-            # mean_force= []
-            # for i in range(0, len(ckpt_file_list)):
-            #     tmp_error_1  = np.sum(np.square(force[i]-avg_force), axis=-1)
-            #     tmp_error_2  = np.sqrt(tmp_error_1)
-            #     max_force.append(np.max(tmp_error_2))
-            #     min_force.append(np.min(tmp_error_2))
-            #     mean_force.append(tmp_error_1)
-            # res_devi_foce = np.max(np.array(max_force))
-            # res_devi_min_force = np.min(np.array(min_force))
-            # res_devi_mean_force= np.max(np.sqrt(np.mean(np.array(mean_force), axis=0)))
-            # avg_ei = np.mean(ei, axis=0)
-            # # max_ei = np.full([len(ckpt_file_list), avg_ei.shape[0]], 0)
-            # max_ei = []
-            # min_ei = []
-            # mean_ei= []
-            # for i in range(0, len(ckpt_file_list)):
-            #     tmp_error_2 = np.abs(ei[i]-avg_ei)
-            #     max_ei.append(np.max(tmp_error_2))
-            #     min_ei.append(np.min(tmp_error_2))
-            #     mean_ei.append(tmp_error_2**2)
-            # res_devi_ei = np.max(np.array(max_ei))
-            # res_devi_min_ei  = np.min(np.array(min_ei))
-            # res_devi_mean_ei = np.max(np.sqrt(np.mean(np.array(mean_ei), axis=0)))
-            # with open(os.path.join(os.path.dirname(save_path), 'old_matpl_model_devi.out'), 'a') as wf:
-            #     line = "    {:<17.6f}{:<17.6f}{:<17.6f}{:<17.6f}{:<17.6f}{:<17.6f}\n".format(
-            #         res_devi_mean_force, res_devi_min_force, res_devi_foce,
-            #         res_devi_mean_ei, res_devi_min_ei, res_devi_ei
-            #     )
-            #     wf.write(line)
 
             avg_force = np.mean(force, axis=0)
             _f_error = np.transpose((force - avg_force[np.newaxis, :, :])**2, (1, 0, 2))

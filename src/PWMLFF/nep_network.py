@@ -37,15 +37,13 @@ from src.optimizer.LKF import LKFOptimizer
 
 from src.pre_data.nep_data_loader import calculate_neighbor_num_max_min, calculate_neighbor_scaler, UniDataset, variable_length_collate_fn, type_map, NepTestData
 from src.PWMLFF.nep_mods.nep_trainer import train_KF, train, valid, save_checkpoint, predict
-from src.PWMLFF.dp_param_extract import load_atomtype_energyshift_from_checkpoint
 from src.user.input_param import InputParam
-from utils.file_operation import write_arrays_to_file, write_force_ei
+from utils.file_operation import write_arrays_to_file
 from utils.nep_to_gpumd import extract_model
 from utils.learning_rate import is_epoch_before_restart
 from src.aux.inference_plot import inference_plot
 import concurrent.futures
 import multiprocessing
-from queue import Queue
 from utils.debug_operation import check_cuda_memory, check_cpu_memory
 class nep_network:
     def __init__(self, nep_param:InputParam):
@@ -147,15 +145,6 @@ class nep_network:
     return {*} 
     author: wuxingxing
     '''
-    # def get_stat(self):
-    #     if self.davg_dstd_energy_shift is None:
-    #         if os.path.exists(self.input_param.file_paths.model_load_path) is False:
-    #             raise Exception("ERROR! {} is not exist when get energy shift !".format(self.input_param.file_paths.model_load_path))
-    #         davg_dstd_energy_shift = load_atomtype_energyshift_from_checkpoint(self.input_param.file_paths.model_load_path)
-    #     else:
-    #         davg_dstd_energy_shift = self.davg_dstd_energy_shift
-    #     return davg_dstd_energy_shift
-    
     def load_model_optimizer(self, energy_shift, avg_atom_num=1, iterations=1):
         # create model 
         # when running evaluation, nothing needs to be done with davg.npy

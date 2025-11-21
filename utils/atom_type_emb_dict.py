@@ -166,6 +166,34 @@ def get_atomic_number_from_name(atomic_names:list[str]):
         res.append(element_table_2[name])
     return res
 
+    
+def type_map(atom_types_image, atom_type):
+    """
+    Maps the atom types to their corresponding indices in the atom_type array.
+
+    Args:
+    atom_types_image (numpy.ndarray): Array of atom types to be mapped.
+    atom_type (numpy.ndarray): Array of integers representing the atom type of each atom in the system.
+
+    Returns:
+    list: List of indices corresponding to the atom types in the atom_type array.
+
+    Raises:
+    AssertionError: If no atom types in atom_types_image are found in atom_type.
+
+    Examples: CH4 molecule
+    >>> atom_types_image = array([6, 1, 1, 1, 1])
+    >>> atom_type = array([6, 1])
+    >>> type_map(atom_types_image, atom_type)
+    [0, 1, 1, 1, 1]
+    """
+    atom_type_map = []
+    for elem in atom_types_image:
+        if elem in atom_type:
+            atom_type_map.append(np.where(atom_type == elem)[0][0])
+    assert len(atom_type_map) != 0, "this atom type didn't found"
+    return atom_type_map
+    
 if __name__ == "__main__":
     # keys "atomic_number", "atom_mass", "atom_radius", "molar_vol", "melting_point", "boiling_point", "electron_affin", "pauling"
     res = get_normalized_data_list([3,29], ["atomic_number", "atom_mass", "atom_radius", "molar_vol", "melting_point", "boiling_point", "electron_affin", "pauling"])
