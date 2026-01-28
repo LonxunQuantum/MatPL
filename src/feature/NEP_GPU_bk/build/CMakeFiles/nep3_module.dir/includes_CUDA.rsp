@@ -1,0 +1,1 @@
+-I"/opt/dtk/cuda/cuda-11/include" -I"/root/codespace/MatPL-nep/src/feature/NEP_GPU/force" -I"/root/codespace/MatPL-nep/src/feature/NEP_GPU/utilities" -isystem "/usr/local/lib/python3.10/dist-packages/pybind11/include" -isystem /usr/include/python3.10

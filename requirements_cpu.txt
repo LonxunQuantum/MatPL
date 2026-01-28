@@ -1,0 +1,18 @@
+setuptools==68.0.0
+numpy==1.26.2
+torch==2.2.0
+-f https://download.pytorch.org/whl/torch_stable.html
+
+ase
+tqdm
+cmake==3.30.3
+pyyaml
+pandas
+scikit-learn-intelex
+matplotlib
+pwdata
+pwact
+pybind11
+charset_normalizer==3.3.2
+psutil
+

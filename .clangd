@@ -1,0 +1,10 @@
+CompileFlags:
+  CompilationDatabase: src/op/build
+  Remove: [-mllvm, --offload-arch=*]
+  Add: 
+    - -D__HIP_PLATFORM_AMD__=1
+    - -isystem
+    - /opt/dtk/include
+    - --rocm-path=/opt/dtk
+    - --rocm-device-lib-path=/opt/dtk/amdgcn/bitcode
+    - -mcode-object-version=5

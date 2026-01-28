@@ -1,0 +1,74 @@
+# 1. 包含 Torch（ROCm 版本）
+find_package(Torch REQUIRED)
+
+# 2. 设置 DCU 架构（对应 CUDA 的 compute capability）
+set(AMDGPU_TARGETS "gfx936" CACHE STRING "AMD GPU targets")
+message(STATUS "Enabled AMDGPU targets: ${AMDGPU_TARGETS}")
+
+# 3. 全局 HIP 编译选项（替代 CUDA_NVCC_FLAGS）
+# 注意：HIP 使用 clang++ 作为后端，所以部分 NVCC 选项不适用
+#set(HIP_COMPILE_FLAGS
+#    "--offload-arch=${AMDGPU_TARGETS}"  # 指定多个 arch 会自动展开
+#    "-O3"
+#    "-Wall"
+#    # HIP 默认使用 per-thread stream 行为，无需显式指定
+#)
+set(HIP_COMPILE_FLAGS "-O3")
+
+# 4. NEP_TYPES 定义（保持不变）
+if(NOT DEFINED NEP_TYPES)
+    set(NEP_TYPES 20)
+endif()
+message(STATUS "NEP TYPES: ${NEP_TYPES}")
+add_definitions(-DTYPESIN=${NEP_TYPES})
+
+# 5. 启用 HIP 语言（关键！）
+enable_language(HIP)
+
+# 6. 添加主库（现在 .cpp 文件可能包含 HIP kernel）
+add_library(CalcOps_cuda SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps.cpp)
+target_include_directories(CalcOps_cuda PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(CalcOps_cuda PRIVATE ${TORCH_LIBRARIES})
+target_compile_options(CalcOps_cuda PRIVATE ${HIP_COMPILE_FLAGS})
+
+# 7. 注册其他模块
+file(GLOB CPP_FILES ${CMAKE_SOURCE_DIR}/src/*.cpp)
+file(GLOB HIP_KERNEL_FILES ${CMAKE_SOURCE_DIR}/kernel/*.hip)
+file(GLOB HIP_UTIL_FILES ${CMAKE_SOURCE_DIR}/kernel/utilities/*.hip)
+
+list(APPEND HIP_KERNEL_FILES ${HIP_UTIL_FILES})
+
+# 排除主库文件
+file(GLOB CALC_FILES ${CMAKE_SOURCE_DIR}/src/CalcOp*.cpp)
+list(REMOVE_ITEM CPP_FILES ${CALC_FILES})
+
+# 编译纯 C++ 模块（不含 kernel launch）
+foreach(CPP_FILE ${CPP_FILES})
+    get_filename_component(CPP_LIB ${CPP_FILE} NAME_WE)
+    add_library(${CPP_LIB} SHARED ${CPP_FILE})
+    target_compile_features(${CPP_LIB} PRIVATE cxx_std_17)
+    target_include_directories(${CPP_LIB} PRIVATE ${CMAKE_SOURCE_DIR})
+    target_link_libraries(CalcOps_cuda PRIVATE ${CPP_LIB})
+endforeach()
+
+# 编译 HIP kernel 模块（含 <<<>>>）
+foreach(HIP_FILE ${HIP_KERNEL_FILES})
+    get_filename_component(HIP_LIB ${HIP_FILE} NAME_WE)
+    add_library(${HIP_LIB} SHARED ${HIP_FILE})
+    target_compile_features(${HIP_LIB} PRIVATE cxx_std_17)
+    target_include_directories(${HIP_LIB} PRIVATE ${CMAKE_SOURCE_DIR})
+    target_compile_options(${HIP_LIB} PRIVATE ${HIP_COMPILE_FLAGS})
+    set_target_properties(${HIP_LIB} PROPERTIES
+        HIP_ARCHITECTURES "${AMDGPU_TARGETS}"
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_link_libraries(CalcOps_cuda PRIVATE ${HIP_LIB})
+endforeach()
+
+
+
+# 8. 绑定库
+add_library(CalcOps_bind SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
+target_compile_features(CalcOps_bind PRIVATE cxx_std_17)
+target_compile_options(CalcOps_bind PRIVATE ${HIP_COMPILE_FLAGS})
+target_link_libraries(CalcOps_bind PRIVATE CalcOps_cuda ${TORCH_LIBRARIES})
