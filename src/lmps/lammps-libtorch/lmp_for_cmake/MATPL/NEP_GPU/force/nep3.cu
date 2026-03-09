@@ -392,7 +392,7 @@ void NEP3::init_from_file(const char* file_potential, const bool is_rank_0, cons
       }
     } else {
       tokens = get_tokens(input);
-      parameters[n] = get_float_from_token(tokens[0], __FILE__, __LINE__);
+      parameters[n] = (float) get_double_from_token(tokens[0], __FILE__, __LINE__);
     }
   }
   nep_data.parameters.resize(annmb.num_para);
@@ -402,7 +402,7 @@ void NEP3::init_from_file(const char* file_potential, const bool is_rank_0, cons
 
   for (int d = 0; d < annmb.dim; ++d) {
     tokens = get_tokens(input);
-    paramb.q_scaler[d] = get_float_from_token(tokens[0], __FILE__, __LINE__);
+    paramb.q_scaler[d] = (float) get_double_from_token(tokens[0], __FILE__, __LINE__);
     // std::cout<<"q_scaler " << d << " " << paramb.q_scaler[d] << std::endl;
   }
 
@@ -411,7 +411,7 @@ void NEP3::init_from_file(const char* file_potential, const bool is_rank_0, cons
     int num_type_zbl = (paramb.num_types * (paramb.num_types + 1)) / 2;
     for (int d = 0; d < 10 * num_type_zbl; ++d) {
       tokens = get_tokens(input);
-      zbl.para[d] = get_float_from_token(tokens[0], __FILE__, __LINE__);
+      zbl.para[d] = (float) get_double_from_token(tokens[0], __FILE__, __LINE__);
     }
     zbl.num_types = paramb.num_types;
   }

@@ -12,7 +12,7 @@
             "custom_flags": [
             ],
             "source_list": [
-                "/share/app/MATPL/MatPL-2025.3/env.sh"
+                "/share/app/MATPL/MatPL-2025.3-26-3/env.sh"
             ],
             "module_list": [
             ],
@@ -54,7 +54,7 @@
             "custom_flags": [
             ],
             "source_list": [
-                "/data/home/wuxingxing/pack/v2pack/gpuinstall/MatPL-2025.3/matpl-env.sh"
+                "/data/home/wuxingxing/pack/v2pack/gpuinstall/MatPL-2025.3-26-3/matpl-env.sh"
             ],
             "module_list": [
                 "cuda/11.8-share",
@@ -75,7 +75,7 @@
             "custom_flags": [
             ],
             "source_list": [
-                "/data/home/wuxingxing/pack/v2pack/gpuinstall/MatPL-2025.3/matpl-env.sh"
+                "/data/home/wuxingxing/pack/v2pack/gpuinstall/MatPL-2025.3-26-3/matpl-env.sh"
             ],
             "module_list": [
                 "cuda/11.8-share",
@@ -112,7 +112,7 @@
             "number_node": 1,
             "gpu_per_node": 1,
             "cpu_per_node": 1,
-            "queue_name": "3080ti,3090",
+            "queue_name": "3080ti,new3080ti,q3,vipnode",
             "custom_flags": [
             ],
             "source_list": [
@@ -124,7 +124,7 @@
             ],
             "env_list": [
                 "conda activate matpl-2025.3",
-                "source /data/home/wuxingxing/codespace/MatPL-2025.3-sharemem/env.sh"
+                "source /data/home/wuxingxing/codespace/MatPL-2025.3-26-3/env.sh"
             ]
         },
         {
@@ -140,14 +140,14 @@
             ],
             "source_list": [
                 "/data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh",
-                "/data/home/wuxingxing/codespace/MatPL-2025.3-sharemem/env.sh"
+                "/data/home/wuxingxing/codespace/MatPL-2025.3-26-3/env.sh"
             ],
             "_module_list": [
                 "intel/2020",
                 "cuda/11.8-share"
             ],
             "env_list": [
-                "conda activate matpl-2025.3"
+                "conda activate MatPL-2025.3-26-3"
             ]
         },
         {
@@ -168,8 +168,8 @@
                 "intel/2020"
             ],
             "env_list": [
-                "export PYTHONPATH=/data/home/wuxingxing/codespace/MatPL-2025.3/src:$PYTHONPATH",
-                "export PATH=/data/home/wuxingxing/codespace/MatPL-2025.3/src/bin:$PATH",
+                "export PYTHONPATH=/data/home/wuxingxing/codespace/MatPL-2025.3-26-3/src:$PYTHONPATH",
+                "export PATH=/data/home/wuxingxing/codespace/MatPL-2025.3-26-3/src/bin:$PATH",
                 "conda activate PWMLFF"
             ]
         }

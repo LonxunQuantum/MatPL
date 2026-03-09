@@ -99,52 +99,6 @@ check_nvcc() {
     fi
 }
 
-# 新增：检查 OpenMPI（区分其他 MPI，并验证版本 ≥ 4.0）
-check_openmpi() {
-  echo "=== Checking OpenMPI (needed in MatPL-2026.3 lammps interface) ==="
-  local ompi_found=false
-  local ompi_version=""
-
-  # 方法1: 检查 ompi_info 命令（OpenMPI 特有）
-  if command -v ompi_info &> /dev/null; then
-    ompi_found=true
-    ompi_version=$(ompi_info --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    echo "✓ OpenMPI found (via ompi_info), version: ${ompi_version:-unknown}"
-  # 方法2: 检查 mpirun --version 输出是否包含 "Open MPI"
-  elif command -v mpirun &> /dev/null; then
-    mpirun_version_output=$(mpirun --version 2>&1)
-    if echo "$mpirun_version_output" | grep -qi "Open MPI"; then
-      ompi_found=true
-      ompi_version=$(echo "$mpirun_version_output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-      echo "✓ OpenMPI found (via mpirun), version: ${ompi_version:-unknown}"
-    else
-      # 有其他 MPI 实现（如 Intel MPI），但不是 OpenMPI
-      echo "⚠ Other MPI implementation detected (not OpenMPI):"
-      echo "  $(mpirun --version 2>&1 | head -1)"
-    fi
-  fi
-
-  if [ "$ompi_found" = true ]; then
-    if [ -n "$ompi_version" ]; then
-      major_version=$(echo "$ompi_version" | cut -d'.' -f1)
-      if [ "$major_version" -ge 4 ]; then
-        echo "✓ OpenMPI version meets requirement (>= 4.0)"
-        OPENMPI_FOUND=true
-      else
-        echo "✗ OpenMPI version: $ompi_version (< 4.0)"
-        OPENMPI_FOUND=false
-      fi
-    else
-      # 无法获取版本，但 OpenMPI 存在，假设满足要求
-      echo "⚠ OpenMPI detected but version could not be determined. Assuming compatibility."
-      OPENMPI_FOUND=true
-    fi
-  else
-    echo "✗ OpenMPI not found"
-    OPENMPI_FOUND=false
-  fi
-}
-
 # 执行检查
 echo "========================================"
 echo "      Environment Check Starting"
@@ -162,8 +116,6 @@ echo ""
 check_nvcc
 echo ""
 
-# 新增 OpenMPI 检查
-check_openmpi
 echo ""
 
 echo "========================================"
@@ -182,12 +134,6 @@ if [ "$FORTRAN_COMPATIBLE" = false ]; then
     echo ""
     echo "⚠ Warning: ifort compiler or MKL library is missing or does not meet version requirements."
     echo "  This will affect the compilation of Linear and NN models, but does not affect the use of DP and NEP models."
-fi
-
-# 新增 OpenMPI 英文警告
-if [ "$OPENMPI_FOUND" = false ]; then
-    echo ""
-    echo "⚠ Warning: OpenMPI not detected or version below 4.0. This will affect the compilation of the MatPL-2026.3 lammps interface (we recommend version 4.x or higher)."
 fi
 
 echo "========================================"
