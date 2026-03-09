@@ -33,7 +33,7 @@ CCFLAGS += -I$(PYTORCH_PATH)/include/torch/csrc/api/include/
 CCFLAGS += -I../MATPL/NEP_GPU/force/ -I../MATPL/NEP_GPU/utilities/
 PYTHON_LIB_PATH = $(shell python3-config --prefix)/lib
 PYTHON_BASE_PATH = $(shell dirname $(shell dirname $(shell which python3)))/lib
-LINKFLAGS += -L$(PYTHON_LIB_PATH) -lpython3.11 -static-libstdc++ -static-libgcc
+LINKFLAGS += -L$(PYTHON_LIB_PATH) -lpython3.11 # -static-libstdc++ -static-libgcc
 LINKFLAGS += -L$(PYTORCH_PATH)/lib/ -ltorch -lc10 -ltorch_cpu
 
 # ---------------------------------------------------------------------
