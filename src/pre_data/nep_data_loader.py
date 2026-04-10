@@ -230,8 +230,6 @@ class UniDataset(Dataset):
             if key != 'E':
                 _num_matrix.append(energy_dict[key])
         x, residuals, rank, s = np.linalg.lstsq(np.array(_num_matrix).T, energy_dict['E'], rcond=None)
-        for _tmp in _num_matrix:
-            print(len(_tmp))
         energy_shift = x.tolist()
         return energy_shift # array([-7.85248589, -8.80939613, -5.12775169, -3.13588943])
 
