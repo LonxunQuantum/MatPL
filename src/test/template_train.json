@@ -96,7 +96,7 @@
             "custom_flags": [
             ],
             "source_list": [
-                "/data/home/wuxingxing/pack/v2pack/cpuinstall/MatPL_cpu-2025.3/matpl-env.sh"
+                "/data/home/wuxingxing/pack/pack-2025.3/cpuinstall/MatPL_cpu-2025.3/matpl-env.sh"
             ],
             "module_list": [
                 "intel/2020"
@@ -206,11 +206,11 @@
         
     ],
 
-    "work_dir": "./test_workdir_off",
+    "work_dir": "./test_workdir_offcpu",
     "work_list": [
         {
             "_work_type":"mcloud envs(gpu and cpu) for DP, NEP",
-            "envs":[2],
+            "envs":[4],
             "epochs":[1,1,1],
             "train_inputs":[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,13,14,15,16,17,18,19,20,21,22,23,24],
             "_train_inputs":[6, 7, 8, 9, 11, 12,13,14,15,16,17,18,19,20,21,22,23,24]
