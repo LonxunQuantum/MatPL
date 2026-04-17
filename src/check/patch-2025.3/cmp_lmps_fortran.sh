@@ -2,6 +2,9 @@
 
 # 默认使用单核编译
 JOB_COUNT=1
+NEP_TYPES=""  # 初始化为空
+
+
 PATCH_DIR=$(pwd)
 BASE_DIR=$1
 CPU_ONLY=$2
@@ -32,6 +35,10 @@ while getopts "j:n:" opt; do
     j)
       JOB_COUNT=$OPTARG
       echo "Using $JOB_COUNT CPU cores for compilation"
+      ;;
+    n)
+      NEP_TYPES=$OPTARG
+      echo "Using NEP_TYPES = $NEP_TYPES"
       ;;
     \?)
       echo "Invalid option: -$OPTARG" >&2

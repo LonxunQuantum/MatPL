@@ -2,11 +2,13 @@
 
 # 默认使用单核编译
 JOB_COUNT=1
+
 PATCH_DIR=$(pwd)
 BASE_DIR=$1
 CPU_ONLY=$2
 VERSION=$3
 CLEAN_ALL=$4
+
 if [ $CPU_ONLY -eq 1 ]; then
   ENV_DIR=${BASE_DIR}/matpl_cpu-${VERSION}
   MATPL_DIR=${BASE_DIR}/MatPL_cpu-${VERSION}
@@ -14,6 +16,7 @@ else
   ENV_DIR=${BASE_DIR}/matpl-${VERSION}
   MATPL_DIR=${BASE_DIR}/MatPL-${VERSION}
 fi
+
 source $ENV_DIR/bin/activate
 echo "ENV_DIR/bin/activate path for lammps install is: $ENV_DIR/bin/activate"
 
@@ -25,8 +28,8 @@ echo "ENV   root dir is $ENV_DIR"
 echo "LMPS  root dir is $LAMMPS_LIBTORCH"
 ls $BASE_DIR
 
-# 解析命令行参数
-while getopts "j:n:" opt; do
+# 解析命令行参数（仅保留 -j，已移除 -n）
+while getopts "j:" opt; do
   case $opt in
     j)
       JOB_COUNT=$OPTARG
@@ -36,13 +39,8 @@ while getopts "j:n:" opt; do
       echo "Invalid option: -$OPTARG" >&2
       exit 1
       ;;
-    :)
-      echo "Option -$OPTARG requires an argument." >&2
-      exit 1
-      ;;
   esac
 done
-
 
 # 编译 lammps-2025.3
 if [ $CPU_ONLY -eq 0 ]; then
@@ -62,7 +60,7 @@ fi
 
 echo "The compilation of the lammps-${VERSION} MATPL library has been completed. Start compiling LAMMPS ..."
 
-# 继续编译 LAMMPS 模块 to src
+# 继续编译 LAMMPS 模块
 if [ $CLEAN_ALL -eq 1 ]; then
     make clean-all 
 fi
@@ -91,7 +89,8 @@ echo "The compilation of the lammps-${VERSION} has been completed."
 if [ -f "lmp_mpi" ]; then
     echo "Lammps libtorch version completed successfully!"
 else
-    echo "Lammps libtorch version compilation  errors. Please check the installation logs!"
+    echo "Lammps libtorch version compilation errors. Please check the installation logs!"
 fi
 
 cd $PATCH_DIR
+echo ""

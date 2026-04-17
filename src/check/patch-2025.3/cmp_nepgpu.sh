@@ -142,12 +142,12 @@ if ! $MAKE_CMD; then
 fi
 
 # 复制生成的库文件
-NEP_FILES=$(ls nep_module*.so 2>/dev/null | head -1)
+NEP_FILES=$(ls nep3_module*.so 2>/dev/null | head -1)
 if [ -n "$NEP_FILES" ]; then
-    cp nep_module*.so nep_gpu.so 2>/dev/null
-    echo "Copied nep_module*.so to nep_gpu.so"
+    cp nep3_module*.so nep_gpu.so 2>/dev/null
+    echo "Copied nep3_module*.so to nep_gpu.so"
 else
-    echo "Warning: No nep_module*.so files found in build directory"
+    echo "Warning: No nep3_module*.so files found in build directory"
     echo "Checking for other library files..."
     ls -la *.so 2>/dev/null || echo "No .so files found"
 fi

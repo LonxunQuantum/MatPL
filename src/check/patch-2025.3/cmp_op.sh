@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Default make command (single core) and NEP types
+# Default make command (single core)
 MAKE_CMD="make"
+
 PATCH_DIR=$(pwd)
 BASE_DIR=$1
 VERSION=$2
@@ -40,10 +41,8 @@ cd "$MATPL_DIR/src" || {
   exit 1
 }
 
-# Parse command line arguments
-# 注意：这里移除了位置参数 $1-$5，因为它们已经被使用
-# 需要从 $6 开始处理额外的选项参数
-shift 5  # 移除前5个位置参数
+# Parse command line arguments（仅保留 -j 参数，已移除 -n）
+shift 5
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -52,7 +51,6 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         *)
-            # 忽略其他参数
             shift
             ;;
     esac
@@ -75,15 +73,14 @@ if [ "$CLEAN_ALL" = "1" ]; then
     rm -rf build
 fi
 
-# python setup.py install --user
 mkdir -p build
 cd build || {
     echo "Error: Cannot change to 'build' directory"
     exit 1
 }
 
-# for bigmodel the types should be 100
-cmake ..
+# 固定使用默认值 20（不再支持 -n 参数）
+cmake -DNEP_TYPES=20 ..
 $MAKE_CMD
 
 cd "$PATCH_DIR" || {
@@ -92,3 +89,4 @@ cd "$PATCH_DIR" || {
 }
 
 echo "OP operator compilation successful!"
+echo ""
