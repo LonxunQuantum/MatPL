@@ -86,7 +86,10 @@ def extract_model(nep_path:str):
         raise Exception("Error! the input model is not NEP model, please check the model!")
     model_atom_type = model['json_file']['atom_type']
 
-    if "max_neighbor" in model.keys():
+    if "max_NN_radial" in model['state_dict'].keys():
+        max_NN_radial = model['state_dict']['max_NN_radial']
+        max_NN_angular = model['state_dict']['max_NN_angular']
+    elif "max_neighbor" in model.keys():
         max_NN_radial, max_NN_angular = model['max_neighbor']
     else:
         max_NN_radial = 500

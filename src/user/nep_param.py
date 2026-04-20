@@ -220,12 +220,12 @@ class NepParam(object):
         self.prediction = 0 # select between training and prediction (inference)
         self.zbl = get_parameter("zbl", descriptor_dict, None)
         self.train_2b = get_parameter("train_2b", descriptor_dict, True)
-        if self.zbl is not None:
-            if self.zbl > 5 or self.zbl < 1.0:
-                raise Exception("ERROR! the 'zbl' in json file should be between 1.0 and 2.5")
+        # if self.zbl is not None:
+        #     if self.zbl > 5 or self.zbl < 1.0:
+        #         raise Exception("ERROR! the 'zbl' in json file should be between 1.0 and 2.5")
         self.use_fixed_zbl = False
 
-        self.cutoff = get_parameter("cutoff", descriptor_dict, [6.0, 6.0]) # radial () and angular () cutoffs # use dp rcut, default to 6
+        self.cutoff = get_parameter("cutoff", descriptor_dict, [8.0, 4.0]) # radial () and angular () cutoffs # use dp rcut, default to 6
         self.n_max = get_parameter("n_max", descriptor_dict, [4, 4]) # size of radial () and angular () basis
         if len(self.n_max) != 2:
             raise Exception("the input 'n_max' should has 2 values, such as [4, 4]")

@@ -339,7 +339,7 @@ class nep_network:
         if len(train_loader) < 1:
             print(f"ERROR! The training set size {len(train_loader)} is too small, please adjust the number of GPU or batch_size: training_set_size >= batch_size * gpu_nums")
         max_NN_radial, min_NN_radial, max_NN_angular, min_NN_angular, q_scaler = None, None, None, None, None
-
+        # max_NN 训练集计算，之后如果存在nep.txt，取最大值作为max_nn,用于模型初始化。初始化后，如果存在ckpt文件（recover）,则更新为ckpt中的值。 
     
         # print(f"======= rank {self.input_param.rank} len forscaler_loader {len(forscaler_loader)} ======")
         local_global_max, local_global_min, local_max_NN_radial, local_min_NN_radial, local_max_NN_angular, local_min_NN_angular = calculate_neighbor_scaler(
