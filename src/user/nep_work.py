@@ -54,7 +54,10 @@ def nep_train(input_json: json, cmd:str):
         local_rank = int(os.environ["SLURM_LOCALID"])
         num_nodes  = int(num_nodes)
     else:
-        world_size =  torch.cuda.device_count() # single node
+        if torch.cuda.is_available():
+            world_size = torch.cuda.device_count()   # 有GPU就按卡数
+        else:
+            world_size = 1                           # 纯CPU强制单进程
         rank       = 0
         local_rank = 0
         num_nodes  = 1
@@ -193,6 +196,14 @@ def nep_test_ckpt(input_json: json, cmd:str):
     json_dict_train["test_data"] = input_json["test_data"]
     json_dict_train["format"] = get_parameter("format", input_json, "pwmat/movement")
     nep_param = InputParam(json_dict_train, "test".upper())
+
+    nep_param.multi_gpus = False
+    nep_param.multi_nodes = False
+    nep_param.world_size = 1
+    nep_param.rank = 0
+    nep_param.local_rank = 0
+    num_nodes = 1
+    
     # set inference param
     nep_param.set_test_relative_params(input_json)
     dp_trainer = nep_network(nep_param)

@@ -73,7 +73,9 @@ class NEP
 {
 public:
   struct ParaMB {
-    int version = 2; // NEP version, 2 for NEP2 and 3 for NEP
+    bool use_typewise_cutoff_zbl = false;
+    float typewise_cutoff_zbl_factor = 0.0f;
+    int version = 4; 
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability, 3=temperature-dependent free energy
     float rc_radial = 0.0f;     // radial cutoff
     float rc_angular = 0.0f;    // angular cutoff

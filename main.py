@@ -133,7 +133,7 @@ if __name__ == "__main__":
                     linear_test(json_file, cmd_type)
                 elif model_type == "NEP".upper():
                     nep_test(json_file, cmd_type)
-                    # nep_test_ckpt(json_file, cmd_type)
+                    # nep_test_ckpt(json_file, cmd_type) 用于debug，做ckpt文件的推理，测试pytorch端正确性
                     pass
                 # elif model_type == "CHEBY".upper():
                 #     cheby_test(json_file, cmd_type)

@@ -39,6 +39,7 @@ class NEP(nn.Module):
         self.model_type = input_param.model_type.upper()
         self.set_init_nep_param(input_param)
         self.zbl = input_param.nep_param.zbl
+        self.zbl_factor = input_param.nep_param.use_typewise_cutoff_zbl
         if self.input_param.precision == "float64":
             self.dtype = torch.double
         elif self.input_param.precision == "float32":
@@ -103,7 +104,21 @@ class NEP(nn.Module):
         self.K_C_SP = 14.399645 # 1/(4*PI*epsilon_0)
         self.zbl_para = [0.18175, 3.1998, 0.50986, 0.94229, 0.28022, 0.4029, 0.02817, 0.20162]
         self.atom_type_device = torch.tensor(self.atom_type, dtype=torch.int64, device=device)
-
+        if self.zbl_factor is not None:
+            self.COVALENT_RADIUS = torch.tensor(
+                [0.0, 0.426667, 0.613333, 1.6,     1.25333, 1.02667, 1.0,     0.946667, 0.84,    0.853333,
+                0.893333, 1.86667,  1.66667, 1.50667, 1.38667, 1.46667, 1.36,     1.32,    1.28,
+                2.34667,  2.05333,  1.77333, 1.62667, 1.61333, 1.46667, 1.42667,  1.38667, 1.33333,
+                1.32,     1.34667,  1.45333, 1.49333, 1.45333, 1.53333, 1.46667,  1.52,    1.56,
+                2.52,     2.22667,  1.96,    1.85333, 1.76,    1.65333, 1.53333,  1.50667, 1.50667,
+                1.44,     1.53333,  1.64,    1.70667, 1.68,    1.68,    1.64,     1.76,    1.74667,
+                2.78667,  2.34667,  2.16,    1.96,    2.10667, 2.09333, 2.08,     2.06667, 2.01333,
+                2.02667,  2.01333,  2.0,     1.98667, 1.98667, 1.97333, 2.04,     1.94667, 1.82667,
+                1.74667,  1.64,     1.57333, 1.54667, 1.48,    1.49333, 1.50667,  1.76,    1.73333,
+                1.73333,  1.81333,  1.74667, 1.84,    1.89333, 2.68,    2.41333,  2.22667, 2.10667,
+                2.02667,  2.04,     2.05333, 2.06667], dtype=dtype, device=device) # 0.0 只用于占位
+        else:
+            self.COVALENT_RADIUS = None
     '''
     description: 
         for nep.txt 
@@ -862,91 +877,129 @@ class NEP(nn.Module):
         Ri_d_angular :torch.Tensor, 
         list_neigh_angular :torch.Tensor, 
         type_map :torch.Tensor):
+        # 获取真实原子序数 Z
+        Z_i = self.atom_type_device[type_map].unsqueeze(1)           # [n_atoms, 1]
+        # 近邻类型索引 → Z_j
+        type_j_idx = torch.full_like(list_neigh_angular, -1, dtype=torch.long)
+        valid_neigh = list_neigh_angular != -1
+        type_j_idx[valid_neigh] = type_map[list_neigh_angular[valid_neigh]]
         
-        # 1. 创建 ri_zbl：Ri_angular 的第 0 列元素如果大于 2.5 就将整行置 0
+        Z_j = torch.full_like(list_neigh_angular, -1, dtype=torch.long)
+        valid_z = type_j_idx != -1
+        Z_j[valid_z] = self.atom_type_device[type_j_idx[valid_z]]
+
+        if self.zbl_factor is not None:
+            # 计算每对 (i,j) 的 new_rcut = min(self.zbl, (cov_i + cov_j) * factor)
+            cov_i = self.COVALENT_RADIUS[Z_i]                        # [n_atoms, 1]
+            cov_j = self.COVALENT_RADIUS[Z_j]                        # [n_atoms, n_neigh]
+            cov_sum = (cov_i + cov_j) * self.zbl_factor
+            rcut_per_pair = torch.minimum(
+                torch.full_like(cov_sum, self.zbl, dtype=cov_sum.dtype, device=cov_sum.device),
+                cov_sum
+            )
+        else:
+            # 固定 self.zbl 为 outer rcut
+            rcut_per_pair = torch.full_like(Ri_angular[:, :, 0], self.zbl, 
+                                           dtype=Ri_angular.dtype, device=Ri_angular.device)
+
+        rij = Ri_angular[:, :, 0]
+        # 1. ri_zbl：rij > new_rcut 的位置置 0
+        mask_zero = (rij > rcut_per_pair)
         ri_zbl = Ri_angular.clone().detach()
-        mask = (Ri_angular[:, :, 0] > self.zbl)
-        ri_zbl[mask] = 0
+        ri_zbl[mask_zero] = 0
         ri_zbl.requires_grad_()
-        # 2. 创建 ri_d_zbl：对于 ri_zbl 中整行置 0 的位置，对应的 Ri_d_angular 中的元素置 0
+
+        # 2. ri_d_zbl
         ri_d_zbl = Ri_d_angular.clone().detach()
-        ri_d_zbl[mask] = 0
-
-        # 3. 创建 neigh_zbl：对于 ri_zbl 中整行置 0 的位置，对应的 neigh_angular 中的元素置 0
-        neigh_zbl = list_neigh_angular.clone().detach()
-        neigh_zbl[mask] = -1
-
-        # 4. 创建 type_zbl：对于 ri_zbl 中整行置 0 的位置，对应的 type_angular 中的元素置 -1
-        # 创建一个与 list_neigh_angular 形状相同的张量，初始值为 -1
-        list_neigh_type_angular = torch.full_like(list_neigh_angular, -1)
-
-        # 找到 list_neigh_angular 中不为 0 的索引
-        valid_mask = list_neigh_angular != -1
-
-        # 将 list_neigh_angular 中的值减去 1，作为 Imagetype_map 的索引
-        valid_indices = list_neigh_angular[valid_mask]
-
-        # 使用 valid_indices 从 Imagetype_map 中获取对应的类型值
-        list_neigh_type_angular[valid_mask] = type_map[valid_indices]
+        ri_d_zbl[mask_zero] = 0
         
-        type_zbl = list_neigh_type_angular.clone().detach()
-        type_zbl[mask] = -1
-        # 计算zbl fk项
-        Ei_zbl = self.cal_zbl(ri_zbl, type_zbl, type_map, self.zbl/2)
-
-        # fc = self.cal_zbl_fc(ri_zbl, self.zbl/2)
-        # phi = self.cal_zbl_phi(ri_zbl, type_zbl, type_map, atom_map)
+        # 3. neigh_zbl
+        neigh_zbl = list_neigh_angular.clone().detach()
+        neigh_zbl[mask_zero] = -1
+        
+        # 4. type_zbl（保存 type index，用于后续取 Z）
+        type_zbl = torch.full_like(list_neigh_angular, -1, dtype=torch.long)
+        type_zbl[valid_neigh] = type_j_idx[valid_neigh]
+        type_zbl[mask_zero] = -1
+        
+        # 计算 ZBL 能量
+        Ei_zbl = self.cal_zbl(ri_zbl, type_zbl, type_map, rcut_per_pair)
         return Ei_zbl, ri_zbl, ri_d_zbl, neigh_zbl
 
     def cal_zbl(self,
                 ri_zbl: torch.Tensor,
-                zj:torch.Tensor, # type_zbl
+                type_zbl: torch.Tensor,      # type index (0/1 等)
                 type_map:torch.Tensor,
-                # atom_type: torch.Tensor,
-                rcut: float
-                ) -> torch.Tensor:
+                rcut_per_pair: torch.Tensor) -> torch.Tensor:
         rij = ri_zbl[:, :, 0]
-        mask = (rij.abs() >= rcut) & (rij <= 2 * rcut) # 超过截断半径的rij, fk(rij) 为0，那么 c*t*fc = 0,导数也为0，因为fk=0, dfk=0
-        fc = torch.zeros_like(rij)
-        fc[mask]  = 0.5 + 0.5 * torch.cos((self.Pi / rcut) * (rij[mask] - rcut))
-        mask = (rij.abs() < rcut)
-        fc[mask] = 1
+        safe_rij = torch.where(rij.abs() > 1e-8, rij, torch.tensor(1e-8, dtype=rij.dtype, device=rij.device))
+        
+        fc = torch.zeros_like(rij, dtype=rij.dtype)
+        if self.zbl_factor is not None:
+            # fc = 0.5 + 0.5 * cos(π * r / rcut_per_pair)   for r < rcut_per_pair
+            # fc = 0                                        for r >= rcut_per_pair
+            # inner = 0, outer = rcut_per_pair
+            mask_inner = (rij.abs() < rcut_per_pair) & (rij.abs() > 1e-8)
+            if mask_inner.any():
+                r_val = rij[mask_inner]
+                rcut_val = rcut_per_pair[mask_inner]
+                fc[mask_inner] = 0.5 + 0.5 * torch.cos(self.Pi * r_val / rcut_val)
+        else:
+            # inner = rcut/2, outer = rcut (rcut = self.zbl)
+            rcut = rcut_per_pair
+            mask_inner = (rij.abs() < rcut * 0.5)
+            fc[mask_inner] = 1.0
+            
+            mask_switch = (rij.abs() >= rcut * 0.5) & (rij.abs() <= rcut)
+            if mask_switch.any():
+                r_val = rij[mask_switch]
+                rcut_val = rcut[mask_switch]
+                fc[mask_switch] = 0.5 + 0.5 * torch.cos(
+                    (self.Pi / (rcut_val * 0.5)) * (r_val - rcut_val * 0.5)
+                )
+        # ==================== 真实原子序数 Z ====================
+        Z_i = self.atom_type_device[type_map].unsqueeze(1).expand_as(type_zbl)
+        Z_j = torch.full_like(type_zbl, -1, dtype=torch.long)
+        valid = type_zbl != -1
+        Z_j[valid] = self.atom_type_device[type_zbl[valid]]
+        
+        # ==================== 计算 phi 和 ei_zbl ====================
+        mask_compute = valid & (rij.abs() > 1e-8)
+        
+        x = torch.zeros_like(rij, dtype=rij.dtype)
+        x[mask_compute] = rij[mask_compute] * (
+            Z_i[mask_compute]**0.23 + Z_j[mask_compute]**0.23
+        ) * 2.134563
+        
+        phi = torch.zeros_like(rij, dtype=rij.dtype)
+        phi[mask_compute] = (
+            self.zbl_para[0] * torch.exp(-self.zbl_para[1] * x[mask_compute]) +
+            self.zbl_para[2] * torch.exp(-self.zbl_para[3] * x[mask_compute]) +
+            self.zbl_para[4] * torch.exp(-self.zbl_para[5] * x[mask_compute]) +
+            self.zbl_para[6] * torch.exp(-self.zbl_para[7] * x[mask_compute])
+        )
+        
+        ei_zbl = torch.zeros_like(rij, dtype=rij.dtype)
+        ei_zbl[mask_compute] = (
+            self.K_C_SP *
+            Z_i[mask_compute] *
+            Z_j[mask_compute] *
+            phi[mask_compute] *
+            fc[mask_compute] /
+            safe_rij[mask_compute]
+        )
+        
+        return 0.5 * ei_zbl.sum(dim=-1)
 
-        # zj = torch.zeros_like(type_zbl)
-        mask = zj != -1
-        zj[mask] = self.atom_type_device[zj[mask]]
-        zi = self.atom_type_device[type_map].unsqueeze(1).repeat(1, zj.shape[1])
-
-        # x = torch.zeros_like(rij)
-        # x[mask] = rij[mask] * ((zi.unsqueeze(1).repeat(zj.shape[0], 1, zj.shape[2]))[mask]**0.23 + zj[mask]**0.23) * 2.134563
-        # phi = torch.zeros_like(rij)
-        # phi[mask] = self.zbl_para[0] * torch.exp(-self.zbl_para[1]* x[mask]) + \
-        #         self.zbl_para[2] * torch.exp(-self.zbl_para[3]* x[mask]) + \
-        #             self.zbl_para[4] * torch.exp(-self.zbl_para[5]* x[mask]) + \
-        #                 self.zbl_para[6] * torch.exp(-self.zbl_para[7]* x[mask])
-
-
-        x = rij[mask] * (zi[mask]**0.23 + zj[mask]**0.23) * 2.134563
-        phi = torch.zeros_like(rij)
-        phi[mask] = self.zbl_para[0] * torch.exp(-self.zbl_para[1]* x) + \
-                self.zbl_para[2] * torch.exp(-self.zbl_para[3]* x) + \
-                    self.zbl_para[4] * torch.exp(-self.zbl_para[5]* x) + \
-                        self.zbl_para[6] * torch.exp(-self.zbl_para[7]* x)
-        ei_zbl = torch.zeros_like(rij)
-        ei_zbl[mask] = self.K_C_SP * zi[mask] * zj[mask] * phi[mask] * fc[mask] / rij[mask]
-
-        return 0.5 * ei_zbl.sum(-1)
-
-
-    def cal_zbl_fc(self,
-                rij: torch.Tensor,
-                rcut: float) -> torch.Tensor:
-        mask = (rij.abs() >= rcut) & (rij <= 2 * rcut) # 超过截断半径的rij, fk(rij) 为0，那么 c*t*fc = 0,导数也为0，因为fk=0, dfk=0
-        fc = torch.zeros_like(rij)
-        fc[mask]  = 0.5 + 0.5 * torch.cos((self.Pi / rcut) * (rij[mask] * rcut))
-        mask = (rij.abs() < rcut)
-        fc[mask] = 1
-        return fc
+    # def cal_zbl_fc(self,
+    #             rij: torch.Tensor,
+    #             rcut: float) -> torch.Tensor:
+    #     mask = (rij.abs() >= rcut) & (rij <= 2 * rcut) # 超过截断半径的rij, fk(rij) 为0，那么 c*t*fc = 0,导数也为0，因为fk=0, dfk=0
+    #     fc = torch.zeros_like(rij)
+    #     fc[mask]  = 0.5 + 0.5 * torch.cos((self.Pi / rcut) * (rij[mask] * rcut))
+    #     mask = (rij.abs() < rcut)
+    #     fc[mask] = 1
+    #     return fc
     
     # def cal_zbl_phi(self,
     #     rij: torch.Tensor,

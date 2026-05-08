@@ -296,6 +296,8 @@ class Descriptor(object):
             dicts["cutoff"] = self.cutoff
             if self.zbl is not None:
                 dicts["zbl"] = self.zbl
+                if self.use_typewise_cutoff_zbl is not None:
+                    dicts["use_typewise_cutoff_zbl"] = self.use_typewise_cutoff_zbl
             dicts["n_max"] = self.n_max
             dicts["basis_size"] = self.basis_size
             dicts["l_max"] = self.l_max

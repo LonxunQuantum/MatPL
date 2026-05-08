@@ -68,24 +68,49 @@ class nep_network:
         self.criterion = nn.MSELoss().to(self.device)
 
     def load_data(self):
-        if self.input_param.inference:
+        if self.input_param.inference:# 只在debug ckpt 推理时启用
             test_dataset = UniDataset(self.input_param.file_paths.test_data_path, 
                                             self.input_param.file_paths.format, 
                                             self.input_param.atom_type,
                                             cutoff_radial = self.input_param.nep_param.cutoff[0],
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
                                             cal_energy=False)
+
+            test_sampler = torch.utils.data.distributed.DistributedSampler(
+                test_dataset,
+                num_replicas=1,
+                rank=0,
+                shuffle=False
+            )
+
             test_loader = torch.utils.data.DataLoader(
                 test_dataset,
                 batch_size=1,
-                shuffle=False,
-                collate_fn= variable_length_collate_fn, 
-                num_workers=self.input_param.workers,   
+                shuffle=False,  # DistributedSampler 控制 shuffle
+                sampler=test_sampler,
+                collate_fn=variable_length_collate_fn, 
+                num_workers=self.input_param.workers,
                 drop_last=True,
                 pin_memory=True,
+                prefetch_factor=2,
+                persistent_workers=True
             )
             energy_shift = test_dataset.get_energy_shift()
-            return energy_shift, test_loader, None, test_dataset
+
+            forscaler_loader = torch.utils.data.DataLoader(
+                test_dataset,
+                batch_size=128,
+                shuffle=False,  # DistributedSampler 控制 shuffle
+                sampler=test_sampler,
+                collate_fn=variable_length_collate_fn_nolimit, 
+                num_workers=self.input_param.workers,
+                drop_last=False,
+                pin_memory=True,
+                prefetch_factor=2,
+                persistent_workers=True
+            )
+
+            return energy_shift, test_loader, None, forscaler_loader
         else:
             train_dataset = UniDataset(self.input_param.file_paths.train_data_path, 
                                             self.input_param.file_paths.format, 
@@ -167,7 +192,7 @@ class nep_network:
             keys = list(ckpt['state_dict'].keys())
             new_dict = {}
             
-            if 'q_scaler' in ckpt.keys(): # ckpt from single GPU training
+            if 'q_scaler' in keys: # ckpt from single GPU training
                 if self.is_rank_0:
                     print("The checkpoint file from single gpu training!")
                 for key in keys:
@@ -176,7 +201,7 @@ class nep_network:
                 if self.input_param.world_size == 1: # current is single gpus
                     new_dict = ckpt['state_dict']
                 
-                new_dict[f'{module}q_scaler'] = torch.tensor(list(ckpt['q_scaler']),  # set q_scaler
+                new_dict[f'{module}q_scaler'] = torch.tensor(list(ckpt['state_dict']['q_scaler']),  # set q_scaler
                                                     dtype=new_ckpt.state_dict()[f'{module}c_param_2'].dtype, 
                                                     device=new_ckpt.state_dict()[f'{module}c_param_2'].device)
                 for key in ["C3B", "C4B", "C5B", "atom_type_device", "max_NN_radial", "max_NN_angular"]:
@@ -210,12 +235,13 @@ class nep_network:
                                             find_unused_parameters=True)
         checkpoint = None
         model_path = None
-        # 不用考虑 inference，直接走的nepcpu or nepgpu
-        if self.input_param.recover_train and self.input_param.file_paths.model_load_path and \
+        # inference 用于debug，直接走的nepcpu or nepgpu
+        if self.input_param.inference:
+            model_path = self.input_param.file_paths.model_load_path
+        elif self.input_param.recover_train and self.input_param.file_paths.model_load_path and \
            os.path.exists(self.input_param.file_paths.model_load_path):
             model_path = self.input_param.file_paths.model_load_path
-        elif self.input_param.inference:
-            model_path = self.input_param.file_paths.model_load_path
+        
         else:
             if self.input_param.nep_param.model_wb is None:
                 if self.input_param.file_paths.model_load_path and \
@@ -231,8 +257,9 @@ class nep_network:
             checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
             checkpoint = _adjust_ckpt_keys(checkpoint, model) # 适配旧版本以及单卡多卡版本
             model.load_state_dict(checkpoint["state_dict"])
+            print(model.state_dict()['module.fitting_net.1.layers.0.weight'])
             if "epoch" in checkpoint:
-                if self.input_param.optimizer_param.reset_epoch:
+                if self.input_param.optimizer_param.reset_epoch and self.input_param.inference is False:
                     if checkpoint["epoch"] != 1:
                         print(f"Rank {self.input_param.rank}: Resetting epoch to 1 from {checkpoint['epoch']}")
                     self.input_param.optimizer_param.start_epoch = 1
@@ -735,14 +762,31 @@ class nep_network:
     '''
     def inference(self):
         # do inference
-        energy_shift, train_loader, val_loader, _ = self.load_data()
-        model, optimizer,_ = self.load_model_optimizer(energy_shift)
-        max_NN_radial, min_NN_radial, max_NN_angular, min_NN_angular = \
-                        calculate_neighbor_num_max_min(dataset=train_loader.train_datset, device = self.device)
-        
-        model.max_NN_radial  = max(model.max_NN_radial, max_NN_radial) # for single gpu
-        model.max_NN_angular = max(model.max_NN_angular, max_NN_angular)
-    
+        self.input_param.world_size
+        energy_shift, train_loader, val_loader, forscaler_loader = self.load_data()
+        local_global_max, local_global_min, local_max_NN_radial, local_min_NN_radial, local_max_NN_angular, local_min_NN_angular = calculate_neighbor_scaler(
+                    forscaler_loader,
+                    self.input_param.nep_param.n_max[0],      # model.n_max_radial,
+                    self.input_param.nep_param.basis_size[0], # model.n_base_radial,
+                    self.input_param.nep_param.n_max[1],      # model.n_max_angular,
+                    self.input_param.nep_param.basis_size[1], # model.n_base_angular,
+                    self.input_param.nep_param.l_max[0],      # model.l_max_3b,
+                    self.input_param.nep_param.l_max[1],      # model.l_max_4b,
+                    self.input_param.nep_param.l_max[2],      # model.l_max_5b,
+                    self.device,
+                    num_workers=self.input_param.workers)
+
+        # model.max_NN_radial  = max(model.max_NN_radial, max_NN_radial) # for single gpu
+        # model.max_NN_angular = max(model.max_NN_angular, max_NN_angular)
+        q_scaler = 1.0 / (local_global_max - local_global_min)
+        model, optimizer,_ = self.load_model_optimizer(energy_shift, 
+                                                    avg_atom_num=1, 
+                                                    iterations=len(train_loader), 
+                                                    q_scaler = q_scaler, 
+                                                    max_NN_radial = local_max_NN_radial, 
+                                                    max_NN_angular = local_max_NN_angular)
+
+
         start = time.time()
         res_pd, etot_label_list, etot_predict_list, ei_label_list, ei_predict_list, force_label_list, force_predict_list, virial_label_list, virial_predict_list\
         = predict(train_loader, model, self.criterion, self.device, self.input_param)

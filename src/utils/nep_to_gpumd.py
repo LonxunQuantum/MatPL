@@ -107,14 +107,19 @@ def extract_model(nep_path:str):
         ann = model['json_file']['model']['fitting_net']['network_size']
     else :
         ann = model['json_file']['model']['fitting_net']['network_size'][0]
-    zbl = model['json_file']['model']['descriptor']['zbl'] if 'zbl' in model['json_file']['model']['descriptor'].keys() else None
     atom_names = get_atomic_name_from_number(model_atom_type)
+
+    zbl = model['json_file']['model']['descriptor']['zbl'] if 'zbl' in model['json_file']['model']['descriptor'].keys() else None
     if zbl is None:
         head_content =  "nep5   {} {}\n".format(len(atom_names), " ".join(map(str, atom_names)))
     else:
+        zbl_factor = model['json_file']['model']['descriptor']['use_typewise_cutoff_zbl'] if 'use_typewise_cutoff_zbl' in model['json_file']['model']['descriptor'].keys() else None
         head_content =  "nep5_zbl   {} {}\n".format(len(atom_names), " ".join(map(str, atom_names)))
-        head_content +=  "zbl   {} {}\n".format(zbl/2, zbl)
-    
+        if zbl_factor is None:
+            head_content +=  "zbl   {} {}\n".format(zbl/2, zbl)
+        else:
+            head_content +=  "zbl   {} {} {}\n".format(zbl/2, zbl, zbl_factor)
+
     head_content += "cutoff {} {} {} {}\n".format(cutoff[0], cutoff[1], max_NN_radial, max_NN_angular)            #cutoff 6.0 6.0
     head_content += "n_max  {}\n".format(" ".join(map(str, n_max)))             #n_max  4 4
     head_content += "basis_size {}\n".format(" ".join(map(str, basis_size)))    #basis_size 12 12

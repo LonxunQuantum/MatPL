@@ -3,7 +3,7 @@ def comm_info():
     print("\n" + "=" * 50) 
     print("          MATPL Basic Information")
     print("=" * 50) 
-    print("Version: 2025.03")
+    print("Version: 2026.03")
     print("Compatible pwdata: >= 0.5.6")
     print("Compatible pwact: >= 0.4.8")
     print("Contact:  support@pwmat.com")

@@ -43,6 +43,8 @@ class NEP_CPU
 {
 public:
   struct ParaMB {
+    bool use_typewise_cutoff_zbl = false;
+    double typewise_cutoff_zbl_factor = 0.0;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
     int version = 4;
     double rc_radial = 0.0;

@@ -82,6 +82,21 @@ const std::string ELEMENTS[NUM_ELEMENTS] = {
   "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
   "Pa", "U",  "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"};
 
+const double COVALENT_RADIUS[94] = {
+  0.426667, 0.613333, 1.6,     1.25333, 1.02667, 1.0,     0.946667, 0.84,
+  0.853333, 0.893333, 1.86667, 1.66667, 1.50667, 1.38667, 1.46667, 1.36,
+  1.32,     1.28,     2.34667, 2.05333, 1.77333, 1.62667, 1.61333, 1.46667,
+  1.42667,  1.38667,  1.33333, 1.32,    1.34667, 1.45333, 1.49333, 1.45333,
+  1.53333,  1.46667,  1.52,    1.56,    2.52,     2.22667, 1.96,     1.85333,
+  1.76,     1.65333,  1.53333, 1.50667, 1.50667, 1.44,    1.53333,  1.64,
+  1.70667,  1.68,     1.68,     1.64,     1.76,    1.74667, 2.78667, 2.34667,
+  2.16,     1.96,     2.10667,  2.09333,  2.08,     2.06667, 2.01333, 2.02667,
+  2.01333,  2.0,      1.98667,  1.98667, 1.97333,  2.04,    1.94667, 1.82667,
+  1.74667,  1.64,     1.57333,  1.54667, 1.48,     1.49333, 1.50667, 1.76,
+  1.73333,  1.73333,  1.81333,  1.74667, 1.84,    1.89333, 2.68,     2.41333,
+  2.22667,  2.10667,  2.02667,  2.04,     2.05333, 2.06667
+};
+
 int countNonEmptyLines(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -1267,6 +1282,7 @@ void find_force_angular(
 }
 
 void find_force_ZBL(
+  NEP_CPU::ParaMB paramb,
   const int N,
   const NEP_CPU::ZBL& zbl,
   const int* g_NN,
@@ -1284,24 +1300,25 @@ void find_force_ZBL(
 {
   for (int n1 = 0; n1 < N; ++n1) {
     int type1 = g_type[n1];
-    double zi = zbl.atomic_numbers[type1];
+    int zi = zbl.atomic_numbers[type1];
     double pow_zi = pow(zi, 0.23);
     for (int i1 = 0; i1 < g_NN[n1]; ++i1) {
       int index = i1 * N + n1;
       int n2 = g_NL[index];
       double r12[3] = {g_x12[index], g_y12[index], g_z12[index]};
       double d12sq = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
-      double max_rc_outer = 2.5;
-      if (d12sq >= max_rc_outer * max_rc_outer) {
-        continue;
-      }
+      // double max_rc_outer = 2.5; This restriction has been removed in the latest version of GPUMD.
+      // if (d12sq >= max_rc_outer * max_rc_outer) {
+      //   continue;
+      // }
       double d12 = sqrt(d12sq);
       double d12inv = 1.0 / d12;
       double f, fp;
       int type2 = g_type[n2];
-      double zj = zbl.atomic_numbers[type2];
+      int zj = zbl.atomic_numbers[type2];
       double a_inv = (pow_zi + pow(zj, 0.23)) * 2.134563;
       double zizj = K_C_SP * zi * zj;
+  
       if (zbl.flexibled) {
         int t1, t2;
         if (type1 < type2) {
@@ -1318,8 +1335,16 @@ void find_force_ZBL(
         }
         find_f_and_fp_zbl(ZBL_para, zizj, a_inv, d12, d12inv, f, fp);
       } else {
-        find_f_and_fp_zbl(zizj, a_inv, zbl.rc_inner, zbl.rc_outer, d12, d12inv, f, fp);
+        double rc_inner = zbl.rc_inner;
+        double rc_outer = zbl.rc_outer;
+        if (paramb.use_typewise_cutoff_zbl) {
+          // zi and zj start from 1, so need to minus 1 here
+          rc_outer = std::min((COVALENT_RADIUS[zi - 1] + COVALENT_RADIUS[zj - 1]) * paramb.typewise_cutoff_zbl_factor, rc_outer);
+          rc_inner = 0.0f;
+        }
+        find_f_and_fp_zbl(zizj, a_inv, rc_inner, rc_outer, d12, d12inv, f, fp);
       }
+
       double f2 = fp * d12inv * 0.5;
       double f12[3] = {r12[0] * f2, r12[1] * f2, r12[2] * f2};
       g_fx[n1] += f12[0];
@@ -1817,18 +1842,25 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
     zbl.atomic_numbers[n] = atomic_number;
   }
 
-  // zbl 0.7 1.4
+  // zbl 1.6 3.2 0.7  inner outer factor, factor is optional
   if (zbl.enabled) {
     tokens = get_tokens(input);
-    if (tokens.size() != 3) {
-      print_tokens(tokens);
-      std::cout << "This line should be zbl rc_inner rc_outer." << std::endl;
+    if (tokens.size() != 3 && tokens.size() != 4) {
+      std::cout << "This line should be zbl rc_inner rc_outer [zbl_factor]." << std::endl;
       exit(1);
     }
     zbl.rc_inner = get_double_from_token(tokens[1], __FILE__, __LINE__);
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
     if (zbl.rc_inner == 0 && zbl.rc_outer == 0) {
       zbl.flexibled = true;
+      // printf("    has the flexible ZBL potential\n");
+    } else {
+      if (tokens.size() == 4) {
+        paramb.typewise_cutoff_zbl_factor = get_double_from_token(tokens[3], __FILE__, __LINE__);
+        paramb.use_typewise_cutoff_zbl = true;
+        // printf("    has the universal ZBL with typewise cutoff with a factor of %g.\n", \
+          paramb.typewise_cutoff_zbl_factor);
+      }
     }
   }
 
@@ -1979,7 +2011,7 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
     if (is_gpumd_nep == true && (n >= annmb.num_para_ann + 1) && (n < annmb.num_para_ann + paramb.num_types)) {
       parameters[n] = parameters[annmb.num_para_ann];
       if (is_rank_0) {
-        printf("copy the last bias parameters[%d]=%f to parameters[%d]=%f \n", annmb.num_para_ann, parameters[annmb.num_para_ann], n, parameters[n]);
+        printf("    Copy the last bias parameters[%d]=%f to parameters[%d]=%f \n", annmb.num_para_ann, parameters[annmb.num_para_ann], n, parameters[n]);
       }    
     } else {
       tokens = get_tokens(input);
@@ -2007,10 +2039,10 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
   if (is_rank_0) {
 
     if (paramb.num_types == 1) {
-      std::cout << "Use the NEP" << paramb.version << " potential with " << paramb.num_types
+      std::cout << "    Use the NEP" << paramb.version << " potential with " << paramb.num_types
                 << " atom type.\n";
-    } else {
-      std::cout << "Use the NEP" << paramb.version << " potential with " << paramb.num_types
+    } else { 
+      std::cout << "    Use the NEP" << paramb.version << " potential with " << paramb.num_types
                 << " atom types.\n";
     }
 
@@ -2023,8 +2055,11 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
       if (zbl.flexibled) {
         std::cout << "    has flexible ZBL.\n";
       } else {
-        std::cout << "    has universal ZBL with inner cutoff " << zbl.rc_inner
-                  << " A and outer cutoff " << zbl.rc_outer << " A.\n";
+        if (tokens.size() == 4) {
+          printf("    has the universal ZBL with typewise cutoff with a factor of %g.\n", paramb.typewise_cutoff_zbl_factor);
+        } else {
+          printf("    has the universal ZBL with inner cutoff %g A and outer cutoff %g A.\n", zbl.rc_inner, zbl.rc_outer);
+        }
       }
     }
     std::cout << "    radial cutoff = " << paramb.rc_radial << " A.\n";
@@ -2202,7 +2237,7 @@ void NEP_CPU::compute(
   // }
   if (zbl.enabled) {
     find_force_ZBL(
-      N, zbl, NN_angular.data(), NL_angular.data(), type.data(), r12.data() + size_x12 * 3,
+      paramb, N, zbl, NN_angular.data(), NL_angular.data(), type.data(), r12.data() + size_x12 * 3,
       r12.data() + size_x12 * 4, r12.data() + size_x12 * 5, force.data(), force.data() + N,
       force.data() + N * 2, nullptr, potential.data(), total_virial.data());
   }

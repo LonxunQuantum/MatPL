@@ -69,6 +69,7 @@ class NepParam(object):
         self.type_num = type_num
         self.zbl = None
         use_zbl = False
+        self.use_typewise_cutoff_zbl = None
         self.use_fixed_zbl = False
         if "zbl" in lines[1]:
             zbl_line = lines[1].split()
@@ -77,14 +78,9 @@ class NepParam(object):
                 raise Exception("ERROR! The fixed zbl is not supported!")
             else:
                 self.zbl = float(zbl_line[2])
-                # print("use zbl: {}".format(self.zbl))
-                # if self.zbl[0] > self.zbl[1] or self.zbl[0] > 2.5 :
-                #     raise Exception("ERROR! the inner should smaller than outer of zbl in nep.txt! And both of them should be smaller than 2.5!\n The inner = 0.5*outer should be a reasonable choice. ")
-                # elif self.zbl[1] > 2.5:
-                #     print("Warning! the input zbl outer param should smaller than 2.5! Automatically adjust outer to 2.5!")
-                #     self.zbl[1] = 2.5
+                if len(zbl_line) > 3:
+                    self.use_typewise_cutoff_zbl = float(zbl_line[3])
                 lines[1:-1] = lines[2:]
-                
             use_zbl = True
             
         cutoffs = lines[1].split()
@@ -219,6 +215,9 @@ class NepParam(object):
         self.model_type = 0 # select to train potential 0, dipole 1, or polarizability 2
         self.prediction = 0 # select between training and prediction (inference)
         self.zbl = get_parameter("zbl", descriptor_dict, None)
+        self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
+        if self.zbl is None and self.use_typewise_cutoff_zbl is not None:
+            raise Exception("ERROR! The use_typewise_cutoff_zbl parameter must be used in conjunction with the zbl parameter.")
         self.train_2b = get_parameter("train_2b", descriptor_dict, True)
         # if self.zbl is not None:
         #     if self.zbl > 5 or self.zbl < 1.0:
@@ -284,68 +283,6 @@ class NepParam(object):
         self.model_wb = None
 
     '''
-    read params from nep.txt
-    description: 
-    param {*} self
-    param {*} file_path
-    return {*}
-    author: wuxingxing
-    '''    
-    def set_params_from_neptxt(self, file_path="nep.txt"):
-        # self.c2_param = None
-        # self.c3_param = None
-        # self.q_scaler = None
-        # self.model_wb = None
-        pass
-    
-    def read_nep_param_from_nep_file(self, nep_in_file:str):
-        with open(nep_in_file, 'r') as rf:
-            lines = rf.readlines()
-        nep_dict = {}
-        for line in lines:
-            substring = line.split("#")[0].strip()
-            if len(substring.split()) > 1:
-                key = substring.split()[0]
-                value_str = substring.replace(key, "")
-                nep_dict[key.lower()] = value_str.strip()
-        return nep_dict
-
-    def to_nep_in_txt(self):
-        content = ""
-        content += "version     {}\n".format(self.version)
-        content += "type        {}\n".format(self.type)
-        # if self.type_weight is not None:
-        #     content += "type_weight {}\n".format(self.type_weight)
-        content += "model_type  {}\n".format(self.model_type)
-        content += "prediction  {}\n".format(self.prediction)
-        if self.zbl is not None: #' '.join(map(str, int_list))
-            content += "zbl         {}\n".format(self.zbl)
-        content += "cutoff      {}\n".format(" ".join(map(str, self.cutoff)))
-        content += "n_max       {}\n".format(" ".join(map(str, self.n_max)))
-        content += "basis_size  {}\n".format(" ".join(map(str, self.basis_size)))
-        content += "l_max       {}\n".format(" ".join(map(str, self.l_max)))
-        content += "neuron      {}\n".format(self.neuron[0]) # filter the output layer
-        return content
-    
-    def to_nep_txt(self, max_NN_radial=None, max_NN_angular=None):
-        content = ""
-        if self.zbl is not None:
-            content += "nep4_zbl   {}\n".format(self.type)    #line1
-            content += "zbl   {} {}\n".format(self.zbl/2, self.zbl)    #line zbl
-        else:
-            content += "nep4   {}\n".format(self.type)    #line1
-        if max_NN_radial is not None:
-            cutoff_line = "{} {} {} {}".format(self.cutoff[0], self.cutoff[1], max_NN_radial, max_NN_angular)
-        else:
-            cutoff_line = "{} {}".format(self.cutoff[0], self.cutoff[1])
-        content += "cutoff {}\n".format(cutoff_line)    #line2
-        content += "n_max  {}\n".format(" ".join(map(str, self.n_max)))    #line3
-        content += "basis_size {}\n".format(" ".join(map(str, self.basis_size)))    #line4
-        content += "l_max  {}\n".format(" ".join(map(str, self.l_max)))    #line5
-        content += "ANN    {} {}\n".format(self.neuron[0], 0)    #line6
-        return content
-
-    '''
     description: 
         the format of type in nep.in file is as:
             "type 2 Te Pb # this is a mandatory keyword"
@@ -359,3 +296,68 @@ class NepParam(object):
         for atom in atom_type_list:
             atom_names.append(element_table[atom])
         return str(len(atom_type_list)) + " " + " ".join(atom_names)
+
+
+    # def to_nep_in_txt(self):
+    #     content = ""
+    #     content += "version     {}\n".format(self.version)
+    #     content += "type        {}\n".format(self.type)
+    #     # if self.type_weight is not None:
+    #     #     content += "type_weight {}\n".format(self.type_weight)
+    #     content += "model_type  {}\n".format(self.model_type)
+    #     content += "prediction  {}\n".format(self.prediction)
+    #     if self.zbl is not None: #' '.join(map(str, int_list))
+    #         content += "zbl         {}\n".format(self.zbl)
+    #         if self.use_typewise_cutoff_zbl is not None:
+    #             content += "use_typewise_cutoff_zbl         {}\n".format(self.use_typewise_cutoff_zbl)
+    #     content += "cutoff      {}\n".format(" ".join(map(str, self.cutoff)))
+    #     content += "n_max       {}\n".format(" ".join(map(str, self.n_max)))
+    #     content += "basis_size  {}\n".format(" ".join(map(str, self.basis_size)))
+    #     content += "l_max       {}\n".format(" ".join(map(str, self.l_max)))
+    #     content += "neuron      {}\n".format(self.neuron[0]) # filter the output layer
+    #     return content
+    
+    # def to_nep_txt(self, max_NN_radial=None, max_NN_angular=None):
+    #     content = ""
+    #     if self.zbl is not None:
+    #         content += "nep4_zbl   {}\n".format(self.type)    #line1
+    #         content += "zbl   {} {}\n".format(self.zbl/2, self.zbl)    #line zbl
+    #     else:
+    #         content += "nep4   {}\n".format(self.type)    #line1
+    #     if max_NN_radial is not None:
+    #         cutoff_line = "{} {} {} {}".format(self.cutoff[0], self.cutoff[1], max_NN_radial, max_NN_angular)
+    #     else:
+    #         cutoff_line = "{} {}".format(self.cutoff[0], self.cutoff[1])
+    #     content += "cutoff {}\n".format(cutoff_line)    #line2
+    #     content += "n_max  {}\n".format(" ".join(map(str, self.n_max)))    #line3
+    #     content += "basis_size {}\n".format(" ".join(map(str, self.basis_size)))    #line4
+    #     content += "l_max  {}\n".format(" ".join(map(str, self.l_max)))    #line5
+    #     content += "ANN    {} {}\n".format(self.neuron[0], 0)    #line6
+    #     return content
+
+    # '''
+    # read params from nep.txt
+    # description: 
+    # param {*} self
+    # param {*} file_path
+    # return {*}
+    # author: wuxingxing
+    # '''    
+    # def set_params_from_neptxt(self, file_path="nep.txt"):
+    #     # self.c2_param = None
+    #     # self.c3_param = None
+    #     # self.q_scaler = None
+    #     # self.model_wb = None
+    #     pass
+    
+    # def read_nep_param_from_nep_file(self, nep_in_file:str):
+    #     with open(nep_in_file, 'r') as rf:
+    #         lines = rf.readlines()
+    #     nep_dict = {}
+    #     for line in lines:
+    #         substring = line.split("#")[0].strip()
+    #         if len(substring.split()) > 1:
+    #             key = substring.split()[0]
+    #             value_str = substring.replace(key, "")
+    #             nep_dict[key.lower()] = value_str.strip()
+    #     return nep_dict
