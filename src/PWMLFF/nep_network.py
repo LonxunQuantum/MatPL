@@ -257,7 +257,6 @@ class nep_network:
             checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
             checkpoint = _adjust_ckpt_keys(checkpoint, model) # 适配旧版本以及单卡多卡版本
             model.load_state_dict(checkpoint["state_dict"])
-            print(model.state_dict()['module.fitting_net.1.layers.0.weight'])
             if "epoch" in checkpoint:
                 if self.input_param.optimizer_param.reset_epoch and self.input_param.inference is False:
                     if checkpoint["epoch"] != 1:
