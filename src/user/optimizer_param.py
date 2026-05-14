@@ -27,7 +27,7 @@ class OptimizerParam(object):
             else:
                 if self.norm_type not in [1, 2]:
                     raise Exception("ERROR! the input norm_type only could be set as '1' for L1 or '2' for L2!")
-        
+
         # learining rate,  https://zhuanlan.zhihu.com/p/261134624
         self.t_0    = get_parameter("t_0", optimizer_dict, None)
         self.t_mult   = get_parameter("t_mult", optimizer_dict, None)
@@ -75,11 +75,13 @@ class OptimizerParam(object):
         else:
             pass
 
-        self.train_energy = get_parameter("train_energy", optimizer_dict, True) 
-        self.train_force = get_parameter("train_force", optimizer_dict, True) 
-        self.train_ei = get_parameter("train_ei", optimizer_dict, False) 
-        self.train_virial = get_parameter("train_virial", optimizer_dict, False) 
-        self.train_egroup = get_parameter("train_egroup", optimizer_dict, False) 
+        self.train_energy = get_parameter("train_energy", optimizer_dict, True)
+        self.train_force = get_parameter("train_force", optimizer_dict, True)
+        self.train_ei = get_parameter("train_ei", optimizer_dict, False)
+        self.train_virial = get_parameter("train_virial", optimizer_dict, False)
+        self.train_egroup = get_parameter("train_egroup", optimizer_dict, False)
+        default_train_charge = bool(nep_param is not None and getattr(nep_param, "charge_mode", 0) > 0)
+        self.train_charge = get_parameter("train_charge", optimizer_dict, default_train_charge)
 
         self.force_delta = None
         self.population = None
@@ -89,37 +91,42 @@ class OptimizerParam(object):
         self.pre_fac_ei = 1.0
         self.pre_fac_virial = 1.0
         self.pre_fac_egroup = 0.1
+        self.pre_fac_charge = 0.1
 
         if "KF" in self.opt_name.upper():
-            self.pre_fac_force = get_parameter("pre_fac_force", optimizer_dict, 2.0) 
-            self.pre_fac_etot = get_parameter("pre_fac_etot", optimizer_dict, 1.0) 
-            self.pre_fac_ei = get_parameter("pre_fac_ei", optimizer_dict, 1.0) 
-            self.pre_fac_virial = get_parameter("pre_fac_virial", optimizer_dict, 1.0) 
-            self.pre_fac_egroup = get_parameter("pre_fac_egroup", optimizer_dict, 0.1) 
-            
-        elif "ADAM" in self.opt_name.upper():
-            self.start_pre_fac_force = get_parameter("start_pre_fac_force", optimizer_dict, 1000) 
-            self.start_pre_fac_etot = get_parameter("start_pre_fac_etot", optimizer_dict, 0.02) 
-            self.start_pre_fac_ei = get_parameter("start_pre_fac_ei", optimizer_dict, 0.1) 
-            self.start_pre_fac_virial = get_parameter("start_pre_fac_virial", optimizer_dict, 50.0) 
-            self.start_pre_fac_egroup = get_parameter("start_pre_fac_egroup", optimizer_dict, 0.02) 
+            self.pre_fac_force = get_parameter("pre_fac_force", optimizer_dict, 2.0)
+            self.pre_fac_etot = get_parameter("pre_fac_etot", optimizer_dict, 1.0)
+            self.pre_fac_ei = get_parameter("pre_fac_ei", optimizer_dict, 1.0)
+            self.pre_fac_virial = get_parameter("pre_fac_virial", optimizer_dict, 1.0)
+            self.pre_fac_egroup = get_parameter("pre_fac_egroup", optimizer_dict, 0.1)
+            self.pre_fac_charge = get_parameter("pre_fac_charge", optimizer_dict, 0.1)
 
-            self.end_pre_fac_force = get_parameter("end_pre_fac_force", optimizer_dict, 1.0) 
-            self.end_pre_fac_etot = get_parameter("end_pre_fac_etot", optimizer_dict, 1.0) 
-            self.end_pre_fac_ei = get_parameter("end_pre_fac_ei", optimizer_dict, 2.0) 
-            self.end_pre_fac_virial = get_parameter("end_pre_fac_virial", optimizer_dict, 1.0) 
-            self.end_pre_fac_egroup = get_parameter("end_pre_fac_egroup", optimizer_dict, 1.0) 
+        elif "ADAM" in self.opt_name.upper():
+            self.start_pre_fac_force = get_parameter("start_pre_fac_force", optimizer_dict, 1000)
+            self.start_pre_fac_etot = get_parameter("start_pre_fac_etot", optimizer_dict, 0.02)
+            self.start_pre_fac_ei = get_parameter("start_pre_fac_ei", optimizer_dict, 0.1)
+            self.start_pre_fac_virial = get_parameter("start_pre_fac_virial", optimizer_dict, 50.0)
+            self.start_pre_fac_egroup = get_parameter("start_pre_fac_egroup", optimizer_dict, 0.02)
+            self.start_pre_fac_charge = get_parameter("start_pre_fac_charge", optimizer_dict, 0.1)
+
+            self.end_pre_fac_force = get_parameter("end_pre_fac_force", optimizer_dict, 1.0)
+            self.end_pre_fac_etot = get_parameter("end_pre_fac_etot", optimizer_dict, 1.0)
+            self.end_pre_fac_ei = get_parameter("end_pre_fac_ei", optimizer_dict, 2.0)
+            self.end_pre_fac_virial = get_parameter("end_pre_fac_virial", optimizer_dict, 1.0)
+            self.end_pre_fac_egroup = get_parameter("end_pre_fac_egroup", optimizer_dict, 1.0)
+            self.end_pre_fac_charge = get_parameter("end_pre_fac_charge", optimizer_dict, 0.1)
 
     def to_linear_dict(self):
         opt_dict = {}
         opt_dict["train_energy"] = self.train_energy
         opt_dict["train_force"] = self.train_force
+        opt_dict["train_charge"] = self.train_charge
         # opt_dict["train_ei"] = self.train_ei
         opt_dict["pre_fac_force"] = self.pre_fac_force
         opt_dict["pre_fac_etot"] = self.pre_fac_etot
         # opt_dict["pre_fac_ei"] = self.pre_fac_ei
         return opt_dict
-    
+
     def to_dict(self):
         opt_dict = {}
         opt_dict["optimizer"]=self.opt_name
@@ -129,23 +136,25 @@ class OptimizerParam(object):
         opt_dict["print_freq"] = self.print_freq
         if self.lambda_1 is not None:
             opt_dict["lambda_1"] =  self.lambda_1
-        if self.lambda_2 is not None:  
+        if self.lambda_2 is not None:
             opt_dict["lambda_2"] =  self.lambda_2
 
         if "KF" in self.opt_name:
             if "LKF" in self.opt_name:
-                opt_dict["block_size"] = self.block_size 
+                opt_dict["block_size"] = self.block_size
             opt_dict["kalman_lambda"] = self.kalman_lambda
             opt_dict["kalman_nue"] = self.kalman_nue
 
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force
+            opt_dict["train_charge"] = self.train_charge
             # opt_dict["train_ei"] = self.train_ei
             opt_dict["train_virial"] = self.train_virial
             # opt_dict["train_egroup"] = self.train_egroup
-    
+
             opt_dict["pre_fac_force"] = self.pre_fac_force
             opt_dict["pre_fac_etot"] = self.pre_fac_etot
+            opt_dict["pre_fac_charge"] = self.pre_fac_charge
             # opt_dict["pre_fac_ei"] = self.pre_fac_ei
             opt_dict["pre_fac_virial"] = self.pre_fac_virial
             # opt_dict["pre_fac_egroup"] = self.pre_fac_egroup
@@ -164,18 +173,21 @@ class OptimizerParam(object):
 
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force
+            opt_dict["train_charge"] = self.train_charge
             # opt_dict["train_ei"] = self.train_ei
             opt_dict["train_virial"] = self.train_virial
             # opt_dict["train_egroup"] = self.train_egroup
 
             opt_dict["start_pre_fac_force"] = self.start_pre_fac_force
             opt_dict["start_pre_fac_etot"] = self.start_pre_fac_etot
+            opt_dict["start_pre_fac_charge"] = self.start_pre_fac_charge
             # opt_dict["start_pre_fac_ei"] = self.start_pre_fac_ei
             opt_dict["start_pre_fac_virial"] = self.start_pre_fac_virial
             # opt_dict["start_pre_fac_egroup"] = self.start_pre_fac_egroup
 
             opt_dict["end_pre_fac_force"] = self.end_pre_fac_force
             opt_dict["end_pre_fac_etot"] = self.end_pre_fac_etot
+            opt_dict["end_pre_fac_charge"] = self.end_pre_fac_charge
             # opt_dict["end_pre_fac_ei"] = self.end_pre_fac_ei
             opt_dict["end_pre_fac_virial"] = self.end_pre_fac_virial
             # opt_dict["end_pre_fac_egroup"] = self.end_pre_fac_egroup

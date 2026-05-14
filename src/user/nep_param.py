@@ -37,6 +37,8 @@ class NepParam(object):
         self.fix_cij = False
         self.fix_hiddenlayer=False
         self.fix_outlayer=False
+        self.charge_mode = 0
+        self.charge_output_num = 1
 
     '''
     description: 
@@ -55,6 +57,11 @@ class NepParam(object):
 
         line_1 = lines[0].split()
         version, type_num, type_list = line_1[0], int(line_1[1]), line_1[2:]
+        self.charge_mode = 0
+        if "charge" in version:
+            charge_token = version.split("charge")[-1]
+            self.charge_mode = int(charge_token) if charge_token else 1
+        self.charge_output_num = 3 if self.charge_mode >= 3 else (2 if self.charge_mode else 1)
         type_list = get_atomic_name_from_str(type_list)
 
         set1, set2 = set(atom_type_train), set(type_list)
@@ -108,10 +115,13 @@ class NepParam(object):
         start_index = 6
         w0_num = self.feature_nums*ann_num
         b0_num = ann_num
+        w1_num = b0_num * self.charge_output_num
         if "5" in version:
-            ann_nums= (w0_num + b0_num*2) * self.type_num + self.type_num + 1
+            ann_nums= (w0_num + b0_num + w1_num) * self.type_num + self.type_num + 1
         else:
-            ann_nums= (w0_num + b0_num*2) * self.type_num + self.type_num
+            ann_nums= (w0_num + b0_num + w1_num) * self.type_num + self.type_num
+            if self.charge_mode:
+                ann_nums += 2
         need_line = 6 + ann_nums + self.c_num + self.feature_nums
         if use_zbl:
             if self.use_fixed_zbl:
@@ -131,8 +141,8 @@ class NepParam(object):
             b0 = np.array([-float(_) for _ in lines[start_index : start_index + b0_num]]).reshape(1,b0_num)
             start_index = start_index + b0_num
             self.model_wb.append(b0)
-            w1 = np.array([float(_) for _ in lines[start_index : start_index + b0_num]]).reshape(b0_num, 1)
-            start_index = start_index + b0_num
+            w1 = np.array([float(_) for _ in lines[start_index : start_index + w1_num]]).reshape(b0_num, self.charge_output_num)
+            start_index = start_index + w1_num
             self.model_wb.append(w1)
             if "5" in version:
                 nep5_bias.append(-float(lines[start_index]))
@@ -141,14 +151,29 @@ class NepParam(object):
         if "4" in version and is_gpumd_nep:
             print("The nep.txt file is from GPUMD")
             common_bias = -float(lines[start_index])
-            self.bias_lastlayer = np.array([common_bias for _ in range(0, self.type_num)])
+            if self.charge_output_num == 1:
+                self.bias_lastlayer = np.array([common_bias for _ in range(0, self.type_num)])
+            else:
+                self.bias_lastlayer = np.zeros((self.type_num, self.charge_output_num))
+                self.bias_lastlayer[:, 0] = common_bias
             start_index = start_index + 1
+            if self.charge_mode:
+                start_index = start_index + 2
         if "4" in version and is_gpumd_nep is False:
-            self.bias_lastlayer = np.array([-float(_) for _ in lines[start_index : start_index + self.type_num]])
+            bias_values = np.array([-float(_) for _ in lines[start_index : start_index + self.type_num]])
+            if self.charge_output_num == 1:
+                self.bias_lastlayer = bias_values
+            else:
+                self.bias_lastlayer = np.zeros((self.type_num, self.charge_output_num))
+                self.bias_lastlayer[:, 0] = bias_values
             start_index = start_index + self.type_num
         if "5" in version:
             start_index = start_index + 1 # the 0 of comm bias 
-            self.bias_lastlayer = np.array(nep5_bias)
+            if self.charge_output_num == 1:
+                self.bias_lastlayer = np.array(nep5_bias)
+            else:
+                self.bias_lastlayer = np.zeros((self.type_num, self.charge_output_num))
+                self.bias_lastlayer[:, 0] = np.array(nep5_bias)
         # attention: the value order in c++ duda is same as in cpu memory of the inintial numpy array
         _c2_param = np.array([float(_) for _ in lines[start_index:start_index + self.two_c_num]]).reshape(self.n_max[0]+1, self.basis_size[0]+1, self.type_num, self.type_num).transpose(2, 3, 0, 1)
         self.c2_param = []
@@ -214,6 +239,10 @@ class NepParam(object):
         self.type_weight = get_parameter("type_weight", descriptor_dict, type_list_weight_default) # force weights for different atom types
         self.model_type = 0 # select to train potential 0, dipole 1, or polarizability 2
         self.prediction = 0 # select between training and prediction (inference)
+        self.charge_mode = get_parameter("charge_mode", descriptor_dict, 0)
+        if self.charge_mode not in [0, 1, 2, 3]:
+            raise Exception("ERROR! charge_mode should be 0, 1, 2, or 3.")
+        self.charge_output_num = 3 if self.charge_mode >= 3 else (2 if self.charge_mode else 1)
         self.zbl = get_parameter("zbl", descriptor_dict, None)
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
         if self.zbl is None and self.use_typewise_cutoff_zbl is not None:

@@ -17,7 +17,7 @@ from collections import defaultdict
 from src.utils.train_log import AverageMeter, Summary, ProgressMeter
 
 if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
+    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "op/build/lib/libCalcOps_bind.so")
     torch.ops.load_library(lib_path)
     CalcOps = torch.ops.CalcOps_cuda
@@ -26,6 +26,29 @@ else:
         "op/build/lib/libCalcOps_bind_cpu.so")
     torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
     CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+
+def get_model_module(model, args:InputParam):
+    return model.module if getattr(args, "world_size", 1) > 1 else model
+
+
+def get_charge_loss(model, sample, criterion, args:InputParam, real_lr=None, start_lr=None):
+    if not getattr(args.optimizer_param, "train_charge", False):
+        return None, None
+    module = get_model_module(model, args)
+    charge_predict = getattr(module, "charge_predict", None)
+    if charge_predict is None or "charge" not in sample:
+        return None, None
+    charge_label = sample["charge"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
+    atom_num = sample["num_atom"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
+    loss_charge = criterion(charge_predict / atom_num, charge_label / atom_num)
+    if real_lr is not None and start_lr is not None and hasattr(args.optimizer_param, "start_pre_fac_charge"):
+        pref_charge = args.optimizer_param.end_pre_fac_charge + (
+            args.optimizer_param.start_pre_fac_charge - args.optimizer_param.end_pre_fac_charge
+        ) * real_lr / start_lr
+    else:
+        pref_charge = getattr(args.optimizer_param, "pre_fac_charge", 0.1)
+    return loss_charge, pref_charge
+
 
 def print_l1_l2(model):
     params = model.parameters()
@@ -47,15 +70,15 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         if scaling_method == 'linear_gpu':
             return ngpus # 只乘以卡数
         elif scaling_method == 'sqrt_batch':
-            return nbatch** 0.5 
+            return nbatch** 0.5
         elif scaling_method == 'sqrt_gpu':
-            return ngpus** 0.5        
+            return ngpus** 0.5
         elif scaling_method == 'sqrt':
             return (nbatch * ngpus) ** 0.5
         elif scaling_method == 'sqrt_batch_gpu_atom':
             return (nbatch * ngpus * avg_atom_nums) ** 0.5
         return (avg_atom_nums) ** 0.5
-        
+
     batch_time = AverageMeter("Time", ":6.3f", device=device, world_size=args.world_size)
     data_time = AverageMeter("Data", ":6.3f", device=device, world_size=args.world_size)
     learning_rate = AverageMeter("LR", ":.8e", Summary.AVERAGE, device=device, world_size=args.world_size)
@@ -67,11 +90,12 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Ei = AverageMeter("Ei", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Egroup = AverageMeter("Egroup", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
+    loss_Charge = AverageMeter("Charge", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_L1 = AverageMeter("Loss_L1", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, learning_rate, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
+        [batch_time, data_time, learning_rate, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_Virial, loss_Virial_per_atom],
         prefix=f"Epoch: [{epoch}]",
     )
 
@@ -118,7 +142,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         Ei_label = sample["ei"]
         Egroup_label = None
         Force_label = sample["force"]
-       
+
         data_time.update(time.time() - end)
         batch_size = sample["num_atom"].shape[0]
         avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
@@ -127,15 +151,15 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         if args.optimizer_param.warmup is not None and epoch <= args.optimizer_param.warmup: # epoch 从1计数
             start_lr = args.optimizer_param.stop_lr * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
             end_lr = args.optimizer_param.learning_rate * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
-            real_lr = warmup_lr(iter=i, 
-                                iternum=len(train_loader), 
-                                cur_epoch=epoch, 
-                                warm_epochs=args.optimizer_param.warmup, 
+            real_lr = warmup_lr(iter=i,
+                                iternum=len(train_loader),
+                                cur_epoch=epoch,
+                                warm_epochs=args.optimizer_param.warmup,
                                 start_lr=start_lr,
                                 end_lr=end_lr
                                 )
             is_warmlr = True
-        else:  
+        else:
             is_warmlr = False
             if scheduler is None: # 不启用周期性重启
                 global_step = (epoch - 1) * len(train_loader) + i * nr_batch_sample
@@ -148,13 +172,13 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                     param_group["lr"] = real_lr
             else: # 周期性重启
                 real_lr = optimizer.param_groups[0]["lr"] * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
-        
+
         learning_rate.update(real_lr)
         # check_cuda_memory(epoch, -1, f"before forword atomnums {Force_label.shape[0]}", False, args.rank)
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
             NN_radial, NL_radial, Ri_radial,
             NN_angular, NL_angular, Ri_angular,
-            sample["num_atom"], sample["atom_type_map"], None, None
+            sample["num_atom"], sample["atom_type_map"], None, None, charge_label=sample.get("charge")
         )
         # check_cuda_memory(epoch, -1, "end forword", False, args.rank)
         optimizer.zero_grad()
@@ -162,6 +186,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
+        loss_Charge_val, pref_charge = get_charge_loss(model, sample, criterion, args, real_lr, start_lr)
         loss_val = torch.zeros_like(loss_F_val)
 
         if args.optimizer_param.train_egroup:
@@ -209,6 +234,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss, _, _ = calc_loss(
                 args, 0.001, real_lr, 4, w_f, loss_F_val, w_e, loss_Etot_val, w_ei, loss_Ei_val, avg_atom_number
             )
+        if loss_Charge_val is not None:
+            loss = loss + pref_charge * loss_Charge_val
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
         loss.backward()
         torch.cuda.empty_cache() # 释放pytoch 缓存管理器持有的缓冲块，因为它对cuda算子不可见，导致算子内存不够用，这部分缓冲块 64batch下约10个G
@@ -236,6 +263,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_L2.update(L2.item(), batch_size)
         if args.optimizer_param.train_egroup:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
+        if loss_Charge_val is not None:
+            loss_Charge.update(loss_Charge_val.item(), batch_size)
         loss_Force.update(loss_F_val.item(), batch_size)
 
         batch_time.update(time.time() - end)
@@ -267,7 +296,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             if args.world_size > 1:
                 dist.barrier()
 
-    if args.world_size > 1: 
+    if args.world_size > 1:
         progress.sync_meters()
 
     if args.rank == 0:
@@ -299,7 +328,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
     loss_Virial = AverageMeter("Virial", ":.4e", Summary.ROOT)
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT)
     loss_L1 = AverageMeter("Loss_L1", ":.4e", Summary.ROOT)
-    loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT)    
+    loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT)
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
@@ -309,7 +338,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
     KFOptWrapper = KFOptimizerWrapper(
         model, optimizer, args.optimizer_param.nselect, args.optimizer_param.groupsize, lambda_l1 = args.optimizer_param.lambda_1, lambda_l2 = args.optimizer_param.lambda_2
     )
-    
+
     # switch to train mode
     model.train()
 
@@ -356,7 +385,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         if args.optimizer_param.train_virial is True:
             # check_cuda_memory(epoch, i, "train_virial start")
             Virial_predict = KFOptWrapper.update_virial(kalman_inputs, Virial_label, args.optimizer_param.pre_fac_virial, train_type = "NEP")
-        if args.optimizer_param.train_energy is True: 
+        if args.optimizer_param.train_energy is True:
             # check_cuda_memory(epoch, i, "update_energy start")
             Etot_predict = KFOptWrapper.update_energy(kalman_inputs, Etot_label, args.optimizer_param.pre_fac_etot, train_type = "NEP")
             # check_cuda_memory(-1, -1, "update_energy end")
@@ -376,11 +405,11 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         loss_F_val = criterion(Force_predict, Force_label)
         L1, L2 = print_l1_l2(model)
 
-        # divide by natoms 
+        # divide by natoms
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
-        
-        loss_Ei_val = criterion(Ei_predict, Ei_label)   
+
+        loss_Ei_val = criterion(Ei_predict, Ei_label)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -396,7 +425,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
                 loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
                 loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
                 loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
-                
+
         if args.optimizer_param.lambda_2 is not None:
             loss_val += L2
         if args.optimizer_param.lambda_1 is not None:
@@ -420,7 +449,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
 
         if i % args.optimizer_param.print_freq == 0:
             progress.display(i + 1)
-        
+
     """
     if args.hvd:
         losses.all_reduce()
@@ -494,19 +523,23 @@ def valid(val_loader, model, criterion, device, args:InputParam):
 
                 # atom_type_map: we only need the first element, because it is same for each image of MOVEMENT
             Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
-                    NN_radial, NL_radial, Ri_radial, 
+                    NN_radial, NL_radial, Ri_radial,
                         NN_angular, NL_angular, Ri_angular,
-                            sample["num_atom"], sample["atom_type_map"], None, None)
-                                                    
+                            sample["num_atom"], sample["atom_type_map"], None, None, charge_label=sample.get("charge"))
+
             loss_F_val = criterion(Force_predict, Force_label)
             loss_Etot_val = criterion(Etot_predict, Etot_label)
             loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
             loss_Ei_val = criterion(Ei_predict, Ei_label)
+            loss_Charge_val, pref_charge = get_charge_loss(model, sample, criterion, args)
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
             loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
                     args.optimizer_param.pre_fac_etot * loss_Etot_val
+
+            if loss_Charge_val is not None:
+                loss_val += pref_charge * loss_Charge_val
 
             if args.optimizer_param.train_virial is True:
                 # loss_Virial_val = criterion(Virial_predict, Virial_label.squeeze(1))  #115.415137283393
@@ -529,6 +562,8 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             loss_Ei.update(loss_Ei_val.item(), batch_size)
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup.update(loss_Egroup_val.item(), batch_size)
+            if loss_Charge_val is not None:
+                loss_Charge.update(loss_Charge_val.item(), batch_size)
             loss_Force.update(loss_F_val.item(), batch_size)
             # measure elapsed time
         batch_time.update(time.time() - end)
@@ -538,8 +573,8 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             if args.world_size > 1 and args.reduce_loss:
                 progress.sync_meters()
             if args.rank == 0:
-                progress.display(i + 1) 
-        
+                progress.display(i + 1)
+
     batch_time = AverageMeter("Time", ":6.3f", device=device, world_size=args.world_size)
     losses = AverageMeter("Loss", ":.4e", Summary.AVERAGE, device=device, world_size=args.world_size)
     loss_Etot = AverageMeter("Etot", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
@@ -547,18 +582,19 @@ def valid(val_loader, model, criterion, device, args:InputParam):
     loss_Force = AverageMeter("Force", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Ei = AverageMeter("Ei", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Egroup = AverageMeter("Egroup", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
+    loss_Charge = AverageMeter("Charge", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Virial = AverageMeter("Virial", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
 
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
-        prefix="Test: ",    
+        [batch_time, losses, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_Virial, loss_Virial_per_atom],
+        prefix="Test: ",
     )
     module = model.module if args.world_size > 1 else model
     # switch to evaluate mode
     model.eval()
-    
+
     run_validate(val_loader)
 
     """
@@ -587,7 +623,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             loss_Virial_per_atom.all_reduce()
     """
 
-    if args.world_size > 1: 
+    if args.world_size > 1:
         progress.sync_meters()
     if args.rank == 0:
         progress.display_summary(["Test Set:"])
@@ -595,7 +631,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
     return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root
 
 '''
-description: 
+description:
 this function is used for inference:
 the output is a pandas DataFrame object
 param {*} val_loader
@@ -609,6 +645,8 @@ author: wuxingxing
 def predict(val_loader, model, criterion, device, args:InputParam, isprofile=False):
     train_lists = ["img_idx"] #"Etot_lab", "Etot_pre", "Ei_lab", "Ei_pre", "Force_lab", "Force_pre"
     train_lists.extend(["RMSE_Etot", "RMSE_Etot_per_atom", "RMSE_Ei", "RMSE_F"])
+    if args.optimizer_param.train_charge:
+        train_lists.append("RMSE_charge")
     if args.optimizer_param.train_egroup:
         train_lists.append("RMSE_Egroup")
     if args.optimizer_param.train_virial:
@@ -652,15 +690,16 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
 
         # measure data loading time
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
-                NN_radial, NL_radial, Ri_radial, 
+                NN_radial, NL_radial, Ri_radial,
                     NN_angular, NL_angular, Ri_angular,
-                        sample["num_atom"], sample["atom_type_map"], None, None)
-        
+                        sample["num_atom"], sample["atom_type_map"], None, None, charge_label=sample.get("charge"))
+
         # mse
         loss_F_val = criterion(Force_predict, Force_label)
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
+        loss_Charge_val, pref_charge = get_charge_loss(model, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -685,13 +724,15 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         F_rmse = loss_F_val ** 0.5
 
         res_list = [i, float(Etot_rmse), float(etot_atom_rmse), float(Ei_rmse), float(F_rmse)]
+        if loss_Charge_val is not None:
+            res_list.append(float(loss_Charge_val ** 0.5))
         #float(Etot_predict), float(Ei_label.abs().mean()), float(Ei_predict.abs().mean()), float(Force_label.abs().mean()), float(Force_predict.abs().mean()),\
         if args.optimizer_param.train_egroup:
             res_list.append(float(loss_Egroup_val))
         if args.optimizer_param.train_virial:
             res_list.append(float(loss_Virial_val))
             res_list.append(float(loss_Virial_per_atom_val))
-        
+
         force_label_list.append(Force_label.flatten().cpu().numpy())
         force_predict_list.append(Force_predict.flatten().detach().cpu().numpy())
         ei_label_list.append(Ei_label.flatten().cpu().numpy())

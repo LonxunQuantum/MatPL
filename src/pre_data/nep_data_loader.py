@@ -262,6 +262,10 @@ class UniDataset(Dataset):
         data["force"] = torch.from_numpy(self.image_list[index].force).to(self.dtype)
         data["ei"] = torch.from_numpy(self.image_list[index].atomic_energy).to(self.dtype)
         data["energy"] = torch.from_numpy(np.array([self.image_list[index].Ep])).to(self.dtype)
+        charge = getattr(self.image_list[index], "charge", None)
+        if charge is None:
+            charge = getattr(self.image_list[index], "total_charge", 0.0)
+        data["charge"] = torch.from_numpy(np.array([charge], dtype=float)).to(self.dtype)
         data["position"] = torch.from_numpy(self.image_list[index].position).to(self.dtype)
         data["virial"] = torch.from_numpy(np.ones([9]) * -1e6).to(self.dtype) if self.image_list[index].virial is None \
                             else torch.from_numpy(self.image_list[index].virial.flatten()).to(self.dtype)

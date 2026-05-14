@@ -83,14 +83,23 @@ class FittingNet(nn.Module):
         i = len(self.network_size) - 1
         if from_nep_txt:
             wij = torch.from_numpy(nep_txt_param[2])
-            bias_init = nep_txt_param[3] * torch.ones(1, self.network_size[i]) # torch.ones(1)
+            bias_value = torch.as_tensor(nep_txt_param[3], dtype=wij.dtype)
+            if bias_value.ndim == 0:
+                bias_init = bias_value * torch.ones(1, self.network_size[i], dtype=wij.dtype)
+            else:
+                bias_init = bias_value.reshape(1, self.network_size[i]).to(dtype=wij.dtype)
         else:
             wij = torch.randn(self.network_size[i-1], self.network_size[i])
             normal(wij, mean=0, std=(1.0 / np.sqrt(self.network_size[i-1] + self.network_size[i])))
 
             if self.last_bias:
                 bias_init = torch.randn(1, self.network_size[i])
-                normal(bias_init, mean=ener_shift, std=1.0)
+                normal(bias_init, mean=0.0, std=1.0)
+                ener_shift_tensor = torch.as_tensor(ener_shift, dtype=bias_init.dtype)
+                if ener_shift_tensor.ndim == 0:
+                    bias_init += ener_shift_tensor
+                else:
+                    bias_init += ener_shift_tensor.reshape(1, self.network_size[i])
         
         if self.last_bias:
             self.layers.append(LayerModule(wij, bias_init, None))
