@@ -143,17 +143,33 @@ def extract_model(nep_path:str):
     else:
         module = ""
         q_list.extend(list(model['q_scaler']))
+    type_energy_bias = []
     for i in range(0, len(model_atom_type)):
         nn_list.extend(list(model['state_dict'][f'{module}fitting_net.{i}.layers.0.weight'].transpose(1, 0).flatten().cpu().detach().numpy()))
         nn_list.extend((-model['state_dict'][f'{module}fitting_net.{i}.layers.0.bias']).flatten().cpu().detach().numpy())
-        output_weight = model['state_dict'][f'{module}fitting_net.{i}.layers.1.weight']
-        output_bias = model['state_dict'][f'{module}fitting_net.{i}.layers.1.bias']
-        nn_list.extend(output_weight.flatten().cpu().detach().numpy())
-        nn_list.extend((-output_bias).flatten().cpu().detach().numpy())
+        qnep_energy_head_key = f'{module}fitting_net.{i}.energy_head.weight'
+        if charge_mode and qnep_energy_head_key in model['state_dict']:
+            energy_weight = model['state_dict'][qnep_energy_head_key]
+            charge_weight = model['state_dict'][f'{module}fitting_net.{i}.charge_head.weight']
+            nn_list.extend(energy_weight.flatten().cpu().detach().numpy())
+            nn_list.extend(charge_weight.flatten().cpu().detach().numpy())
+            if charge_mode >= 3:
+                c6_weight = model['state_dict'][f'{module}fitting_net.{i}.c6_head.weight']
+                nn_list.extend(c6_weight.flatten().cpu().detach().numpy())
+            energy_bias = model['state_dict'].get(f'{module}fitting_net.{i}.energy_head.bias')
+            if energy_bias is not None:
+                type_energy_bias.extend((-energy_bias).flatten().cpu().detach().numpy())
+        else:
+            output_weight = model['state_dict'][f'{module}fitting_net.{i}.layers.1.weight']
+            output_bias = model['state_dict'][f'{module}fitting_net.{i}.layers.1.bias']
+            nn_list.extend(output_weight.flatten().cpu().detach().numpy())
+            nn_list.extend((-output_bias).flatten().cpu().detach().numpy())
 
     nn_list.append(2.0 if charge_mode else 0.0) # sqrt_epsilon_inf for charge mode, common bias placeholder otherwise
     if charge_mode:
-        nn_list.append(0.0) # GPUMD charge output has no per-type charge bias; MatPL keeps it in the per-type layer above.
+        # GPUMD QNEP has one common energy bias, while MatPL keeps per-type energy bias.
+        # Use the mean as the closest GPUMD-compatible value during export.
+        nn_list.append(float(sum(type_energy_bias) / len(type_energy_bias)) if len(type_energy_bias) > 0 else 0.0)
     c_list.extend(list(model['state_dict'][f'{module}c_param_2'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
     if l_max[0] > 0:
         c_list.extend(list(model['state_dict'][f'{module}c_param_3'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
@@ -175,7 +191,11 @@ def extract_model(nep_path:str):
         assert len(c_list) == two_c_num + three_c_num
     else:
         assert len(c_list) == two_c_num
-    nn_params = len(model_atom_type) * (feature_nums * ann + ann + ann * charge_output_num + charge_output_num)
+    has_qnep_heads = charge_mode and f'{module}fitting_net.0.energy_head.weight' in model['state_dict']
+    if has_qnep_heads:
+        nn_params = len(model_atom_type) * (feature_nums * ann + ann + ann * charge_output_num)
+    else:
+        nn_params = len(model_atom_type) * (feature_nums * ann + ann + ann * charge_output_num + charge_output_num)
     assert len(nn_list) == nn_params + (2 if charge_mode else 1)
     head_content += "\n".join(map(str, nn_list))
     head_content += "\n"

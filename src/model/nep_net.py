@@ -13,7 +13,7 @@ from src.user.input_param import InputParam
 from src.user.nep_param import NepParam
 from src.utils.debug_operation import check_cuda_memory
 sys.path.append(os.getcwd())
-from src.model.nep_fitting import FittingNet
+from src.model.nep_fitting import FittingNet, QNEPFittingNet
 if torch.cuda.is_available():
     lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
     torch.ops.load_library(lib_path)
@@ -67,24 +67,32 @@ class NEP(nn.Module):
         self.atomic_charge = None
         self.atomic_charge_shifted = None
         self.atomic_c6 = None
-        fitting_network_size = list(self.neuron[:-1]) + [self.charge_output_num]
+        fitting_network_size = list(self.neuron[:-1]) + [1]
+        qnep_network_size = list(self.neuron[:-1])
 
         for i in range(self.ntypes):
             nep_txt_param = None
             if input_param.nep_param.c2_param is not None:
                 nep_txt_param = [input_param.nep_param.model_wb[i*3+0], input_param.nep_param.model_wb[i*3+1], input_param.nep_param.model_wb[i*3+2], input_param.nep_param.bias_lastlayer[i]]
-            if self.charge_output_num == 1:
-                ener_shift = energy_shift[i]
-            elif self.charge_output_num == 2:
-                ener_shift = [energy_shift[i], 0.0]
-            else:
-                ener_shift = [energy_shift[i], 0.0, 0.0]
-            self.fitting_net.append(FittingNet(network_size   = fitting_network_size, #[50, output_num]
+            if self.charge_mode:
+                self.fitting_net.append(QNEPFittingNet(network_size = qnep_network_size,
                                                     bias      = True,
                                                     resnet_dt = False,
                                                     activation= "tanh",
                                                     input_dim = self.feature_nums,
-                                                    ener_shift= ener_shift,
+                                                    ener_shift= energy_shift[i],
+                                                    charge_mode = self.charge_mode,
+                                                    magic     = False,
+                                                    nep_txt_param = nep_txt_param,
+                                                    last_bias= True,
+                                                    ))
+            else:
+                self.fitting_net.append(FittingNet(network_size   = fitting_network_size, #[50, output_num]
+                                                    bias      = True,
+                                                    resnet_dt = False,
+                                                    activation= "tanh",
+                                                    input_dim = self.feature_nums,
+                                                    ener_shift= energy_shift[i],
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
                                                     last_bias= True,
@@ -472,10 +480,9 @@ class NEP(nn.Module):
         Returns:
             Optional[torch.Tensor]: The calculated energy Ei for each type of atom, or None if the calculation fails.
         """
-        outputs = torch.zeros(
-            (Imagetype_map.shape[0], self.charge_output_num),
-            dtype=self.dtype,
-            device=device)
+        Ei = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device)
+        charge = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device) if self.charge_mode else None
+        c6 = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device) if self.charge_mode >= 3 else None
         # fit_net_dict = {idx: fit_net for idx, fit_net in enumerate(self.fitting_net)}
         for idx, fit_net in enumerate(self.fitting_net):
             # fit_net = fit_net_dict.get(nn_i)
@@ -486,11 +493,14 @@ class NEP(nn.Module):
             indices = torch.arange(len(Imagetype_map.flatten()),device=device)[mask]  
             feat = feats[indices, :]
             output_ntype = fit_net.forward(feat)
-            outputs[mask] = output_ntype.reshape(-1, self.charge_output_num)
-
-        Ei = outputs[:, 0]
-        charge = outputs[:, 1] if self.charge_mode else None
-        c6 = outputs[:, 2] + 2.0 if self.charge_mode >= 3 else None
+            if self.charge_mode:
+                energy_ntype, charge_ntype, c6_ntype = output_ntype
+                Ei[mask] = energy_ntype.reshape(-1)
+                charge[mask] = charge_ntype.reshape(-1)
+                if self.charge_mode >= 3:
+                    c6[mask] = c6_ntype.reshape(-1) + 2.0
+            else:
+                Ei[mask] = output_ntype.reshape(-1)
         return Ei, charge, c6
      
     def calculate_force_virial(self, 
@@ -1031,4 +1041,3 @@ class NEP(nn.Module):
     #     ZiZj = zi.view(1, zi.shape[0], 1) * zj
 
     #     Ei_zbl = self.K_C_SP * ZiZj * phi / rij
-        
