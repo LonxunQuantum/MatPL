@@ -394,6 +394,7 @@ class NEP(nn.Module):
                 volume.to(dtype=dtype, device=device) if volume is not None else None,
                 num_atom,
                 self.atomic_charge_shifted,
+                c6,
                 NL_radial,
                 Ri,
                 dtype,
@@ -462,6 +463,7 @@ class NEP(nn.Module):
         volume: Optional[torch.Tensor],
         num_atom: torch.Tensor,
         charge: torch.Tensor,
+        c6: Optional[torch.Tensor],
         NL_radial: torch.Tensor,
         Ri_radial: torch.Tensor,
         dtype: torch.dtype,
@@ -499,8 +501,45 @@ class NEP(nn.Module):
                     two_alpha_over_sqrt_pi,
                     dtype,
                     device)
+            if self.charge_mode >= 3 and c6 is not None:
+                image_energy = image_energy + self.calculate_vdw_energy(
+                    start,
+                    end,
+                    image_position,
+                    box_original[image_idx],
+                    c6[start:end],
+                    dtype,
+                    device)
             energies.append(image_energy)
         return torch.stack(energies)
+
+    def calculate_vdw_energy(
+        self,
+        start: int,
+        end: int,
+        position: torch.Tensor,
+        box: torch.Tensor,
+        c6: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> torch.Tensor:
+        energy = torch.zeros((), dtype=dtype, device=device)
+        lattice = box.reshape(3, 3)
+        inv_lattice = torch.linalg.inv(lattice)
+        r6_damping = torch.as_tensor(729.0, dtype=dtype, device=device)
+        for i in range(end - start - 1):
+            delta = position[i + 1:] - position[i]
+            frac = delta.matmul(inv_lattice)
+            frac = frac - torch.round(frac)
+            delta = frac.matmul(lattice)
+            rij = torch.linalg.norm(delta, dim=1)
+            valid = (rij > 1e-12) & (rij < self.cutoff_radial)
+            if not valid.any():
+                continue
+            rij = rij[valid]
+            c6_j = c6[i + 1:][valid]
+            denominator = rij.pow(6) + r6_damping
+            energy = energy - torch.sum(c6[i].pow(2) * c6_j.pow(2) / denominator)
+        return energy
 
     def calculate_charge_real_energy(
         self,
