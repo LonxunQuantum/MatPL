@@ -385,18 +385,30 @@ class NEP(nn.Module):
             self.charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
 
         charge_energy = None
+        charge_virial = None
         charge_position = None
         if self.charge_mode and self.atomic_charge_shifted is not None and position is not None and box_original is not None:
             charge_position = position.detach().clone().to(dtype=dtype, device=device).requires_grad_(True)
+            charge_box_original = box_original.to(dtype=dtype, device=device)
+            charge_volume = volume.to(dtype=dtype, device=device) if volume is not None else None
             charge_energy = self.calculate_charge_energy(
                 charge_position,
-                box_original.to(dtype=dtype, device=device),
-                volume.to(dtype=dtype, device=device) if volume is not None else None,
+                charge_box_original,
+                charge_volume,
                 num_atom,
                 self.atomic_charge_shifted,
                 c6,
                 NL_radial,
                 Ri,
+                dtype,
+                device)
+            charge_virial = self.calculate_charge_virial(
+                position.to(dtype=dtype, device=device),
+                charge_box_original,
+                charge_volume,
+                num_atom,
+                self.atomic_charge_shifted,
+                c6,
                 dtype,
                 device)
         
@@ -448,6 +460,8 @@ class NEP(nn.Module):
                     retain_graph=True,
                     create_graph=True)[0]
                 Force = Force + charge_force
+                if charge_virial is not None:
+                    Virial = Virial + charge_virial
             
             # t3 = time.time()
             # print("==single time: tall {} ei {} zbl ei {} force {}".format(t3-t0, t1-t0, t2-t1, t3-t2))
@@ -512,6 +526,69 @@ class NEP(nn.Module):
                     device)
             energies.append(image_energy)
         return torch.stack(energies)
+
+    def calculate_charge_virial(
+        self,
+        position: torch.Tensor,
+        box_original: torch.Tensor,
+        volume: Optional[torch.Tensor],
+        num_atom: torch.Tensor,
+        charge: torch.Tensor,
+        c6: Optional[torch.Tensor],
+        dtype: torch.dtype,
+        device: torch.device) -> torch.Tensor:
+        split_sizes = num_atom.reshape(-1).tolist()
+        atom_starts = torch.cumsum(
+            torch.cat([torch.zeros(1, dtype=num_atom.dtype, device=device), num_atom.reshape(-1)[:-1]]),
+            dim=0)
+        virials = []
+        alpha = torch.as_tensor(self.Pi / self.cutoff_radial, dtype=dtype, device=device)
+        two_alpha_over_sqrt_pi = 2.0 * alpha / torch.sqrt(torch.as_tensor(self.Pi, dtype=dtype, device=device))
+        alpha_factor = 0.25 / (alpha * alpha)
+        identity = torch.eye(3, dtype=dtype, device=device)
+        for image_idx, (start_tensor, atom_num) in enumerate(zip(atom_starts, split_sizes)):
+            start = int(start_tensor.item())
+            end = start + atom_num
+            strain = torch.zeros((3, 3), dtype=dtype, device=device, requires_grad=True)
+            deformation = identity + strain
+            image_position = position[start:end].matmul(deformation)
+            image_box = box_original[image_idx].reshape(3, 3).matmul(deformation).reshape(-1)
+            image_energy = self.calculate_charge_reciprocal_energy(
+                image_position,
+                charge[start:end],
+                image_box,
+                None,
+                alpha,
+                alpha_factor,
+                dtype,
+                device)
+            if self.charge_mode == 1:
+                image_energy = image_energy + self.calculate_charge_real_energy(
+                    start,
+                    end,
+                    image_position,
+                    image_box,
+                    charge[start:end],
+                    alpha,
+                    two_alpha_over_sqrt_pi,
+                    dtype,
+                    device)
+            if self.charge_mode >= 3 and c6 is not None:
+                image_energy = image_energy + self.calculate_vdw_energy(
+                    start,
+                    end,
+                    image_position,
+                    image_box,
+                    c6[start:end],
+                    dtype,
+                    device)
+            image_virial = torch.autograd.grad(
+                image_energy,
+                strain,
+                retain_graph=True,
+                create_graph=True)[0]
+            virials.append(image_virial.reshape(9))
+        return torch.stack(virials)
 
     def calculate_vdw_energy(
         self,
