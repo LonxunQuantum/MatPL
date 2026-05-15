@@ -329,7 +329,10 @@ class NEP(nn.Module):
                 Egroup_weight: Optional[torch.Tensor] = None, 
                 divider: Optional[torch.Tensor] = None, 
                 is_calc_f: Optional[bool] = True,
-                charge_label: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+                charge_label: Optional[torch.Tensor] = None,
+                position: Optional[torch.Tensor] = None,
+                box_original: Optional[torch.Tensor] = None,
+                volume: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass of the model.
 
@@ -380,6 +383,21 @@ class NEP(nn.Module):
         if self.charge_mode:
             self.atomic_charge = charge
             self.charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
+
+        charge_energy = None
+        charge_position = None
+        if self.charge_mode and self.atomic_charge_shifted is not None and position is not None and box_original is not None:
+            charge_position = position.detach().clone().to(dtype=dtype, device=device).requires_grad_(True)
+            charge_energy = self.calculate_charge_energy(
+                charge_position,
+                box_original.to(dtype=dtype, device=device),
+                volume.to(dtype=dtype, device=device) if volume is not None else None,
+                num_atom,
+                self.atomic_charge_shifted,
+                NL_radial,
+                Ri,
+                dtype,
+                device)
         
         Egroup = self.get_egroup(Ei, Egroup_weight, divider) if Egroup_weight is not None else None
         # Ei = torch.squeeze(Ei, 1)
@@ -404,6 +422,8 @@ class NEP(nn.Module):
         split_sizes = num_atom.reshape(-1).tolist()
         energy_per_image = Ei.split(split_sizes)
         Etot = torch.stack([x.sum() for x in energy_per_image]).unsqueeze(-1)
+        if charge_energy is not None:
+            Etot = Etot + charge_energy.reshape(-1, 1)
         # Etot = torch.sum(Ei, 1).unsqueeze(1)
 
         if  is_calc_f is False: #False: # is_calc_f is False:   ##is_calc_f is False
@@ -420,6 +440,13 @@ class NEP(nn.Module):
                                                         neigh_zbl,
                                                         num_atom,
                                                         device, dtype)
+            if charge_energy is not None and charge_position is not None:
+                charge_force = -torch.autograd.grad(
+                    charge_energy.sum(),
+                    charge_position,
+                    retain_graph=True,
+                    create_graph=True)[0]
+                Force = Force + charge_force
             
             # t3 = time.time()
             # print("==single time: tall {} ei {} zbl ei {} force {}".format(t3-t0, t1-t0, t2-t1, t3-t2))
@@ -427,6 +454,123 @@ class NEP(nn.Module):
             # print("==single time: t1 {} t2 {} t3 {} t4 {} t5 {} t6 {} t7 {}".format(t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6))
             # check_cuda_memory(-1, -1, "FORWAR calculate_force")
         return Etot, Ei, Force, Egroup, Virial
+
+    def calculate_charge_energy(
+        self,
+        position: torch.Tensor,
+        box_original: torch.Tensor,
+        volume: Optional[torch.Tensor],
+        num_atom: torch.Tensor,
+        charge: torch.Tensor,
+        NL_radial: torch.Tensor,
+        Ri_radial: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> torch.Tensor:
+        split_sizes = num_atom.reshape(-1).tolist()
+        atom_starts = torch.cumsum(
+            torch.cat([torch.zeros(1, dtype=num_atom.dtype, device=device), num_atom.reshape(-1)[:-1]]),
+            dim=0)
+        energies = []
+        alpha = torch.as_tensor(self.Pi / self.cutoff_radial, dtype=dtype, device=device)
+        two_alpha_over_sqrt_pi = 2.0 * alpha / torch.sqrt(torch.as_tensor(self.Pi, dtype=dtype, device=device))
+        alpha_factor = 0.25 / (alpha * alpha)
+        for image_idx, (start_tensor, atom_num) in enumerate(zip(atom_starts, split_sizes)):
+            start = int(start_tensor.item())
+            end = start + atom_num
+            image_charge = charge[start:end]
+            image_position = position[start:end]
+            image_energy = self.calculate_charge_reciprocal_energy(
+                image_position,
+                image_charge,
+                box_original[image_idx],
+                volume[image_idx] if volume is not None else None,
+                alpha,
+                alpha_factor,
+                dtype,
+                device)
+            if self.charge_mode == 1:
+                image_energy = image_energy + self.calculate_charge_real_energy(
+                    start,
+                    end,
+                    image_position,
+                    box_original[image_idx],
+                    image_charge,
+                    alpha,
+                    two_alpha_over_sqrt_pi,
+                    dtype,
+                    device)
+            energies.append(image_energy)
+        return torch.stack(energies)
+
+    def calculate_charge_real_energy(
+        self,
+        start: int,
+        end: int,
+        position: torch.Tensor,
+        box: torch.Tensor,
+        charge: torch.Tensor,
+        alpha: torch.Tensor,
+        two_alpha_over_sqrt_pi: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> torch.Tensor:
+        energy = -0.5 * two_alpha_over_sqrt_pi * torch.sum(charge * charge)
+        lattice = box.reshape(3, 3)
+        inv_lattice = torch.linalg.inv(lattice)
+        for i in range(end - start - 1):
+            delta = position[i + 1:] - position[i]
+            frac = delta.matmul(inv_lattice)
+            frac = frac - torch.round(frac)
+            delta = frac.matmul(lattice)
+            rij = torch.linalg.norm(delta, dim=1)
+            valid = (rij > 1e-12) & (rij < self.cutoff_radial)
+            if not valid.any():
+                continue
+            rij = rij[valid]
+            qj = charge[i + 1:][valid]
+            erfc_r = torch.erfc(alpha * rij) / rij
+            energy = energy + torch.sum(charge[i] * qj * erfc_r)
+        return self.K_C_SP * energy
+
+    def calculate_charge_reciprocal_energy(
+        self,
+        position: torch.Tensor,
+        charge: torch.Tensor,
+        box: torch.Tensor,
+        volume: Optional[torch.Tensor],
+        alpha: torch.Tensor,
+        alpha_factor: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> torch.Tensor:
+        lattice = box.reshape(3, 3)
+        det = torch.det(lattice)
+        abs_det = torch.abs(det)
+        if volume is not None:
+            abs_det = torch.abs(volume.reshape(-1)[0])
+        reciprocal = 2.0 * self.Pi * torch.linalg.inv(lattice).T
+        b1, b2, b3 = reciprocal[:, 0], reciprocal[:, 1], reciprocal[:, 2]
+        volume_k = (2.0 * self.Pi) ** 3 / abs_det
+        n1_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b2, b3).norm() / volume_k).item())
+        n2_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b3, b1).norm() / volume_k).item())
+        n3_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b1, b2).norm() / volume_k).item())
+        ksq_max = (2.0 * self.Pi) ** 2 * alpha * alpha
+        energy = torch.zeros((), dtype=dtype, device=device)
+        prefactor = 2.0 * torch.abs((2.0 * self.Pi) / det)
+        for n1 in range(0, n1_max + 1):
+            for n2 in range(-n2_max, n2_max + 1):
+                for n3 in range(-n3_max, n3_max + 1):
+                    if n1 * n1 + n2 * n2 + n3 * n3 == 0:
+                        continue
+                    if (n1 == 0 and n2 < 0) or (n1 == 0 and n2 == 0 and n3 < 0):
+                        continue
+                    kvec = n1 * b1 + n2 * b2 + n3 * b3
+                    ksq = torch.dot(kvec, kvec)
+                    if bool((ksq < ksq_max).item()):
+                        kr = position.matmul(kvec)
+                        s_real = torch.sum(charge * torch.cos(kr))
+                        s_imag = -torch.sum(charge * torch.sin(kr))
+                        g = prefactor * torch.exp(-ksq * alpha_factor) / ksq
+                        energy = energy + g * (s_real * s_real + s_imag * s_imag)
+        return self.K_C_SP * energy
 
     def shift_total_charge(
         self,

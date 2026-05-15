@@ -178,7 +178,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
             NN_radial, NL_radial, Ri_radial,
             NN_angular, NL_angular, Ri_angular,
-            sample["num_atom"], sample["atom_type_map"], None, None, charge_label=sample.get("charge")
+            sample["num_atom"], sample["atom_type_map"], None, None,
+            charge_label=sample.get("charge"),
+            position=sample.get("position"),
+            box_original=sample.get("box_original"),
+            volume=sample.get("volume")
         )
         # check_cuda_memory(epoch, -1, "end forword", False, args.rank)
         optimizer.zero_grad()
@@ -525,7 +529,11 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
                     NN_radial, NL_radial, Ri_radial,
                         NN_angular, NL_angular, Ri_angular,
-                            sample["num_atom"], sample["atom_type_map"], None, None, charge_label=sample.get("charge"))
+                            sample["num_atom"], sample["atom_type_map"], None, None,
+                            charge_label=sample.get("charge"),
+                            position=sample.get("position"),
+                            box_original=sample.get("box_original"),
+                            volume=sample.get("volume"))
 
             loss_F_val = criterion(Force_predict, Force_label)
             loss_Etot_val = criterion(Etot_predict, Etot_label)
@@ -692,7 +700,11 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
                 NN_radial, NL_radial, Ri_radial,
                     NN_angular, NL_angular, Ri_angular,
-                        sample["num_atom"], sample["atom_type_map"], None, None, charge_label=sample.get("charge"))
+                        sample["num_atom"], sample["atom_type_map"], None, None,
+                        charge_label=sample.get("charge"),
+                        position=sample.get("position"),
+                        box_original=sample.get("box_original"),
+                        volume=sample.get("volume"))
 
         # mse
         loss_F_val = criterion(Force_predict, Force_label)
