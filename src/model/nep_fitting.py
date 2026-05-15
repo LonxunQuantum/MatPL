@@ -218,11 +218,6 @@ class QNEPFittingNet(nn.Module):
             output_weight = torch.from_numpy(nep_txt_param[2])
             if output_weight.ndim == 1:
                 output_weight = output_weight.reshape(hidden_dim, self.output_num)
-            bias_value = torch.as_tensor(nep_txt_param[3], dtype=output_weight.dtype)
-            if bias_value.ndim == 0:
-                energy_bias = bias_value.reshape(1, 1)
-            else:
-                energy_bias = bias_value.reshape(1, -1)[:, :1].to(dtype=output_weight.dtype)
             energy_weight = output_weight[:, 0:1]
             charge_weight = output_weight[:, 1:2]
             c6_weight = output_weight[:, 2:3] if self.charge_mode >= 3 else None
@@ -237,11 +232,7 @@ class QNEPFittingNet(nn.Module):
             else:
                 c6_weight = None
 
-            energy_bias = torch.randn(1, 1)
-            normal(energy_bias, mean=0.0, std=1.0)
-            energy_bias += torch.as_tensor(ener_shift, dtype=energy_bias.dtype).reshape(1, 1)
-
-        self.energy_head = LayerModule(energy_weight, energy_bias if self.last_bias else None, None)
+        self.energy_head = LayerModule(energy_weight, None, None)
         self.charge_head = LayerModule(charge_weight, None, None)
         self.c6_head = LayerModule(c6_weight, None, None) if self.charge_mode >= 3 else None
 
@@ -262,8 +253,6 @@ class QNEPFittingNet(nn.Module):
         param_list.extend(list(self.charge_head.weight.flatten().cpu().detach().numpy()))
         if self.c6_head is not None:
             param_list.extend(list(self.c6_head.weight.flatten().cpu().detach().numpy()))
-        if self.last_bias and self.energy_head.bias is not None:
-            last_bias_list.extend((-self.energy_head.bias).flatten().cpu().detach().numpy())
         return param_list, last_bias_list
 
     def forward(self, x: torch.Tensor):
@@ -283,8 +272,6 @@ class QNEPFittingNet(nn.Module):
                 x = hiden
 
         energy = torch.matmul(x, self.energy_head.weight)
-        if self.last_bias and self.energy_head.bias is not None:
-            energy = energy + self.energy_head.bias
         charge = torch.matmul(x, self.charge_head.weight)
         c6 = torch.matmul(x, self.c6_head.weight) if self.c6_head is not None else None
         return energy, charge, c6

@@ -143,6 +143,11 @@ def extract_model(nep_path:str):
     else:
         module = ""
         q_list.extend(list(model['q_scaler']))
+    qnep_common_bias = None
+    if charge_mode:
+        common_bias_key = f'{module}common_bias'
+        if common_bias_key in model['state_dict']:
+            qnep_common_bias = -float(model['state_dict'][common_bias_key].cpu().detach().numpy())
     type_energy_bias = []
     for i in range(0, len(model_atom_type)):
         nn_list.extend(list(model['state_dict'][f'{module}fitting_net.{i}.layers.0.weight'].transpose(1, 0).flatten().cpu().detach().numpy()))
@@ -167,9 +172,10 @@ def extract_model(nep_path:str):
 
     nn_list.append(2.0 if charge_mode else 0.0) # sqrt_epsilon_inf for charge mode, common bias placeholder otherwise
     if charge_mode:
-        # GPUMD QNEP has one common energy bias, while MatPL keeps per-type energy bias.
-        # Use the mean as the closest GPUMD-compatible value during export.
-        nn_list.append(float(sum(type_energy_bias) / len(type_energy_bias)) if len(type_energy_bias) > 0 else 0.0)
+        if qnep_common_bias is not None:
+            nn_list.append(qnep_common_bias)
+        else:
+            nn_list.append(float(sum(type_energy_bias) / len(type_energy_bias)) if len(type_energy_bias) > 0 else 0.0)
     c_list.extend(list(model['state_dict'][f'{module}c_param_2'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
     if l_max[0] > 0:
         c_list.extend(list(model['state_dict'][f'{module}c_param_3'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))

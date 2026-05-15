@@ -63,12 +63,22 @@ class NEP(nn.Module):
         # 初始化缓冲区
         self._initialize_buffers(q_scaler = q_scaler)
         self.fitting_net = nn.ModuleList()
+        self.common_bias = None
         self.charge_predict = None
         self.atomic_charge = None
         self.atomic_charge_shifted = None
         self.atomic_c6 = None
         fitting_network_size = list(self.neuron[:-1]) + [1]
         qnep_network_size = list(self.neuron[:-1])
+        if self.charge_mode:
+            common_bias_value = float(np.mean(energy_shift))
+            if input_param.nep_param.c2_param is not None:
+                bias_lastlayer = np.asarray(input_param.nep_param.bias_lastlayer)
+                if bias_lastlayer.ndim > 1:
+                    common_bias_value = float(np.mean(bias_lastlayer[:, 0]))
+                else:
+                    common_bias_value = float(np.mean(bias_lastlayer))
+            self.common_bias = torch.nn.Parameter(torch.tensor(common_bias_value, dtype=self.dtype), requires_grad=True)
 
         for i in range(self.ntypes):
             nep_txt_param = None
@@ -80,7 +90,7 @@ class NEP(nn.Module):
                                                     resnet_dt = False,
                                                     activation= "tanh",
                                                     input_dim = self.feature_nums,
-                                                    ener_shift= energy_shift[i],
+                                                    ener_shift= 0.0,
                                                     charge_mode = self.charge_mode,
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
@@ -159,7 +169,11 @@ class NEP(nn.Module):
         #     nn_params.append(np.mean(type_bias))
         # else:
         #     nn_params.append(float(self.common_bias))
-        nn_params.extend(type_bias) # for new nep.txt test
+        if self.charge_mode:
+            nn_params.append(2.0)
+            nn_params.append(float(-self.common_bias.cpu().detach().numpy()))
+        else:
+            nn_params.extend(type_bias) # for new nep.txt test
         nn_params.extend(list(self.c_param_2.permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
         if self.l_max_3b > 0:
             nn_params.extend(list(self.c_param_3.permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
@@ -501,6 +515,8 @@ class NEP(nn.Module):
                     c6[mask] = c6_ntype.reshape(-1) + 2.0
             else:
                 Ei[mask] = output_ntype.reshape(-1)
+        if self.charge_mode:
+            Ei = Ei + self.common_bias.to(dtype=Ei.dtype, device=Ei.device)
         return Ei, charge, c6
      
     def calculate_force_virial(self, 
