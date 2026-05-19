@@ -145,7 +145,11 @@ class NepParam(object):
             b0 = np.array([-float(_) for _ in lines[start_index : start_index + b0_num]]).reshape(1,b0_num)
             start_index = start_index + b0_num
             self.model_wb.append(b0)
-            w1 = np.array([float(_) for _ in lines[start_index : start_index + w1_num]]).reshape(b0_num, self.charge_output_num)
+            w1_values = np.array([float(_) for _ in lines[start_index : start_index + w1_num]])
+            if self.charge_output_num == 1:
+                w1 = w1_values.reshape(b0_num, 1)
+            else:
+                w1 = w1_values.reshape(self.charge_output_num, b0_num).transpose(1, 0)
             start_index = start_index + w1_num
             self.model_wb.append(w1)
             if "5" in version:
