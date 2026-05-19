@@ -68,17 +68,24 @@ class NEP(nn.Module):
         self.atomic_charge = None
         self.atomic_charge_shifted = None
         self.atomic_c6 = None
+        self.atomic_bec = None
         fitting_network_size = list(self.neuron[:-1]) + [1]
         qnep_network_size = list(self.neuron[:-1])
         if self.charge_mode:
             common_bias_value = float(np.mean(energy_shift))
+            sqrt_epsilon_inf_value = 2.0
             if input_param.nep_param.c2_param is not None:
                 bias_lastlayer = np.asarray(input_param.nep_param.bias_lastlayer)
                 if bias_lastlayer.ndim > 1:
                     common_bias_value = float(np.mean(bias_lastlayer[:, 0]))
                 else:
                     common_bias_value = float(np.mean(bias_lastlayer))
+                if getattr(input_param.nep_param, "sqrt_epsilon_inf", None) is not None:
+                    sqrt_epsilon_inf_value = float(input_param.nep_param.sqrt_epsilon_inf)
             self.common_bias = torch.nn.Parameter(torch.tensor(common_bias_value, dtype=self.dtype), requires_grad=True)
+            self.sqrt_epsilon_inf = torch.nn.Parameter(torch.tensor(sqrt_epsilon_inf_value, dtype=self.dtype), requires_grad=True)
+        else:
+            self.sqrt_epsilon_inf = None
 
         for i in range(self.ntypes):
             nep_txt_param = None
@@ -170,7 +177,7 @@ class NEP(nn.Module):
         # else:
         #     nn_params.append(float(self.common_bias))
         if self.charge_mode:
-            nn_params.append(2.0)
+            nn_params.append(float(self.sqrt_epsilon_inf.cpu().detach().numpy()))
             nn_params.append(float(-self.common_bias.cpu().detach().numpy()))
         else:
             nn_params.extend(type_bias) # for new nep.txt test
@@ -361,16 +368,23 @@ class NEP(nn.Module):
 
         Ri_angular = Ri_angular
         Ri_angular.requires_grad_()
+        radial_NL = NL_radial
+        radial_Ri = Ri
+        radial_Ri_d = Ri_d
+        if self.charge_mode >= 3:
+            radial_NL = NL_angular
+            radial_Ri = Ri_angular.detach().clone().requires_grad_(True)
+            radial_Ri_d = Ri_d_angular
         
-        NL_radial_type = NL_radial.new_full(NL_radial.shape, -1).requires_grad_(False)
-        mask = NL_radial != -1
-        NL_radial_type[mask] = atom_type_map[NL_radial[mask]]
+        NL_radial_type = radial_NL.new_full(radial_NL.shape, -1).requires_grad_(False)
+        mask = radial_NL != -1
+        NL_radial_type[mask] = atom_type_map[radial_NL[mask]]
 
         NL_angular_type = NL_angular.new_full(NL_angular.shape, -1).requires_grad_(False)
         mask = NL_angular != -1
         NL_angular_type[mask] = atom_type_map[NL_angular[mask]]
 
-        feats = self.calculate_qn(atom_type_map, NL_radial_type, Ri, NL_angular_type, Ri_angular, device, dtype)
+        feats = self.calculate_qn(atom_type_map, NL_radial_type, radial_Ri, NL_angular_type, Ri_angular, device, dtype)
 
         feats_in = self.q_scaler * feats
         # feats_in = (feats-self.q_min)/(self.q_max-self.q_min)
@@ -380,9 +394,21 @@ class NEP(nn.Module):
         self.atomic_charge = None
         self.atomic_charge_shifted = None
         self.atomic_c6 = c6
+        self.atomic_bec = None
         if self.charge_mode:
             self.atomic_charge = charge
             self.charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
+            self.atomic_bec = self.calculate_bec(
+                charge,
+                self.atomic_charge_shifted,
+                radial_Ri,
+                radial_Ri_d,
+                radial_NL,
+                Ri_angular,
+                Ri_d_angular,
+                NL_angular,
+                device,
+                dtype)
 
         charge_energy = None
         charge_virial = None
@@ -444,11 +470,11 @@ class NEP(nn.Module):
             # print("==single time: tall {} ei {} zbl ei {}".format(t2-t0, t1-t0, t2-t1))
         else:
             # t4 = time.time()
-            Force, Virial = self.calculate_force_virial(Ri, Ri_d, 
+            Force, Virial = self.calculate_force_virial(radial_Ri, radial_Ri_d, 
                                                         Ri_angular, Ri_d_angular, 
                                                         ri_zbl, ri_d_zbl,
                                                         Etot, natoms_sum, 
-                                                        NL_radial, 
+                                                        radial_NL, 
                                                         NL_angular, 
                                                         neigh_zbl,
                                                         num_atom,
@@ -469,6 +495,82 @@ class NEP(nn.Module):
             # print("==single time: t1 {} t2 {} t3 {} t4 {} t5 {} t6 {} t7 {}".format(t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6))
             # check_cuda_memory(-1, -1, "FORWAR calculate_force")
         return Etot, Ei, Force, Egroup, Virial
+
+    def calculate_bec(
+        self,
+        charge: torch.Tensor,
+        charge_shifted: torch.Tensor,
+        Ri: torch.Tensor,
+        Ri_d: torch.Tensor,
+        NL_radial: torch.Tensor,
+        Ri_angular: torch.Tensor,
+        Ri_d_angular: torch.Tensor,
+        NL_angular: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype) -> torch.Tensor:
+        atom_num = charge.shape[0]
+        identity = torch.eye(3, dtype=dtype, device=device)
+        bec = charge_shifted.reshape(-1, 1, 1) * identity.reshape(1, 3, 3)
+
+        sources = []
+        radial_source_index = None
+        angular_source_index = None
+        if self.train_2b:
+            radial_source_index = len(sources)
+            sources.append(Ri)
+        if self.l_max_3b > 0:
+            angular_source_index = len(sources)
+            sources.append(Ri_angular)
+        if len(sources) == 0:
+            return (bec * self.sqrt_epsilon_inf.to(dtype=dtype, device=device)).reshape(atom_num, 9)
+
+        def add_descriptor_bec(
+            bec_value: torch.Tensor,
+            grad_value: Optional[torch.Tensor],
+            descriptor: torch.Tensor,
+            descriptor_d: torch.Tensor,
+            neigh: torch.Tensor,
+            center: int) -> torch.Tensor:
+            if grad_value is None:
+                return bec_value
+            valid = neigh[center] >= 0
+            if not valid.any():
+                return bec_value
+            neigh_index = neigh[center][valid].to(torch.int64)
+            r12 = descriptor[center, valid, 1:4]
+            f12 = torch.mul(grad_value[center, valid].unsqueeze(-1), descriptor_d[center, valid]).sum(dim=-2)
+            contribution = 0.5 * r12.unsqueeze(-1) * f12.unsqueeze(-2)
+            center_update = torch.zeros_like(bec_value)
+            neighbor_update = torch.zeros_like(bec_value)
+            center_update[center] = contribution.sum(dim=0)
+            neighbor_update.index_add_(0, neigh_index, -contribution)
+            return bec_value + center_update + neighbor_update
+
+        for center in range(atom_num):
+            grads = torch.autograd.grad(
+                charge[center],
+                sources,
+                retain_graph=True,
+                create_graph=True,
+                allow_unused=True)
+            if radial_source_index is not None:
+                bec = add_descriptor_bec(
+                    bec,
+                    grads[radial_source_index],
+                    Ri,
+                    Ri_d,
+                    NL_radial,
+                    center)
+            if angular_source_index is not None:
+                bec = add_descriptor_bec(
+                    bec,
+                    grads[angular_source_index],
+                    Ri_angular,
+                    Ri_d_angular,
+                    NL_angular,
+                    center)
+
+        return (bec * self.sqrt_epsilon_inf.to(dtype=dtype, device=device)).reshape(atom_num, 9)
 
     def calculate_charge_energy(
         self,
@@ -812,7 +914,7 @@ class NEP(nn.Module):
         mask: List[Optional[torch.Tensor]] = [torch.ones_like(Ei)]
         dE = torch.autograd.grad([Ei], [Ri], grad_outputs=mask, retain_graph=True, create_graph=True)[0]
         '''
-        if device.type == "cpu": #True: 
+        if True: # device.type == "cpu": #True: 
             batch_size = num_atom.shape[0]
             image_atom_index = torch.cumsum(num_atom, dim=0).squeeze(-1)
             image_atom_index = torch.cat((torch.tensor([0], device=device), image_atom_index), dim=0)
@@ -938,9 +1040,11 @@ class NEP(nn.Module):
         # check_cuda_memory(-1, -1, "FORWAR calculate_qn start")
         if self.train_2b:
             c2 = self.get_c(self.c_param_2, self.n_max_radial,  self.n_base_radial,  Imagetype_map, j_type_map)
+            radial_cutoff = self.cutoff_angular if self.charge_mode >= 3 else self.cutoff_radial
+            radial_rcinv = self.rcinv_angular if self.charge_mode >= 3 else self.rcinv_radial
             feat_2b = self.cal_feat_2body(Ri[:, :, 0], Imagetype_map, 
                                         c2,
-                                        self.n_max_radial, self.n_base_radial, self.cutoff_radial, self.rcinv_radial)
+                                        self.n_max_radial, self.n_base_radial, radial_cutoff, radial_rcinv)
         # check_cuda_memory(-1, -1, "FORWAR calculate_qn 2b end")
         # R = Ri_angular[:, :, :, 0]
         # xyz = Ri_angular[:, :, :, 1:]

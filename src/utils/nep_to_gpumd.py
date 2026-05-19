@@ -112,13 +112,14 @@ def extract_model(nep_path:str):
     descriptor_dict = model['json_file']['model']['descriptor']
     charge_mode = descriptor_dict.get('charge_mode', 0)
     charge_suffix = f"_charge{charge_mode}" if charge_mode else ""
+    version_suffix = "nep5" if charge_mode else "nep4"
     charge_output_num = 3 if charge_mode >= 3 else (2 if charge_mode else 1)
     zbl = descriptor_dict['zbl'] if 'zbl' in descriptor_dict.keys() else None
     if zbl is None:
-        head_content =  "nep5{}   {} {}\n".format(charge_suffix, len(atom_names), " ".join(map(str, atom_names)))
+        head_content =  "{}{}   {} {}\n".format(version_suffix, charge_suffix, len(atom_names), " ".join(map(str, atom_names)))
     else:
         zbl_factor = descriptor_dict['use_typewise_cutoff_zbl'] if 'use_typewise_cutoff_zbl' in descriptor_dict.keys() else None
-        head_content =  "nep5_zbl{}   {} {}\n".format(charge_suffix, len(atom_names), " ".join(map(str, atom_names)))
+        head_content =  "{}_zbl{}   {} {}\n".format(version_suffix, charge_suffix, len(atom_names), " ".join(map(str, atom_names)))
         if zbl_factor is None:
             head_content +=  "zbl   {} {}\n".format(zbl/2, zbl)
         else:
@@ -162,20 +163,20 @@ def extract_model(nep_path:str):
                 c6_weight = model['state_dict'][f'{module}fitting_net.{i}.c6_head.weight']
                 nn_list.extend(c6_weight.flatten().cpu().detach().numpy())
             energy_bias = model['state_dict'].get(f'{module}fitting_net.{i}.energy_head.bias')
-            if energy_bias is not None:
+            if energy_bias is not None: # for nep5
                 type_energy_bias.extend((-energy_bias).flatten().cpu().detach().numpy())
         else:
             output_weight = model['state_dict'][f'{module}fitting_net.{i}.layers.1.weight']
             output_bias = model['state_dict'][f'{module}fitting_net.{i}.layers.1.bias']
             nn_list.extend(output_weight.flatten().cpu().detach().numpy())
             nn_list.extend((-output_bias).flatten().cpu().detach().numpy())
-
+    # W_Tn sqrt_epsilon_inf common_bias c2...
     nn_list.append(2.0 if charge_mode else 0.0) # sqrt_epsilon_inf for charge mode, common bias placeholder otherwise
     if charge_mode:
         if qnep_common_bias is not None:
             nn_list.append(qnep_common_bias)
         else:
-            nn_list.append(float(sum(type_energy_bias) / len(type_energy_bias)) if len(type_energy_bias) > 0 else 0.0)
+            nn_list.append(float(sum(type_energy_bias) / len(type_energy_bias)) if len(type_energy_bias) > 0 else 0.0) # 均值 nep4 需要修改
     c_list.extend(list(model['state_dict'][f'{module}c_param_2'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
     if l_max[0] > 0:
         c_list.extend(list(model['state_dict'][f'{module}c_param_3'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))

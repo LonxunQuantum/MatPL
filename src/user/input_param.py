@@ -105,6 +105,7 @@ class InputParam(object):
         self.descriptor.l_max = nep_param.l_max
         self.descriptor.zbl = nep_param.zbl
         self.descriptor.use_typewise_cutoff_zbl = nep_param.use_typewise_cutoff_zbl
+        self.descriptor.charge_mode = nep_param.charge_mode
         # self.descriptor.type_weight = nep_param.type_weight
 
 
