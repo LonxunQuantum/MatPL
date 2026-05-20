@@ -546,13 +546,13 @@ class NEP(nn.Module):
             neighbor_update.index_add_(0, neigh_index, -contribution)
             return bec_value + center_update + neighbor_update
 
+        grads = torch.autograd.grad(
+            charge.sum(),
+            sources,
+            retain_graph=True,
+            create_graph=True,
+            allow_unused=True)
         for center in range(atom_num):
-            grads = torch.autograd.grad(
-                charge[center],
-                sources,
-                retain_graph=True,
-                create_graph=True,
-                allow_unused=True)
             if radial_source_index is not None:
                 bec = add_descriptor_bec(
                     bec,
