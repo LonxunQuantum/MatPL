@@ -2252,6 +2252,49 @@ void NEP_CPU::compute(
   total_virial[7] = total_virial[5]; //zy
 }
 
+void NEP_CPU::compute_descriptor(
+  const std::vector<int>& type,
+  const std::vector<double>& box,
+  const std::vector<double>& position,
+  std::vector<double>& descriptor)
+{
+  if (paramb.model_type != 0) {
+    std::cout << "Cannot compute descriptor using a non-potential NEP model.\n";
+    exit(1);
+  }
+
+  const int N = type.size();
+  const int size_x12 = N * MN;
+
+  if (N * 3 != static_cast<int>(position.size())) {
+    std::cout << "Type and position sizes are inconsistent.\n";
+    exit(1);
+  }
+  if (N * annmb.dim != static_cast<int>(descriptor.size())) {
+    std::cout << "Descriptor buffer size (" << descriptor.size()
+              << ") does not match N*dim (" << N << "*" << annmb.dim << ").\n";
+    exit(1);
+  }
+
+  allocate_memory(N);
+
+  for (size_t n = 0; n < descriptor.size(); ++n) {
+    descriptor[n] = 0.0;
+  }
+
+  find_neighbor(
+    paramb.rc_radial, paramb.rc_angular, N, MN, box, position, num_cells, ebox,
+    NN_radial, NL_radial, NN_angular, NL_angular,
+    r12);
+
+  find_descriptor(
+    false, true, false, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
+    NN_angular.data(), NL_angular.data(), type.data(), r12.data(), r12.data() + size_x12,
+    r12.data() + size_x12 * 2, r12.data() + size_x12 * 3, r12.data() + size_x12 * 4,
+    r12.data() + size_x12 * 5,
+    Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr);
+}
+
 void NEP_CPU::find_neigh(
   const double rc_radial,
   const double rc_angular,

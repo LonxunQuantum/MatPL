@@ -57,8 +57,14 @@ class FindNeigh
     FindNeigh();
     std::tuple<std::vector<double>, std::vector<double>, std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>> getNeigh(double, double, int, std::vector<int>, std::vector<double>, std::vector<double>);
     std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> inference(std::vector<int>, std::vector<double>, std::vector<double>);
-    std::tuple<std::vector<int>, std::vector<double>> getNeighDP( int ntypes, 
-                                                                  int max_neigh_num, 
+    // returns per-atom descriptor as a flat row-major vector of length N*dim
+    // ordered as atom0_d0..atom0_d{dim-1}, atom1_d0.., ..., atom{N-1}_d{dim-1}
+    std::vector<double> getDescriptor(std::vector<int> atom_type_map,
+                                      std::vector<double> box,
+                                      std::vector<double> position);
+    int getDim() const { return calc.annmb.dim; }
+    std::tuple<std::vector<int>, std::vector<double>> getNeighDP( int ntypes,
+                                                                  int max_neigh_num,
                                                                   double rcut,
                                                                   std::vector<double>  rcut_type,
                                                                   std::vector<int> atom_type_map,
@@ -71,11 +77,12 @@ class FindNeigh
     NEP_CPU calc;
     DP_CPU  calc_dp;
     int num_atoms = 0;
-    
+
     std::vector<double> potential;
     std::vector<double> force;
     std::vector<double> virial;
     std::vector<double> total_virial;
+    std::vector<double> descriptor;
 
 };
 
@@ -106,6 +113,30 @@ std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> FindNe
   allocate_memory(N);
   calc.compute(atom_type_map, box, position, potential, force, virial, total_virial);
   return std::make_tuple(potential, force, total_virial);
+}
+
+std::vector<double> FindNeigh::getDescriptor(
+  std::vector<int> atom_type_map,
+  std::vector<double> box,
+  std::vector<double> position)
+{
+  const int N = atom_type_map.size();
+  const int dim = calc.annmb.dim;
+  allocate_memory(N);
+  // compute_descriptor writes layout d0[0..N-1], d1[0..N-1], ... (column-major in (N,dim))
+  std::vector<double> col_major(static_cast<size_t>(N) * dim, 0.0);
+  calc.compute_descriptor(atom_type_map, box, position, col_major);
+
+  // Transpose to row-major so Python sees shape (N, dim) directly.
+  if (descriptor.size() != static_cast<size_t>(N) * dim) {
+    descriptor.assign(static_cast<size_t>(N) * dim, 0.0);
+  }
+  for (int n = 0; n < N; ++n) {
+    for (int d = 0; d < dim; ++d) {
+      descriptor[static_cast<size_t>(n) * dim + d] = col_major[static_cast<size_t>(d) * N + n];
+    }
+  }
+  return descriptor;
 }
 
 std::tuple<std::vector<double>, std::vector<double>, std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>> FindNeigh::getNeigh(
@@ -142,6 +173,8 @@ PYBIND11_MODULE(findneigh, m){
     .def("getNeigh", &FindNeigh::getNeigh)
     .def("getNeighDP", &FindNeigh::getNeighDP)
     .def("inference", &FindNeigh::inference)
+    .def("getDescriptor", &FindNeigh::getDescriptor)
+    .def("getDim", &FindNeigh::getDim)
     .def("init_model", &FindNeigh::init_model)
 		;
 }

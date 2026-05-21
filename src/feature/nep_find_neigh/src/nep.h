@@ -126,6 +126,13 @@ public:
     std::vector<double>& virial,
     std::vector<double>&  total_virial);
 
+  // descriptor buffer must have size N * annmb.dim, layout d0[0..N-1], d1[0..N-1], ...
+  void compute_descriptor(
+    const std::vector<int>& type,
+    const std::vector<double>& box,
+    const std::vector<double>& position,
+    std::vector<double>& descriptor);
+
   ParaMB paramb;
   ANN annmb;
   ZBL zbl;
