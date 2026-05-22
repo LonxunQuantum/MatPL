@@ -111,14 +111,8 @@ def extract_model(nep_path:str):
 
     descriptor_dict = model['json_file']['model']['descriptor']
     charge_mode = descriptor_dict.get('charge_mode', 0)
-    if isinstance(charge_mode, str):
-        charge_mode = 2 if charge_mode.lower() == "true" else int(charge_mode)
-    elif charge_mode is True:
-        charge_mode = 2
-    elif charge_mode is False or charge_mode is None:
-        charge_mode = 0
     if charge_mode:
-        charge_mode = 2
+        assert charge_mode == 2
     charge_suffix = f"_charge{charge_mode}" if charge_mode else ""
     version_suffix = "nep4" if charge_mode else "nep5"
     charge_output_num = 2 if charge_mode else 1
