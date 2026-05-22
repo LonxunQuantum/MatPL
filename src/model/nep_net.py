@@ -38,8 +38,8 @@ class NEP(nn.Module):
         self.half_Pi = self.Pi/2
         self.model_type = input_param.model_type.upper()
         self.set_init_nep_param(input_param)
-        self.charge_mode = getattr(input_param.nep_param, "charge_mode", 0)
-        self.charge_output_num = 3 if self.charge_mode >= 3 else (2 if self.charge_mode else 1)
+        self.charge_mode = getattr(input_param.nep_param, "charge_mode", 0) or 0
+        self.charge_output_num = 2 if self.charge_mode else 1
         self.zbl = input_param.nep_param.zbl
         self.zbl_factor = input_param.nep_param.use_typewise_cutoff_zbl
         if self.input_param.precision == "float64":
@@ -67,7 +67,6 @@ class NEP(nn.Module):
         self.charge_predict = None
         self.atomic_charge = None
         self.atomic_charge_shifted = None
-        self.atomic_c6 = None
         self.atomic_bec = None
         fitting_network_size = list(self.neuron[:-1]) + [1]
         qnep_network_size = list(self.neuron[:-1])
@@ -371,10 +370,6 @@ class NEP(nn.Module):
         radial_NL = NL_radial
         radial_Ri = Ri
         radial_Ri_d = Ri_d
-        if self.charge_mode >= 3:
-            radial_NL = NL_angular
-            radial_Ri = Ri_angular.detach().clone().requires_grad_(True)
-            radial_Ri_d = Ri_d_angular
         
         NL_radial_type = radial_NL.new_full(radial_NL.shape, -1).requires_grad_(False)
         mask = radial_NL != -1
@@ -388,12 +383,11 @@ class NEP(nn.Module):
 
         feats_in = self.q_scaler * feats
         # feats_in = (feats-self.q_min)/(self.q_max-self.q_min)
-        Ei, charge, c6 = self.calculate_Ei(atom_type_map, feats_in, device)
+        Ei, charge = self.calculate_Ei(atom_type_map, feats_in, device)
         assert Ei is not None
         self.charge_predict = None
         self.atomic_charge = None
         self.atomic_charge_shifted = None
-        self.atomic_c6 = c6
         self.atomic_bec = None
         if self.charge_mode:
             self.atomic_charge = charge
@@ -423,9 +417,6 @@ class NEP(nn.Module):
                 charge_volume,
                 num_atom,
                 self.atomic_charge_shifted,
-                c6,
-                NL_radial,
-                Ri,
                 dtype,
                 device)
             charge_virial = self.calculate_charge_virial(
@@ -434,7 +425,6 @@ class NEP(nn.Module):
                 charge_volume,
                 num_atom,
                 self.atomic_charge_shifted,
-                c6,
                 dtype,
                 device)
         
@@ -579,9 +569,6 @@ class NEP(nn.Module):
         volume: Optional[torch.Tensor],
         num_atom: torch.Tensor,
         charge: torch.Tensor,
-        c6: Optional[torch.Tensor],
-        NL_radial: torch.Tensor,
-        Ri_radial: torch.Tensor,
         dtype: torch.dtype,
         device: torch.device) -> torch.Tensor:
         split_sizes = num_atom.reshape(-1).tolist()
@@ -590,7 +577,6 @@ class NEP(nn.Module):
             dim=0)
         energies = []
         alpha = torch.as_tensor(self.Pi / self.cutoff_radial, dtype=dtype, device=device)
-        two_alpha_over_sqrt_pi = 2.0 * alpha / torch.sqrt(torch.as_tensor(self.Pi, dtype=dtype, device=device))
         alpha_factor = 0.25 / (alpha * alpha)
         for image_idx, (start_tensor, atom_num) in enumerate(zip(atom_starts, split_sizes)):
             start = int(start_tensor.item())
@@ -606,26 +592,6 @@ class NEP(nn.Module):
                 alpha_factor,
                 dtype,
                 device)
-            if self.charge_mode == 1:
-                image_energy = image_energy + self.calculate_charge_real_energy(
-                    start,
-                    end,
-                    image_position,
-                    box_original[image_idx],
-                    image_charge,
-                    alpha,
-                    two_alpha_over_sqrt_pi,
-                    dtype,
-                    device)
-            if self.charge_mode >= 3 and c6 is not None:
-                image_energy = image_energy + self.calculate_vdw_energy(
-                    start,
-                    end,
-                    image_position,
-                    box_original[image_idx],
-                    c6[start:end],
-                    dtype,
-                    device)
             energies.append(image_energy)
         return torch.stack(energies)
 
@@ -636,7 +602,6 @@ class NEP(nn.Module):
         volume: Optional[torch.Tensor],
         num_atom: torch.Tensor,
         charge: torch.Tensor,
-        c6: Optional[torch.Tensor],
         dtype: torch.dtype,
         device: torch.device) -> torch.Tensor:
         split_sizes = num_atom.reshape(-1).tolist()
@@ -645,7 +610,6 @@ class NEP(nn.Module):
             dim=0)
         virials = []
         alpha = torch.as_tensor(self.Pi / self.cutoff_radial, dtype=dtype, device=device)
-        two_alpha_over_sqrt_pi = 2.0 * alpha / torch.sqrt(torch.as_tensor(self.Pi, dtype=dtype, device=device))
         alpha_factor = 0.25 / (alpha * alpha)
         identity = torch.eye(3, dtype=dtype, device=device)
         for image_idx, (start_tensor, atom_num) in enumerate(zip(atom_starts, split_sizes)):
@@ -653,8 +617,8 @@ class NEP(nn.Module):
             end = start + atom_num
             strain = torch.zeros((3, 3), dtype=dtype, device=device, requires_grad=True)
             deformation = identity + strain
-            image_position = position[start:end].matmul(deformation)
-            image_box = box_original[image_idx].reshape(3, 3).matmul(deformation).reshape(-1)
+            image_position = position[start:end].matmul(deformation.T)
+            image_box = deformation.matmul(box_original[image_idx].reshape(3, 3)).reshape(-1)
             image_energy = self.calculate_charge_reciprocal_energy(
                 image_position,
                 charge[start:end],
@@ -664,90 +628,13 @@ class NEP(nn.Module):
                 alpha_factor,
                 dtype,
                 device)
-            if self.charge_mode == 1:
-                image_energy = image_energy + self.calculate_charge_real_energy(
-                    start,
-                    end,
-                    image_position,
-                    image_box,
-                    charge[start:end],
-                    alpha,
-                    two_alpha_over_sqrt_pi,
-                    dtype,
-                    device)
-            if self.charge_mode >= 3 and c6 is not None:
-                image_energy = image_energy + self.calculate_vdw_energy(
-                    start,
-                    end,
-                    image_position,
-                    image_box,
-                    c6[start:end],
-                    dtype,
-                    device)
             image_virial = torch.autograd.grad(
                 image_energy,
                 strain,
                 retain_graph=True,
                 create_graph=True)[0]
             virials.append(image_virial.reshape(9))
-        return torch.stack(virials)
-
-    def calculate_vdw_energy(
-        self,
-        start: int,
-        end: int,
-        position: torch.Tensor,
-        box: torch.Tensor,
-        c6: torch.Tensor,
-        dtype: torch.dtype,
-        device: torch.device) -> torch.Tensor:
-        energy = torch.zeros((), dtype=dtype, device=device)
-        lattice = box.reshape(3, 3)
-        inv_lattice = torch.linalg.inv(lattice)
-        r6_damping = torch.as_tensor(729.0, dtype=dtype, device=device)
-        for i in range(end - start - 1):
-            delta = position[i + 1:] - position[i]
-            frac = delta.matmul(inv_lattice)
-            frac = frac - torch.round(frac)
-            delta = frac.matmul(lattice)
-            rij = torch.linalg.norm(delta, dim=1)
-            valid = (rij > 1e-12) & (rij < self.cutoff_radial)
-            if not valid.any():
-                continue
-            rij = rij[valid]
-            c6_j = c6[i + 1:][valid]
-            denominator = rij.pow(6) + r6_damping
-            energy = energy - torch.sum(c6[i].pow(2) * c6_j.pow(2) / denominator)
-        return energy
-
-    def calculate_charge_real_energy(
-        self,
-        start: int,
-        end: int,
-        position: torch.Tensor,
-        box: torch.Tensor,
-        charge: torch.Tensor,
-        alpha: torch.Tensor,
-        two_alpha_over_sqrt_pi: torch.Tensor,
-        dtype: torch.dtype,
-        device: torch.device) -> torch.Tensor:
-        energy = -0.5 * two_alpha_over_sqrt_pi * torch.sum(charge * charge)
-        lattice = box.reshape(3, 3)
-        inv_lattice = torch.linalg.inv(lattice)
-        for i in range(end - start - 1):
-            delta = position[i + 1:] - position[i]
-            frac = delta.matmul(inv_lattice)
-            frac = frac - torch.round(frac)
-            delta = frac.matmul(lattice)
-            rij = torch.linalg.norm(delta, dim=1)
-            valid = (rij > 1e-12) & (rij < self.cutoff_radial)
-            if not valid.any():
-                continue
-            rij = rij[valid]
-            qj = charge[i + 1:][valid]
-            erfc_r = torch.erfc(alpha * rij) / rij
-            energy = energy + torch.sum(charge[i] * qj * erfc_r)
-        return self.K_C_SP * energy
+        return -torch.stack(virials)
 
     def calculate_charge_reciprocal_energy(
         self,
@@ -841,7 +728,7 @@ class NEP(nn.Module):
     def calculate_Ei(self, 
                      Imagetype_map: torch.Tensor,
                      feats: torch.Tensor,
-                     device: torch.device) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+                     device: torch.device) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Calculate the energy Ei for each type of atom in the system.
 
@@ -858,7 +745,6 @@ class NEP(nn.Module):
         """
         Ei = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device)
         charge = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device) if self.charge_mode else None
-        c6 = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device) if self.charge_mode >= 3 else None
         # fit_net_dict = {idx: fit_net for idx, fit_net in enumerate(self.fitting_net)}
         for idx, fit_net in enumerate(self.fitting_net):
             # fit_net = fit_net_dict.get(nn_i)
@@ -870,16 +756,14 @@ class NEP(nn.Module):
             feat = feats[indices, :]
             output_ntype = fit_net.forward(feat)
             if self.charge_mode:
-                energy_ntype, charge_ntype, c6_ntype = output_ntype
+                energy_ntype, charge_ntype = output_ntype
                 Ei[mask] = energy_ntype.reshape(-1)
                 charge[mask] = charge_ntype.reshape(-1)
-                if self.charge_mode >= 3:
-                    c6[mask] = c6_ntype.reshape(-1) + 2.0
             else:
                 Ei[mask] = output_ntype.reshape(-1)
         if self.charge_mode:
             Ei = Ei + self.common_bias.to(dtype=Ei.dtype, device=Ei.device)
-        return Ei, charge, c6
+        return Ei, charge
      
     def calculate_force_virial(self, 
                                 Ri: torch.Tensor,
@@ -1040,11 +924,9 @@ class NEP(nn.Module):
         # check_cuda_memory(-1, -1, "FORWAR calculate_qn start")
         if self.train_2b:
             c2 = self.get_c(self.c_param_2, self.n_max_radial,  self.n_base_radial,  Imagetype_map, j_type_map)
-            radial_cutoff = self.cutoff_angular if self.charge_mode >= 3 else self.cutoff_radial
-            radial_rcinv = self.rcinv_angular if self.charge_mode >= 3 else self.rcinv_radial
             feat_2b = self.cal_feat_2body(Ri[:, :, 0], Imagetype_map, 
                                         c2,
-                                        self.n_max_radial, self.n_base_radial, radial_cutoff, radial_rcinv)
+                                        self.n_max_radial, self.n_base_radial, self.cutoff_radial, self.rcinv_radial)
         # check_cuda_memory(-1, -1, "FORWAR calculate_qn 2b end")
         # R = Ri_angular[:, :, :, 0]
         # xyz = Ri_angular[:, :, :, 1:]

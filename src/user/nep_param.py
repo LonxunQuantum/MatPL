@@ -41,6 +41,21 @@ class NepParam(object):
         self.charge_output_num = 1
         self.sqrt_epsilon_inf = None
 
+    def normalize_charge_mode(self, charge_mode):
+        if charge_mode is None or charge_mode is False:
+            return None
+        if charge_mode is True:
+            return 2
+        if isinstance(charge_mode, str):
+            if charge_mode.lower() == "true":
+                return 2
+            if charge_mode.lower() == "false":
+                return None
+            charge_mode = int(charge_mode)
+        if charge_mode != 2:
+            raise Exception("ERROR! charge_mode only supports 2 now. Use \"charge_mode\": \"2\" or \"charge_mode\": true.")
+        return 2
+
     '''
     description: 
     recover model from nep.txt file
@@ -62,10 +77,8 @@ class NepParam(object):
         self.sqrt_epsilon_inf = None
         if "charge" in version:
             charge_token = version.split("charge")[-1]
-            self.charge_mode = int(charge_token)
-            if self.charge_mode not in [1, 2, 3]:
-                raise Exception("ERROR! charge_mode in nep.txt should be 1, 2, or 3. \n 1 for NEP-charge include both real-space and k-space; 2 for NEP-Charge include k-space only; 3 for NEP-Charge-VdW and include k-space only.")
-        self.charge_output_num = 3 if self.charge_mode >= 3 else (2 if self.charge_mode else 1)
+            self.charge_mode = self.normalize_charge_mode(charge_token)
+        self.charge_output_num = 2 if self.charge_mode else 1
         type_list = get_atomic_name_from_str(type_list)
 
         set1, set2 = set(atom_type_train), set(type_list)
@@ -253,10 +266,8 @@ class NepParam(object):
         self.type_weight = get_parameter("type_weight", descriptor_dict, type_list_weight_default) # force weights for different atom types
         self.model_type = 0 # select to train potential 0, dipole 1, or polarizability 2
         self.prediction = 0 # select between training and prediction (inference)
-        self.charge_mode = get_parameter("charge_mode", descriptor_dict, None)
-        if  self.charge_mode is not None and self.charge_mode not in [1, 2, 3]:
-            raise Exception("ERROR! charge_mode should be 1, 2, or 3. \n 1 for NEP-charge include both real-space and k-space; 2 for NEP-Charge include k-space only; 3 for NEP-Charge-VdW and include k-space only.")
-        self.charge_output_num = 3 if self.charge_mode >= 3 else (2 if self.charge_mode else 1)
+        self.charge_mode = self.normalize_charge_mode(get_parameter("charge_mode", descriptor_dict, None))
+        self.charge_output_num = 2 if self.charge_mode else 1
         self.zbl = get_parameter("zbl", descriptor_dict, None)
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
         if self.zbl is None and self.use_typewise_cutoff_zbl is not None:

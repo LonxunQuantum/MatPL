@@ -189,7 +189,7 @@ class QNEPFittingNet(nn.Module):
         self.resnet_dt_flag = resnet_dt
         self.activation = torch.tanh if activation == "tanh" else None
         self.charge_mode = charge_mode
-        self.output_num = 3 if charge_mode >= 3 else 2
+        self.output_num = 2
 
         self.layers = nn.ModuleList()
         from_nep_txt = nep_txt_param is not None
@@ -220,21 +220,14 @@ class QNEPFittingNet(nn.Module):
                 output_weight = output_weight.reshape(hidden_dim, self.output_num)
             energy_weight = output_weight[:, 0:1]
             charge_weight = output_weight[:, 1:2]
-            c6_weight = output_weight[:, 2:3] if self.charge_mode >= 3 else None
         else:
             energy_weight = torch.Tensor(hidden_dim, 1)
             charge_weight = torch.Tensor(hidden_dim, 1)
             normal(energy_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
             normal(charge_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
-            if self.charge_mode >= 3:
-                c6_weight = torch.Tensor(hidden_dim, 1)
-                normal(c6_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
-            else:
-                c6_weight = None
 
         self.energy_head = LayerModule(energy_weight, None, None)
         self.charge_head = LayerModule(charge_weight, None, None)
-        self.c6_head = LayerModule(c6_weight, None, None) if self.charge_mode >= 3 else None
 
     def get_param_list(self):
         param_list = []
@@ -251,8 +244,6 @@ class QNEPFittingNet(nn.Module):
 
         param_list.extend(list(self.energy_head.weight.flatten().cpu().detach().numpy()))
         param_list.extend(list(self.charge_head.weight.flatten().cpu().detach().numpy()))
-        if self.c6_head is not None:
-            param_list.extend(list(self.c6_head.weight.flatten().cpu().detach().numpy()))
         return param_list, last_bias_list
 
     def forward(self, x: torch.Tensor):
@@ -273,8 +264,7 @@ class QNEPFittingNet(nn.Module):
 
         energy = torch.matmul(x, self.energy_head.weight)
         charge = torch.matmul(x, self.charge_head.weight)
-        c6 = torch.matmul(x, self.c6_head.weight) if self.c6_head is not None else None
-        return energy, charge, c6
+        return energy, charge
 '''    
 class EmbeddingNet0(nn.Module):
     def __init__(self, 
