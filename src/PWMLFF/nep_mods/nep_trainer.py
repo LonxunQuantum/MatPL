@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from src.loss.dploss import calc_loss, adjust_lr, warmup_lr
+from src.loss.dploss import adjust_lr, warmup_lr
 
 from src.optimizer.KFWrapper import KFOptimizerWrapper
 # import horovod.torch as hvd
@@ -45,6 +45,58 @@ def get_charge_loss(charge_predict, sample, criterion, args:InputParam, real_lr=
     else:
         pref_charge = getattr(args.optimizer_param, "pre_fac_charge", 0.1)
     return loss_charge, pref_charge
+
+
+def get_adam_loss_prefactor(start_prefactor, end_prefactor, real_lr, start_lr=0.001):
+    return end_prefactor + (start_prefactor - end_prefactor) * real_lr / start_lr
+
+
+def get_nep_loss(
+    args: InputParam,
+    real_lr,
+    avg_atom_number,
+    loss_F_val,
+    loss_Etot_val,
+    loss_Virial_val=None,
+    loss_Egroup_val=None,
+    train_virial=False,
+):
+    optimizer_param = args.optimizer_param
+    loss = torch.zeros_like(loss_F_val)
+
+    if optimizer_param.train_force:
+        pref_force = get_adam_loss_prefactor(
+            optimizer_param.start_pre_fac_force,
+            optimizer_param.end_pre_fac_force,
+            real_lr,
+        )
+        loss = loss + pref_force * loss_F_val
+
+    if optimizer_param.train_energy:
+        pref_etot = get_adam_loss_prefactor(
+            optimizer_param.start_pre_fac_etot,
+            optimizer_param.end_pre_fac_etot,
+            real_lr,
+        )
+        loss = loss + pref_etot * loss_Etot_val / avg_atom_number
+
+    if train_virial and loss_Virial_val is not None:
+        pref_virial = get_adam_loss_prefactor(
+            optimizer_param.start_pre_fac_virial,
+            optimizer_param.end_pre_fac_virial,
+            real_lr,
+        )
+        loss = loss + pref_virial * loss_Virial_val / avg_atom_number
+
+    if optimizer_param.train_egroup and loss_Egroup_val is not None:
+        pref_egroup = get_adam_loss_prefactor(
+            optimizer_param.start_pre_fac_egroup,
+            optimizer_param.end_pre_fac_egroup,
+            real_lr,
+        )
+        loss = loss + pref_egroup * loss_Egroup_val
+
+    return loss
 
 
 def print_l1_l2(model):
@@ -188,14 +240,17 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args, real_lr, start_lr)
-        loss_val = torch.zeros_like(loss_F_val)
+        loss_Egroup_val = None
+        loss_Virial_val = None
+        train_virial = False
 
         if args.optimizer_param.train_egroup:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
         if args.optimizer_param.train_virial:
             data_mask = Virial_label[:, 0] > -1e6
             _Virial_label = Virial_label[:, [0, 1, 2, 4, 5, 8]][data_mask]
-            if data_mask.any().item():
+            train_virial = data_mask.any().item()
+            if train_virial:
                 loss_Virial_val = criterion(Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]], _Virial_label)
                 loss_Virial_per_atom_val = criterion(
                     Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]] / sample["num_atom"][data_mask],
@@ -203,38 +258,17 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                 )
                 loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
                 loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
-                loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
 
-        w_f, w_e, w_v, w_eg, w_ei = 0, 0, 0, 0, 0
-        if args.optimizer_param.train_force:
-            w_f = 1.0
-            loss_val += loss_F_val
-        if args.optimizer_param.train_energy:
-            w_e = 1.0
-            loss_val += loss_Etot_val
-        if args.optimizer_param.train_virial and data_mask.any().item():
-            w_v = 1.0
-            loss_val += loss_Virial_val
-        if args.optimizer_param.train_egroup:
-            w_eg = 1.0
-            loss_val += loss_Egroup_val
-
-        if args.optimizer_param.train_egroup and args.optimizer_param.train_virial:
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 1, w_f, loss_F_val, w_e, loss_Etot_val, w_v, loss_Virial_val, w_eg, loss_Egroup_val, w_ei, loss_Ei_val, avg_atom_number
-            )
-        elif args.optimizer_param.train_egroup and not args.optimizer_param.train_virial:
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 2, w_f, loss_F_val, w_e, loss_Etot_val, w_eg, loss_Egroup_val, w_ei, loss_Ei_val, avg_atom_number
-            )
-        elif not args.optimizer_param.train_egroup and args.optimizer_param.train_virial and data_mask.any().item():
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 3, w_f, loss_F_val, w_e, loss_Etot_val, w_v, loss_Virial_val, w_ei, loss_Ei_val, avg_atom_number
-            )
-        else:
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 4, w_f, loss_F_val, w_e, loss_Etot_val, w_ei, loss_Ei_val, avg_atom_number
-            )
+        loss = get_nep_loss(
+            args,
+            real_lr,
+            avg_atom_number,
+            loss_F_val,
+            loss_Etot_val,
+            loss_Virial_val,
+            loss_Egroup_val,
+            train_virial,
+        )
         if loss_Charge_val is not None:
             loss = loss + pref_charge * loss_Charge_val
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
