@@ -40,6 +40,18 @@ def get_charge_loss(charge_predict, sample, criterion, args:InputParam):
     return criterion(charge_predict, charge_label)
 
 
+def get_bec_loss(bec_predict, sample, criterion, args:InputParam):
+    if not getattr(args.optimizer_param, "train_bec", False):
+        return None, None
+    if bec_predict is None or "bec" not in sample:
+        return None, None
+    bec_label = sample["bec"].to(dtype=bec_predict.dtype, device=bec_predict.device)
+    bec_mask = bec_label[:, 0] > -1e6
+    if not bec_mask.any().item():
+        return None, None
+    return criterion(bec_predict[bec_mask], bec_label[bec_mask]), bec_mask
+
+
 def get_adam_loss_prefactor(start_prefactor, end_prefactor, real_lr, start_lr=0.001):
     return end_prefactor + (start_prefactor - end_prefactor) * real_lr / start_lr
 
@@ -53,6 +65,7 @@ def get_nep_loss(
     loss_Virial_val=None,
     loss_Egroup_val=None,
     loss_Charge_val=None,
+    loss_BEC_val=None,
     train_virial=False,
 ):
     optimizer_param = args.optimizer_param
@@ -98,6 +111,14 @@ def get_nep_loss(
         )
         loss = loss + pref_charge * loss_Charge_val
 
+    if optimizer_param.train_bec and loss_BEC_val is not None:
+        pref_bec = get_adam_loss_prefactor(
+            optimizer_param.start_pre_fac_bec,
+            optimizer_param.end_pre_fac_bec,
+            real_lr,
+        )
+        loss = loss + pref_bec * loss_BEC_val
+
     return loss
 
 
@@ -142,11 +163,12 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
     loss_Ei = AverageMeter("Ei", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Egroup = AverageMeter("Egroup", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Charge = AverageMeter("Charge", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
+    loss_BEC = AverageMeter("BEC", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_L1 = AverageMeter("Loss_L1", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, learning_rate, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_Virial, loss_Virial_per_atom],
+        [batch_time, data_time, learning_rate, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_BEC, loss_Virial, loss_Virial_per_atom],
         prefix=f"Epoch: [{epoch}]",
     )
 
@@ -226,7 +248,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
 
         learning_rate.update(real_lr)
         # check_cuda_memory(epoch, -1, f"before forword atomnums {Force_label.shape[0]}", False, args.rank)
-        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
+        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
             NN_radial, NL_radial, Ri_radial,
             NN_angular, NL_angular, Ri_angular,
             sample["num_atom"], sample["atom_type_map"], None, None,
@@ -242,6 +264,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
+        loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         loss_Egroup_val = None
         loss_Virial_val = None
         train_virial = False
@@ -270,6 +293,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss_Virial_val,
             loss_Egroup_val,
             loss_Charge_val,
+            loss_BEC_val,
             train_virial,
         )
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
@@ -301,6 +325,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
         if loss_Charge_val is not None:
             loss_Charge.update(loss_Charge_val.item(), batch_size)
+        if loss_BEC_val is not None:
+            loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
         loss_Force.update(loss_F_val.item(), batch_size)
 
         batch_time.update(time.time() - end)
@@ -552,13 +578,13 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             nr_batch_sample = sample["num_atom"].shape[0]
 
             # if args.optimizer_param.train_egroup is True:
-            #     Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
+            #     Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
             #         dR_neigh_list, ImageDR, dR_neigh_type_list, \
             #             dR_neigh_list_angular, ImageDR_angular, dR_neigh_type_list_angular, \
             #             atom_type_map[0], atom_type[0], 0, Egroup_weight, Divider)
 
                 # atom_type_map: we only need the first element, because it is same for each image of MOVEMENT
-            Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
+            Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
                     NN_radial, NL_radial, Ri_radial,
                         NN_angular, NL_angular, Ri_angular,
                             sample["num_atom"], sample["atom_type_map"], None, None,
@@ -572,6 +598,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
             loss_Ei_val = criterion(Ei_predict, Ei_label)
             loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
+            loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -580,6 +607,8 @@ def valid(val_loader, model, criterion, device, args:InputParam):
 
             if loss_Charge_val is not None:
                 loss_val += args.optimizer_param.pre_fac_charge * loss_Charge_val
+            if loss_BEC_val is not None:
+                loss_val += args.optimizer_param.pre_fac_bec * loss_BEC_val
 
             if args.optimizer_param.train_virial is True:
                 # loss_Virial_val = criterion(Virial_predict, Virial_label.squeeze(1))  #115.415137283393
@@ -604,6 +633,8 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                 loss_Egroup.update(loss_Egroup_val.item(), batch_size)
             if loss_Charge_val is not None:
                 loss_Charge.update(loss_Charge_val.item(), batch_size)
+            if loss_BEC_val is not None:
+                loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
             loss_Force.update(loss_F_val.item(), batch_size)
             # measure elapsed time
         batch_time.update(time.time() - end)
@@ -623,12 +654,13 @@ def valid(val_loader, model, criterion, device, args:InputParam):
     loss_Ei = AverageMeter("Ei", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Egroup = AverageMeter("Egroup", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Charge = AverageMeter("Charge", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
+    loss_BEC = AverageMeter("BEC", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Virial = AverageMeter("Virial", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
 
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_Virial, loss_Virial_per_atom],
+        [batch_time, losses, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_BEC, loss_Virial, loss_Virial_per_atom],
         prefix="Test: ",
     )
     module = model.module if args.world_size > 1 else model
@@ -687,6 +719,8 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
     train_lists.extend(["RMSE_Etot", "RMSE_Etot_per_atom", "RMSE_Ei", "RMSE_F"])
     if args.optimizer_param.train_charge:
         train_lists.append("RMSE_charge")
+    if args.optimizer_param.train_bec:
+        train_lists.append("RMSE_BEC")
     if args.optimizer_param.train_egroup:
         train_lists.append("RMSE_Egroup")
     if args.optimizer_param.train_virial:
@@ -729,7 +763,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         Force_label  = sample["force"]
 
         # measure data loading time
-        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
+        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
                 NN_radial, NL_radial, Ri_radial,
                     NN_angular, NL_angular, Ri_angular,
                         sample["num_atom"], sample["atom_type_map"], None, None,
@@ -744,6 +778,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
+        loss_BEC_val, _ = get_bec_loss(Bec_predict, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -770,6 +805,8 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         res_list = [i, float(Etot_rmse), float(etot_atom_rmse), float(Ei_rmse), float(F_rmse)]
         if loss_Charge_val is not None:
             res_list.append(float(loss_Charge_val ** 0.5))
+        if args.optimizer_param.train_bec:
+            res_list.append(float(loss_BEC_val ** 0.5) if loss_BEC_val is not None else np.nan)
         #float(Etot_predict), float(Ei_label.abs().mean()), float(Ei_predict.abs().mean()), float(Force_label.abs().mean()), float(Force_predict.abs().mean()),\
         if args.optimizer_param.train_egroup:
             res_list.append(float(loss_Egroup_val))

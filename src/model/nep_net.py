@@ -519,7 +519,7 @@ class NEP(nn.Module):
             # ==single time: t1 0.0015997886657714844 t2 0.0016467571258544922 t3 0.03717923164367676 t4 2.8371810913085938e-05 t5 0.0011038780212402344 t6 4.267692565917969e-05 t7 0.08994221687316895
             # print("==single time: t1 {} t2 {} t3 {} t4 {} t5 {} t6 {} t7 {}".format(t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6))
             # check_cuda_memory(-1, -1, "FORWAR calculate_force")
-        return Etot, Ei, Force, Egroup, Virial, charge_predict
+        return Etot, Ei, Force, Egroup, Virial, charge_predict, self.atomic_bec
 
     def calculate_bec(
         self,
