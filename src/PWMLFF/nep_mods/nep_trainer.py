@@ -59,6 +59,8 @@ def get_nep_loss(
     loss_Etot_val,
     loss_Virial_val=None,
     loss_Egroup_val=None,
+    loss_Charge_val=None,
+    pref_charge=None,
     train_virial=False,
 ):
     optimizer_param = args.optimizer_param
@@ -95,6 +97,9 @@ def get_nep_loss(
             real_lr,
         )
         loss = loss + pref_egroup * loss_Egroup_val
+
+    if optimizer_param.train_charge and loss_Charge_val is not None:
+        loss = loss + pref_charge * loss_Charge_val
 
     return loss
 
@@ -267,10 +272,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss_Etot_val,
             loss_Virial_val,
             loss_Egroup_val,
+            loss_Charge_val,
+            pref_charge,
             train_virial,
         )
-        if loss_Charge_val is not None:
-            loss = loss + pref_charge * loss_Charge_val
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
         loss.backward()
         torch.cuda.empty_cache() # 释放pytoch 缓存管理器持有的缓冲块，因为它对cuda算子不可见，导致算子内存不够用，这部分缓冲块 64batch下约10个G
