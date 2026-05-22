@@ -31,20 +31,13 @@ def get_model_module(model, args:InputParam):
     return model.module if getattr(args, "world_size", 1) > 1 else model
 
 
-def get_charge_loss(charge_predict, sample, criterion, args:InputParam, real_lr=None, start_lr=None):
+def get_charge_loss(charge_predict, sample, criterion, args:InputParam):
     if not getattr(args.optimizer_param, "train_charge", False):
-        return None, None
+        return None
     if charge_predict is None or "charge" not in sample:
-        return None, None
+        return None
     charge_label = sample["charge"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
-    loss_charge = criterion(charge_predict, charge_label)
-    if real_lr is not None and start_lr is not None and hasattr(args.optimizer_param, "start_pre_fac_charge"):
-        pref_charge = args.optimizer_param.end_pre_fac_charge + (
-            args.optimizer_param.start_pre_fac_charge - args.optimizer_param.end_pre_fac_charge
-        ) * real_lr / start_lr
-    else:
-        pref_charge = getattr(args.optimizer_param, "pre_fac_charge", 0.1)
-    return loss_charge, pref_charge
+    return criterion(charge_predict, charge_label)
 
 
 def get_adam_loss_prefactor(start_prefactor, end_prefactor, real_lr, start_lr=0.001):
@@ -60,7 +53,6 @@ def get_nep_loss(
     loss_Virial_val=None,
     loss_Egroup_val=None,
     loss_Charge_val=None,
-    pref_charge=None,
     train_virial=False,
 ):
     optimizer_param = args.optimizer_param
@@ -99,6 +91,11 @@ def get_nep_loss(
         loss = loss + pref_egroup * loss_Egroup_val
 
     if optimizer_param.train_charge and loss_Charge_val is not None:
+        pref_charge = get_adam_loss_prefactor(
+            optimizer_param.start_pre_fac_charge,
+            optimizer_param.end_pre_fac_charge,
+            real_lr,
+        )
         loss = loss + pref_charge * loss_Charge_val
 
     return loss
@@ -244,7 +241,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
-        loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args, real_lr, start_lr)
+        loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
         loss_Egroup_val = None
         loss_Virial_val = None
         train_virial = False
@@ -273,7 +270,6 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss_Virial_val,
             loss_Egroup_val,
             loss_Charge_val,
-            pref_charge,
             train_virial,
         )
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
@@ -575,7 +571,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             loss_Etot_val = criterion(Etot_predict, Etot_label)
             loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
             loss_Ei_val = criterion(Ei_predict, Ei_label)
-            loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args)
+            loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -583,7 +579,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                     args.optimizer_param.pre_fac_etot * loss_Etot_val
 
             if loss_Charge_val is not None:
-                loss_val += pref_charge * loss_Charge_val
+                loss_val += args.optimizer_param.pre_fac_charge * loss_Charge_val
 
             if args.optimizer_param.train_virial is True:
                 # loss_Virial_val = criterion(Virial_predict, Virial_label.squeeze(1))  #115.415137283393
@@ -747,7 +743,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
-        loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args)
+        loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
