@@ -31,16 +31,13 @@ def get_model_module(model, args:InputParam):
     return model.module if getattr(args, "world_size", 1) > 1 else model
 
 
-def get_charge_loss(model, sample, criterion, args:InputParam, real_lr=None, start_lr=None):
+def get_charge_loss(charge_predict, sample, criterion, args:InputParam, real_lr=None, start_lr=None):
     if not getattr(args.optimizer_param, "train_charge", False):
         return None, None
-    module = get_model_module(model, args)
-    charge_predict = getattr(module, "charge_predict", None)
     if charge_predict is None or "charge" not in sample:
         return None, None
     charge_label = sample["charge"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
-    atom_num = sample["num_atom"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
-    loss_charge = criterion(charge_predict / atom_num, charge_label / atom_num)
+    loss_charge = criterion(charge_predict, charge_label)
     if real_lr is not None and start_lr is not None and hasattr(args.optimizer_param, "start_pre_fac_charge"):
         pref_charge = args.optimizer_param.end_pre_fac_charge + (
             args.optimizer_param.start_pre_fac_charge - args.optimizer_param.end_pre_fac_charge
@@ -175,7 +172,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
 
         learning_rate.update(real_lr)
         # check_cuda_memory(epoch, -1, f"before forword atomnums {Force_label.shape[0]}", False, args.rank)
-        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
+        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
             NN_radial, NL_radial, Ri_radial,
             NN_angular, NL_angular, Ri_angular,
             sample["num_atom"], sample["atom_type_map"], None, None,
@@ -190,7 +187,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
-        loss_Charge_val, pref_charge = get_charge_loss(model, sample, criterion, args, real_lr, start_lr)
+        loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args, real_lr, start_lr)
         loss_val = torch.zeros_like(loss_F_val)
 
         if args.optimizer_param.train_egroup:
@@ -520,13 +517,13 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             nr_batch_sample = sample["num_atom"].shape[0]
 
             # if args.optimizer_param.train_egroup is True:
-            #     Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
+            #     Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
             #         dR_neigh_list, ImageDR, dR_neigh_type_list, \
             #             dR_neigh_list_angular, ImageDR_angular, dR_neigh_type_list_angular, \
             #             atom_type_map[0], atom_type[0], 0, Egroup_weight, Divider)
 
                 # atom_type_map: we only need the first element, because it is same for each image of MOVEMENT
-            Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
+            Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
                     NN_radial, NL_radial, Ri_radial,
                         NN_angular, NL_angular, Ri_angular,
                             sample["num_atom"], sample["atom_type_map"], None, None,
@@ -539,7 +536,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             loss_Etot_val = criterion(Etot_predict, Etot_label)
             loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
             loss_Ei_val = criterion(Ei_predict, Ei_label)
-            loss_Charge_val, pref_charge = get_charge_loss(model, sample, criterion, args)
+            loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args)
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -697,7 +694,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         Force_label  = sample["force"]
 
         # measure data loading time
-        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
+        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict = model(
                 NN_radial, NL_radial, Ri_radial,
                     NN_angular, NL_angular, Ri_angular,
                         sample["num_atom"], sample["atom_type_map"], None, None,
@@ -711,7 +708,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         loss_Etot_val = criterion(Etot_predict, Etot_label)
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
-        loss_Charge_val, pref_charge = get_charge_loss(model, sample, criterion, args)
+        loss_Charge_val, pref_charge = get_charge_loss(Charge_predict, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 

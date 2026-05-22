@@ -211,6 +211,7 @@ class NepParam(object):
         for _ in _c2_param:
             self.c2_param.append(_)
         self.c2_param = np.array(self.c2_param).reshape(self.type_num, self.type_num, self.n_max[0]+1, self.basis_size[0]+1)
+        self.c2_param = np.ascontiguousarray(self.c2_param)
         start_index = start_index + self.two_c_num
         if self.l_max[0] > 0:
             _c3_param = np.array([float(_) for _ in lines[start_index:start_index + self.three_c_num]]).reshape(self.n_max[1]+1, self.basis_size[1]+1, self.type_num, self.type_num).transpose(2, 3, 0, 1)
@@ -218,6 +219,7 @@ class NepParam(object):
             for _ in _c3_param:
                 self.c3_param.append(_)
             self.c3_param = np.array(self.c3_param).reshape(self.type_num, self.type_num, self.n_max[1]+1, self.basis_size[1]+1)
+            self.c3_param = np.ascontiguousarray(self.c3_param)
             start_index = start_index + self.three_c_num
         else:
             self.c3_param = None

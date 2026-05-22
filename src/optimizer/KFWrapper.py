@@ -44,7 +44,7 @@ class KFOptimizerWrapper:
                 is_calc_f=False,
             )
         elif train_type == "NEP":
-            Etot_predict, _, _, _, _ = self.model(
+            Etot_predict, _, _, _, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],
@@ -132,7 +132,7 @@ class KFOptimizerWrapper:
                 is_calc_f=False,
             )
         elif train_type == "NEP":
-            _, _, _, Egroup_predict, _ = self.model(
+            _, _, _, Egroup_predict, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],
@@ -227,7 +227,7 @@ class KFOptimizerWrapper:
                 inputs[5]
             )
         elif train_type == "NEP":
-            Etot_predict, _, _, _, Virial_predict = self.model(
+            Etot_predict, _, _, _, Virial_predict, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],
@@ -355,7 +355,7 @@ class KFOptimizerWrapper:
                     inputs[0], inputs[1], inputs[2], inputs[3], 0, inputs[4], inputs[5]
                 )
             elif train_type == "NEP":
-                Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = self.model(
+                Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, _ = self.model(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6], inputs[7], 0, inputs[8], inputs[9]
                 )
             elif train_type == "NN":  # nn training
@@ -414,7 +414,7 @@ class KFOptimizerWrapper:
                 is_calc_f=False,
             )
         elif train_type == "NEP":
-            _, Ei_predict, _, _, _ = self.model(
+            _, Ei_predict, _, _, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],

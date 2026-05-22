@@ -249,8 +249,8 @@ class NEP(nn.Module):
     '''    
     def set_cparam(self, energy_shift:float):
         if self.input_param.nep_param.c2_param is not None: #load from nep.txt
-            self.c_param_2 = torch.nn.Parameter(torch.tensor(self.input_param.nep_param.c2_param), requires_grad=True)
-            self.c_param_3 = torch.nn.Parameter(torch.tensor(self.input_param.nep_param.c3_param), requires_grad=True) if self.l_max_3b > 0 else None
+            self.c_param_2 = torch.nn.Parameter(torch.tensor(self.input_param.nep_param.c2_param).contiguous(), requires_grad=True)
+            self.c_param_3 = torch.nn.Parameter(torch.tensor(self.input_param.nep_param.c3_param).contiguous(), requires_grad=True) if self.l_max_3b > 0 else None
         else: # init by randly (for first training) or checkpoint
             r_k = torch.normal(mean=0, std=1, size=(self.c_num,), dtype=self.dtype)
             m = torch.rand(self.c_num, dtype=self.dtype) - 0.5
@@ -370,28 +370,63 @@ class NEP(nn.Module):
         radial_NL = NL_radial
         radial_Ri = Ri
         radial_Ri_d = Ri_d
-        
-        NL_radial_type = radial_NL.new_full(radial_NL.shape, -1).requires_grad_(False)
-        mask = radial_NL != -1
-        NL_radial_type[mask] = atom_type_map[radial_NL[mask]]
 
-        NL_angular_type = NL_angular.new_full(NL_angular.shape, -1).requires_grad_(False)
-        mask = NL_angular != -1
-        NL_angular_type[mask] = atom_type_map[NL_angular[mask]]
+        if True:#device.type == "cpu":
+            NL_radial_type = radial_NL.new_full(radial_NL.shape, -1).requires_grad_(False)
+            mask = radial_NL != -1
+            NL_radial_type[mask] = atom_type_map[radial_NL[mask]]
 
-        feats = self.calculate_qn(atom_type_map, NL_radial_type, radial_Ri, NL_angular_type, Ri_angular, device, dtype)
+            NL_angular_type = NL_angular.new_full(NL_angular.shape, -1).requires_grad_(False)
+            mask = NL_angular != -1
+            NL_angular_type[mask] = atom_type_map[NL_angular[mask]]
 
+            feats = self.calculate_qn(atom_type_map, NL_radial_type, radial_Ri, NL_angular_type, Ri_angular, device, dtype)
+        else:# cuda ops
+            if self.train_2b:
+                feat_2b = torch.zeros(natoms_sum, self.two_feat_num, dtype=dtype, device=device, requires_grad=True)
+                feat_2b = CalcOps.calculateNepFeat(self.c_param_2, 
+                                                Ri, 
+                                                NL_radial, 
+                                                atom_type_map,
+                                                feat_2b, 
+                                                self.cutoff_radial,
+                                                self.multi_feat_num,
+                                                int(self.input_param.nep_param.fix_cij)
+                                                )[0]
+            if self.l_max_3b > 0:
+                feat_3b = torch.zeros(natoms_sum, self.multi_feat_num, dtype=dtype, device=device, requires_grad=True)
+                feat_3b = CalcOps.calculateNepMbFeat(self.c_param_3, 
+                                                        Ri_angular, 
+                                                        NL_angular, 
+                                                        atom_type_map, 
+                                                        feat_3b, 
+                                                        self.two_feat_num,
+                                                        self.l_max_3b, 
+                                                        self.l_max_4b, 
+                                                        self.l_max_5b, 
+                                                        self.cutoff_angular,
+                                                        int(self.input_param.nep_param.fix_cij)
+                                                        )[0]
+
+                if self.train_2b:
+                    feats = torch.concat([feat_2b, feat_3b], dim=-1)
+                else:
+                    feats = feat_3b
+            else:
+                feats = feat_2b
         feats_in = self.q_scaler * feats
         # feats_in = (feats-self.q_min)/(self.q_max-self.q_min)
         Ei, charge = self.calculate_Ei(atom_type_map, feats_in, device)
         assert Ei is not None
+        charge_predict = None
         self.charge_predict = None
         self.atomic_charge = None
         self.atomic_charge_shifted = None
         self.atomic_bec = None
         if self.charge_mode:
             self.atomic_charge = charge
-            self.charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
+            charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
+            self.charge_predict = charge_predict
             self.atomic_bec = self.calculate_bec(
                 charge,
                 self.atomic_charge_shifted,
@@ -484,7 +519,7 @@ class NEP(nn.Module):
             # ==single time: t1 0.0015997886657714844 t2 0.0016467571258544922 t3 0.03717923164367676 t4 2.8371810913085938e-05 t5 0.0011038780212402344 t6 4.267692565917969e-05 t7 0.08994221687316895
             # print("==single time: t1 {} t2 {} t3 {} t4 {} t5 {} t6 {} t7 {}".format(t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6))
             # check_cuda_memory(-1, -1, "FORWAR calculate_force")
-        return Etot, Ei, Force, Egroup, Virial
+        return Etot, Ei, Force, Egroup, Virial, charge_predict
 
     def calculate_bec(
         self,
