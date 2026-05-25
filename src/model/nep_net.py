@@ -371,7 +371,7 @@ class NEP(nn.Module):
         radial_Ri = Ri
         radial_Ri_d = Ri_d
 
-        if True:#device.type == "cpu":
+        if device.type == "cpu":
             NL_radial_type = radial_NL.new_full(radial_NL.shape, -1).requires_grad_(False)
             mask = radial_NL != -1
             NL_radial_type[mask] = atom_type_map[radial_NL[mask]]

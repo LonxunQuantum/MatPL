@@ -58,6 +58,9 @@ struct NEP_Data {
   GPU_Vector<double> force_per_atom;
   GPU_Vector<double> virial_per_atom;
   GPU_Vector<double> total_virial;
+  GPU_Vector<float> charge;
+  GPU_Vector<float> charge_derivative;
+  GPU_Vector<float> bec;
 
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
@@ -66,6 +69,8 @@ struct NEP_Data {
   std::vector<double> cpu_force_per_atom;
   std::vector<double> cpu_virial_per_atom;
   std::vector<double> cpu_total_virial;
+  std::vector<float> cpu_charge;
+  std::vector<float> cpu_bec;
 
 };
 
@@ -75,6 +80,7 @@ public:
   struct ParaMB {
     bool use_typewise_cutoff_zbl = false;
     float typewise_cutoff_zbl_factor = 0.0f;
+    int charge_mode = 0;
     int version = 4; 
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability, 3=temperature-dependent free energy
     float rc_radial = 0.0f;     // radial cutoff
@@ -106,6 +112,7 @@ public:
     const float* w0[PARAM_SIZE]; // weight from the input layer to the hidden layer
     const float* b0[PARAM_SIZE]; // bias for the hidden layer
     const float* w1[PARAM_SIZE]; // weight from the hidden layer to the output layer
+    const float* sqrt_epsilon_inf;
     const float* b1;             // bias for the output layer
     const float* c;
     // for the scalar part of polarizability

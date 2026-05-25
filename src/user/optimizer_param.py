@@ -80,8 +80,7 @@ class OptimizerParam(object):
         self.train_ei = get_parameter("train_ei", optimizer_dict, False)
         self.train_virial = get_parameter("train_virial", optimizer_dict, False)
         self.train_egroup = get_parameter("train_egroup", optimizer_dict, False)
-        default_train_charge = bool(nep_param is not None and getattr(nep_param, "charge_mode", 0) > 0)
-        self.train_charge = get_parameter("train_charge", optimizer_dict, default_train_charge)
+        self.train_charge = get_parameter("train_charge", optimizer_dict, False)
         self.train_bec = get_parameter("train_bec", optimizer_dict, False)
 
         self.force_delta = None

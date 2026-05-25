@@ -137,63 +137,20 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     std::cout << "The first line of nep.txt should have at least 3 items." << std::endl;
     exit(1);
   }
-  if (tokens[0] == "nep") {
-    paramb.version = 2;
-    zbl.enabled = false;
-  } else if (tokens[0] == "nep3") {
-    paramb.version = 3;
-    zbl.enabled = false;
-  } else if (tokens[0] == "nep_zbl") {
-    paramb.version = 2;
-    zbl.enabled = true;
-  } else if (tokens[0] == "nep3_zbl") {
-    paramb.version = 3;
-    zbl.enabled = true;
-  } else if (tokens[0] == "nep4") {
+  if (tokens[0] == "nep4") {
     paramb.version = 4;
     zbl.enabled = false;
   } else if (tokens[0] == "nep4_zbl") {
     paramb.version = 4;
     zbl.enabled = true;
-  } else if (tokens[0] == "nep_temperature") {
-    paramb.version = 2;
-    paramb.model_type = 3;
-  } else if (tokens[0] == "nep_zbl_temperature") {
-    paramb.version = 2;
-    paramb.model_type = 3;
+  } else if (tokens[0] == "nep4_charge2") {
+    paramb.version = 4;
+    paramb.charge_mode = 2;
+    zbl.enabled = false;
+  } else if (tokens[0] == "nep4_zbl_charge2") {
+    paramb.version = 4;
+    paramb.charge_mode = 2;
     zbl.enabled = true;
-  } else if (tokens[0] == "nep3_temperature") {
-    paramb.version = 3;
-    paramb.model_type = 3;
-  } else if (tokens[0] == "nep3_zbl_temperature") {
-    paramb.version = 3;
-    paramb.model_type = 3;
-    zbl.enabled = true;
-  } else if (tokens[0] == "nep4_temperature") {
-    paramb.version = 4;
-    paramb.model_type = 3;
-  } else if (tokens[0] == "nep4_zbl_temperature") {
-    paramb.version = 4;
-    paramb.model_type = 3;
-    zbl.enabled = true;
-  } else if (tokens[0] == "nep_dipole") {
-    paramb.version = 2;
-    paramb.model_type = 1;
-  } else if (tokens[0] == "nep3_dipole") {
-    paramb.version = 3;
-    paramb.model_type = 1;
-  } else if (tokens[0] == "nep4_dipole") {
-    paramb.version = 4;
-    paramb.model_type = 1;
-  } else if (tokens[0] == "nep_polarizability") {
-    paramb.version = 2;
-    paramb.model_type = 2;
-  } else if (tokens[0] == "nep3_polarizability") {
-    paramb.version = 3;
-    paramb.model_type = 2;
-  } else if (tokens[0] == "nep4_polarizability") {
-    paramb.version = 4;
-    paramb.model_type = 2;
   } else if (tokens[0] == "nep5") {
     paramb.model_type = 0;
     paramb.version = 5;
@@ -380,7 +337,9 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
   annmb.num_c2   = paramb.num_types_sq * (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1);
   annmb.num_c3   = paramb.num_types_sq * (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1);
   
-  if (paramb.version == 3) {
+  if (paramb.charge_mode == 2) {
+    annmb.num_para_ann = (annmb.dim + 3) * annmb.num_neurons1 * paramb.num_types + 2;
+  } else if (paramb.version == 3) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 + 1;
   } else if (paramb.version == 4) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 * paramb.num_types;
@@ -398,7 +357,9 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     neplinenums  -= 1; // zbl a b
   }
 
-  if (paramb.num_types == 1) {
+  if (paramb.charge_mode == 2) {
+    is_gpumd_nep = true;
+  } else if (paramb.num_types == 1) {
     is_gpumd_nep = false;
   } else if (paramb.version == 4) {
     if (neplinenums  == (tmp + 1)) {
@@ -412,14 +373,20 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     }
   }
 
-  if (paramb.version == 4 ){
+  if (paramb.charge_mode == 2) {
+    annmb.num_para = annmb.num_para_ann;
+  } else if (paramb.version == 4 ){
     annmb.num_para = annmb.num_para_ann + paramb.num_types;
   } else {
     annmb.num_para = annmb.num_para_ann;
   }
   
   if (print_potential_info) {
-    printf("    number of neural network parameters = %d.\n", is_gpumd_nep == false ? annmb.num_para : annmb.num_para-paramb.num_types+1);
+    if (paramb.charge_mode == 2) {
+      printf("    number of neural network parameters = %d.\n", annmb.num_para);
+    } else {
+      printf("    number of neural network parameters = %d.\n", is_gpumd_nep == false ? annmb.num_para : annmb.num_para-paramb.num_types+1);
+    }
   }
   int num_para_descriptor =annmb.num_c2 + annmb.num_c3;
     // paramb.num_types_sq * ((paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1) +
@@ -429,7 +396,11 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
   }
   annmb.num_para += num_para_descriptor;
   if (print_potential_info) {
-    printf("    total number of parameters = %d.\n", is_gpumd_nep == false ? annmb.num_para : annmb.num_para-paramb.num_types+1);
+    if (paramb.charge_mode == 2) {
+      printf("    total number of parameters = %d.\n", annmb.num_para);
+    } else {
+      printf("    total number of parameters = %d.\n", is_gpumd_nep == false ? annmb.num_para : annmb.num_para-paramb.num_types+1);
+    }
   }
   paramb.num_c_radial =
     paramb.num_types_sq * (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1);
@@ -437,7 +408,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
   // NN and descriptor parameters
   std::vector<float> parameters(annmb.num_para);
   for (int n = 0; n < annmb.num_para; ++n) {
-    if (is_gpumd_nep == true && (n >= annmb.num_para_ann + 1) && (n < annmb.num_para_ann + paramb.num_types)) {
+    if (paramb.charge_mode == 0 && is_gpumd_nep == true && (n >= annmb.num_para_ann + 1) && (n < annmb.num_para_ann + paramb.num_types)) {
       parameters[n] = parameters[annmb.num_para_ann];
       if (print_potential_info) {
         printf("    copy the last bias parameters[%d]=%f to parameters[%d]=%f \n", annmb.num_para_ann, parameters[annmb.num_para_ann], n, parameters[n]);
@@ -517,17 +488,46 @@ void NEP::rest_nep_data(int input_atom_num) {
     nep_data.cpu_force_per_atom.resize(atom_nums * 3);
     nep_data.cpu_virial_per_atom.resize(atom_nums * 9);
     nep_data.cpu_total_virial.resize(9);
+    if (paramb.charge_mode == 2) {
+      nep_data.charge.resize(atom_nums);
+      nep_data.charge_derivative.resize(atom_nums * annmb.dim);
+      nep_data.bec.resize(atom_nums * 9);
+      nep_data.cpu_charge.resize(atom_nums);
+      nep_data.cpu_bec.resize(atom_nums * 9);
+    }
   }
   nep_data.r12.fill(0.0);
   nep_data.potential_per_atom.fill(0.0);
   nep_data.force_per_atom.fill(0.0);
   nep_data.virial_per_atom.fill(0.0);
   nep_data.total_virial.fill(0.0);
+  if (paramb.charge_mode == 2) {
+    nep_data.charge.fill(0.0f);
+    nep_data.charge_derivative.fill(0.0f);
+    nep_data.bec.fill(0.0f);
+  }
 }
 
 void NEP::update_potential(float* parameters, ANN& ann)
 {
   float* pointer = parameters;
+  if (paramb.charge_mode == 2) {
+    const int num_outputs = 2;
+    for (int t = 0; t < paramb.num_types; ++t) {
+      ann.w0[t] = pointer;
+      pointer += ann.num_neurons1 * ann.dim;
+      ann.b0[t] = pointer;
+      pointer += ann.num_neurons1;
+      ann.w1[t] = pointer;
+      pointer += ann.num_neurons1 * num_outputs;
+    }
+    ann.sqrt_epsilon_inf = pointer;
+    pointer += 1;
+    ann.b1 = pointer;
+    pointer += 1;
+    ann.c = pointer;
+    return;
+  }
   for (int t = 0; t < paramb.num_types; ++t) {
     if (t > 0 && paramb.version == 3) { 
       pointer -= (ann.dim + 2) * ann.num_neurons1;
@@ -624,30 +624,101 @@ void NEP::inference(
   //   printf("\n");
   // }
 
-  find_descriptor<<<grid_size, BLOCK_SIZE>>>(
-    paramb,
-    annmb,
-    box,
-    ebox,
-    N,
-    N1,
-    nep_data.NN_radial.data(),
-    nep_data.NL_radial.data(),
-    nep_data.NN_angular.data(),
-    nep_data.NL_angular.data(),
-    lmp_data.type.data(),
-    nep_data.r12.data(),
-    nep_data.r12.data() + size_x12,
-    nep_data.r12.data() + size_x12 * 2,
-    nep_data.r12.data() + size_x12 * 3,
-    nep_data.r12.data() + size_x12 * 4,
-    nep_data.r12.data() + size_x12 * 5,
-    nep_data.potential_per_atom.data(),
-    nep_data.Fp.data(),
-    nep_data.virial_per_atom.data(),
-    nep_data.sum_fxyz.data()
-  );
-  CUDA_CHECK_KERNEL
+  if (paramb.charge_mode == 2) {
+    find_descriptor_charge2<<<grid_size, BLOCK_SIZE>>>(
+      paramb,
+      annmb,
+      N,
+      N1,
+      nep_data.NN_radial.data(),
+      nep_data.NL_radial.data(),
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      lmp_data.type.data(),
+      nep_data.r12.data(),
+      nep_data.r12.data() + size_x12,
+      nep_data.r12.data() + size_x12 * 2,
+      nep_data.r12.data() + size_x12 * 3,
+      nep_data.r12.data() + size_x12 * 4,
+      nep_data.r12.data() + size_x12 * 5,
+      nep_data.potential_per_atom.data(),
+      nep_data.Fp.data(),
+      nep_data.charge.data(),
+      nep_data.charge_derivative.data(),
+      nep_data.sum_fxyz.data());
+    CUDA_CHECK_KERNEL
+
+    zero_total_charge<<<1, 1024>>>(N, nep_data.charge.data());
+    CUDA_CHECK_KERNEL
+
+    find_bec_diagonal<<<grid_size, BLOCK_SIZE>>>(
+      N,
+      nep_data.charge.data(),
+      nep_data.bec.data());
+    CUDA_CHECK_KERNEL
+
+    find_bec_radial<<<grid_size, BLOCK_SIZE>>>(
+      paramb,
+      annmb,
+      N,
+      N1,
+      nep_data.NN_radial.data(),
+      nep_data.NL_radial.data(),
+      lmp_data.type.data(),
+      nep_data.r12.data(),
+      nep_data.r12.data() + size_x12,
+      nep_data.r12.data() + size_x12 * 2,
+      nep_data.charge_derivative.data(),
+      nep_data.bec.data());
+    CUDA_CHECK_KERNEL
+
+    find_bec_angular<<<grid_size, BLOCK_SIZE>>>(
+      paramb,
+      annmb,
+      N,
+      N1,
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      lmp_data.type.data(),
+      nep_data.r12.data() + size_x12 * 3,
+      nep_data.r12.data() + size_x12 * 4,
+      nep_data.r12.data() + size_x12 * 5,
+      nep_data.charge_derivative.data(),
+      nep_data.sum_fxyz.data(),
+      nep_data.bec.data());
+    CUDA_CHECK_KERNEL
+
+    scale_bec<<<grid_size, BLOCK_SIZE>>>(
+      N,
+      annmb.sqrt_epsilon_inf,
+      nep_data.bec.data());
+    CUDA_CHECK_KERNEL
+  } else {
+    find_descriptor<<<grid_size, BLOCK_SIZE>>>(
+      paramb,
+      annmb,
+      box,
+      ebox,
+      N,
+      N1,
+      nep_data.NN_radial.data(),
+      nep_data.NL_radial.data(),
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      lmp_data.type.data(),
+      nep_data.r12.data(),
+      nep_data.r12.data() + size_x12,
+      nep_data.r12.data() + size_x12 * 2,
+      nep_data.r12.data() + size_x12 * 3,
+      nep_data.r12.data() + size_x12 * 4,
+      nep_data.r12.data() + size_x12 * 5,
+      nep_data.potential_per_atom.data(),
+      nep_data.Fp.data(),
+      nep_data.virial_per_atom.data(),
+      nep_data.sum_fxyz.data()
+    );
+    CUDA_CHECK_KERNEL
+  }
   // cudaDeviceSynchronize();
   // nep_data.potential_per_atom.copy_to_host(cpu_potential_per_atom);
   // for (int ii = 0; ii < N; ii++) {
@@ -757,6 +828,10 @@ void NEP::inference(
 
   nep_data.potential_per_atom.copy_to_host(nep_data.cpu_potential_per_atom.data());
   nep_data.force_per_atom.copy_to_host(nep_data.cpu_force_per_atom.data());
+  if (paramb.charge_mode == 2) {
+    nep_data.charge.copy_to_host(nep_data.cpu_charge.data());
+    nep_data.bec.copy_to_host(nep_data.cpu_bec.data());
+  }
 
   // for (int ii = 0; ii < N; ii++) {
   //   if (1) {

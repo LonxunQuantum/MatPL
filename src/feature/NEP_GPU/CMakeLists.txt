@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(NEP_GPU LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD 11)
 
 # 设置 CUDA 架构支持
 set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
@@ -25,7 +25,7 @@ find_package(CUDA 11.8 REQUIRED)
 enable_language(CUDA)
 
 # 添加 pybind11 包装代码
-pybind11_add_module(nep_module
+pybind11_add_module(nep_gpu
     force/nep_pybind.cpp  # Pybind11 包装的 C++ 文件
     force/nep.cu          # CUDA 代码
     force/box.cu
@@ -35,12 +35,11 @@ pybind11_add_module(nep_module
 )
 
 # 包含 CUDA 和本地目录
-target_include_directories(nep_module PRIVATE
+target_include_directories(nep_gpu PRIVATE
     ${CUDA_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/force
     ${CMAKE_CURRENT_SOURCE_DIR}/utilities
 )
 
 # 链接 CUDA 库
-target_link_libraries(nep_module PRIVATE ${CUDA_LIBRARIES})
-
+target_link_libraries(nep_gpu PRIVATE ${CUDA_LIBRARIES})
