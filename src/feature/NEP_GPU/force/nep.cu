@@ -490,7 +490,7 @@ void NEP::rest_nep_data(int input_atom_num) {
       nep_data.charge.resize(atom_nums);
       nep_data.charge_derivative.resize(atom_nums * annmb.dim);
       nep_data.bec.resize(atom_nums * 9);
-      nep_data.cpu_charge.resize(1);
+      nep_data.cpu_charge.resize(atom_nums);
       nep_data.cpu_bec.resize(atom_nums * 9);
     }
   }
@@ -643,12 +643,7 @@ void NEP::inference(
       nep_data.sum_fxyz.data());
     CUDA_CHECK_KERNEL
 
-    std::vector<float> cpu_atomic_charge(atom_nums);
-    nep_data.charge.copy_to_host(cpu_atomic_charge.data());
-    nep_data.cpu_charge[0] = 0.0f;
-    for (int i = 0; i < atom_nums; ++i) {
-      nep_data.cpu_charge[0] += cpu_atomic_charge[i];
-    }
+    nep_data.charge.copy_to_host(nep_data.cpu_charge.data());
 
     zero_total_charge<<<1, 1024>>>(N, nep_data.charge.data());
     CUDA_CHECK_KERNEL
