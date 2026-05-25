@@ -61,6 +61,14 @@ struct NEP_Data {
   GPU_Vector<float> charge;
   GPU_Vector<float> charge_derivative;
   GPU_Vector<float> bec;
+  GPU_Vector<float> D_real;
+  GPU_Vector<int> num_kpoints;
+  GPU_Vector<float> kx;
+  GPU_Vector<float> ky;
+  GPU_Vector<float> kz;
+  GPU_Vector<float> G;
+  GPU_Vector<float> S_real;
+  GPU_Vector<float> S_imag;
 
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
@@ -122,6 +130,12 @@ public:
     const float* b1_pol;
   };
 
+  struct Charge_Para {
+    int num_kpoints_max = 50000;
+    float alpha = 0.0f;
+    float alpha_factor = 0.0f;
+  };
+
   struct ZBL {
     bool enabled = false;
     bool flexibled = false;
@@ -145,6 +159,7 @@ public:
   ParaMB paramb;
   ANN annmb;
   ZBL zbl;
+  Charge_Para charge_para;
   Box box;
   ExpandedBox ebox;
   NEP_Data nep_data;

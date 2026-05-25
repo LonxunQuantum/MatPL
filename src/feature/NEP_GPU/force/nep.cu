@@ -250,6 +250,11 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     }
   }
 
+  if (paramb.charge_mode == 2) {
+    charge_para.alpha = float(PI) / paramb.rc_radial;
+    charge_para.alpha_factor = 0.25f / (charge_para.alpha * charge_para.alpha);
+  }
+
   // n_max 10 8
   tokens = get_tokens(input);
   if (tokens.size() != 3) {
@@ -490,6 +495,14 @@ void NEP::rest_nep_data(int input_atom_num) {
       nep_data.charge.resize(atom_nums);
       nep_data.charge_derivative.resize(atom_nums * annmb.dim);
       nep_data.bec.resize(atom_nums * 9);
+      nep_data.D_real.resize(atom_nums);
+      nep_data.num_kpoints.resize(1);
+      nep_data.kx.resize(charge_para.num_kpoints_max);
+      nep_data.ky.resize(charge_para.num_kpoints_max);
+      nep_data.kz.resize(charge_para.num_kpoints_max);
+      nep_data.G.resize(charge_para.num_kpoints_max);
+      nep_data.S_real.resize(charge_para.num_kpoints_max);
+      nep_data.S_imag.resize(charge_para.num_kpoints_max);
       nep_data.cpu_charge.resize(atom_nums);
       nep_data.cpu_bec.resize(atom_nums * 9);
     }
@@ -503,6 +516,10 @@ void NEP::rest_nep_data(int input_atom_num) {
     nep_data.charge.fill(0.0f);
     nep_data.charge_derivative.fill(0.0f);
     nep_data.bec.fill(0.0f);
+    nep_data.D_real.fill(0.0f);
+    nep_data.num_kpoints.fill(0);
+    nep_data.S_real.fill(0.0f);
+    nep_data.S_imag.fill(0.0f);
   }
 }
 
@@ -690,6 +707,61 @@ void NEP::inference(
       annmb.sqrt_epsilon_inf,
       nep_data.bec.data());
     CUDA_CHECK_KERNEL
+
+    find_k_and_G_charge2<<<1, 1>>>(
+      charge_para.num_kpoints_max,
+      charge_para.alpha,
+      charge_para.alpha_factor,
+      box,
+      nep_data.num_kpoints.data(),
+      nep_data.kx.data(),
+      nep_data.ky.data(),
+      nep_data.kz.data(),
+      nep_data.G.data());
+    CUDA_CHECK_KERNEL
+
+    int num_kpoints = 0;
+    nep_data.num_kpoints.copy_to_host(&num_kpoints);
+    int k_grid_size = (num_kpoints - 1) / BLOCK_SIZE + 1;
+    find_structure_factor_charge2<<<k_grid_size, BLOCK_SIZE>>>(
+      N,
+      num_kpoints,
+      nep_data.charge.data(),
+      lmp_data.position.data(),
+      lmp_data.position.data() + N,
+      lmp_data.position.data() + N * 2,
+      nep_data.kx.data(),
+      nep_data.ky.data(),
+      nep_data.kz.data(),
+      nep_data.S_real.data(),
+      nep_data.S_imag.data());
+    CUDA_CHECK_KERNEL
+
+    find_force_charge_reciprocal_space_charge2<<<grid_size, BLOCK_SIZE>>>(
+      N,
+      num_kpoints,
+      charge_para.alpha_factor,
+      nep_data.charge.data(),
+      lmp_data.position.data(),
+      lmp_data.position.data() + N,
+      lmp_data.position.data() + N * 2,
+      nep_data.kx.data(),
+      nep_data.ky.data(),
+      nep_data.kz.data(),
+      nep_data.G.data(),
+      nep_data.S_real.data(),
+      nep_data.S_imag.data(),
+      nep_data.D_real.data(),
+      nep_data.force_per_atom.data(),
+      nep_data.force_per_atom.data() + N,
+      nep_data.force_per_atom.data() + N * 2,
+      nep_data.virial_per_atom.data(),
+      nep_data.total_virial.data(),
+      nep_data.potential_per_atom.data());
+    CUDA_CHECK_KERNEL
+
+    zero_mean_D_real_charge2<<<1, 1024>>>(N, nep_data.D_real.data());
+    CUDA_CHECK_KERNEL
   } else {
     find_descriptor<<<grid_size, BLOCK_SIZE>>>(
       paramb,
@@ -735,6 +807,8 @@ void NEP::inference(
     nep_data.r12.data() + size_x12,
     nep_data.r12.data() + size_x12 * 2,
     nep_data.Fp.data(),
+    nep_data.charge_derivative.data(),
+    nep_data.D_real.data(),
     nep_data.force_per_atom.data(),
     nep_data.force_per_atom.data() + N,
     nep_data.force_per_atom.data() + N * 2,
@@ -769,6 +843,8 @@ void NEP::inference(
     nep_data.r12.data() + size_x12 * 4,
     nep_data.r12.data() + size_x12 * 5,
     nep_data.Fp.data(),
+    nep_data.charge_derivative.data(),
+    nep_data.D_real.data(),
     nep_data.sum_fxyz.data(),
     nep_data.force_per_atom.data(),
     nep_data.force_per_atom.data() + N,
