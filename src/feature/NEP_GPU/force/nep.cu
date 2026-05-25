@@ -339,11 +339,9 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
   
   if (paramb.charge_mode == 2) {
     annmb.num_para_ann = (annmb.dim + 3) * annmb.num_neurons1 * paramb.num_types + 2;
-  } else if (paramb.version == 3) {
-    annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 + 1;
   } else if (paramb.version == 4) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 * paramb.num_types;
-  } else{
+  } else {
     annmb.num_para_ann = ((annmb.dim + 2) * annmb.num_neurons1 + 1) * paramb.num_types + 1;
   }
   int tmp = 0;
@@ -529,9 +527,6 @@ void NEP::update_potential(float* parameters, ANN& ann)
     return;
   }
   for (int t = 0; t < paramb.num_types; ++t) {
-    if (t > 0 && paramb.version == 3) { 
-      pointer -= (ann.dim + 2) * ann.num_neurons1;
-    }
     ann.w0[t] = pointer;
     pointer += ann.num_neurons1 * ann.dim;
     ann.b0[t] = pointer;

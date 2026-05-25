@@ -26,30 +26,9 @@ PYBIND11_MODULE(nep_gpu, m) {
             size_t potential_size = self.nep_data.cpu_potential_per_atom.size();
             size_t force_size = self.nep_data.cpu_force_per_atom.size();
             size_t virial_size = self.nep_data.cpu_total_virial.size();
-            // std::vector<size_t> force_shape = {force_size/3, 3};
-            return py::make_tuple(
-                py::array_t<double>(potential_size, self.nep_data.cpu_potential_per_atom.data()),
-                py::array_t<double>(force_size, self.nep_data.cpu_force_per_atom.data()),
-                py::array_t<double>(virial_size, self.nep_data.cpu_total_virial.data())
-            );
-        }, 
-        py::arg("itype_cpu"), 
-        py::arg("box_cpu"), 
-        py::arg("position_cpu"))
-        .def("inference_with_charge", [](NEP& self, 
-                                  py::array_t<int> itype_cpu, 
-                                  py::array_t<double> box_cpu, 
-                                  py::array_t<double> position_cpu) {
-            auto itype_ptr = itype_cpu.mutable_data();
-            auto box_ptr = box_cpu.mutable_data();
-            auto position_ptr = position_cpu.mutable_data();
-            int N = itype_cpu.size();
-            self.inference(N, itype_ptr, box_ptr, position_ptr);
-            size_t potential_size = self.nep_data.cpu_potential_per_atom.size();
-            size_t force_size = self.nep_data.cpu_force_per_atom.size();
-            size_t virial_size = self.nep_data.cpu_total_virial.size();
             size_t charge_size = self.nep_data.cpu_charge.size();
             size_t bec_size = self.nep_data.cpu_bec.size();
+            // std::vector<size_t> force_shape = {force_size/3, 3};
             return py::make_tuple(
                 py::array_t<double>(potential_size, self.nep_data.cpu_potential_per_atom.data()),
                 py::array_t<double>(force_size, self.nep_data.cpu_force_per_atom.data()),

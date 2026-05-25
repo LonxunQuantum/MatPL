@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(NEP_GPU LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CUDA_STANDARD 11)
+set(CMAKE_CUDA_STANDARD 14)
 
 # 设置 CUDA 架构支持
 set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
@@ -33,6 +33,8 @@ pybind11_add_module(nep_gpu
     utilities/main_common.cu
     utilities/error.cu
 )
+
+set_target_properties(nep_gpu PROPERTIES SUFFIX ".so")
 
 # 包含 CUDA 和本地目录
 target_include_directories(nep_gpu PRIVATE
