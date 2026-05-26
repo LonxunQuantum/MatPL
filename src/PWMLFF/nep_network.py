@@ -452,6 +452,12 @@ class nep_network:
         if self.input_param.optimizer_param.train_force:
             train_lists.append("RMSE_F(eV/Å)")
             valid_lists.append("RMSE_F(eV/Å)")
+        if self.input_param.optimizer_param.train_charge:
+            train_lists.append("RMSE_charge")
+            valid_lists.append("RMSE_charge")
+        if self.input_param.optimizer_param.train_bec:
+            train_lists.append("RMSE_BEC")
+            valid_lists.append("RMSE_BEC")
         if self.input_param.optimizer_param.train_virial:
             train_lists.append("RMSE_virial(eV/atom)")
             valid_lists.append("RMSE_virial(eV/atom)")
@@ -468,6 +474,8 @@ class nep_network:
             "RMSE_Ei": 18,
             "RMSE_Egroup": 18,
             "RMSE_F(eV/Å)": 21,
+            "RMSE_charge": 18,
+            "RMSE_BEC": 18,
             "RMSE_virial(eV)": 18,
             "RMSE_virial(eV/atom)": 23,
             "Loss_l1": 18,
@@ -499,11 +507,11 @@ class nep_network:
                 train_loader.sampler.set_epoch(epoch)
 
             if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
-                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_l1, loss_l2 = train_KF(
+                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, loss_l1, loss_l2 = train_KF(
                     train_loader, model, self.criterion, optimizer, epoch, self.device, self.input_param
                 )
             else:
-                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, real_lr, loss_l1, loss_l2 = train(
+                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, real_lr, loss_l1, loss_l2 = train(
                     train_loader, model, self.criterion, optimizer, scheduler, epoch,
                         self.input_param.optimizer_param.learning_rate, self.device, self.input_param
                 )
@@ -513,7 +521,7 @@ class nep_network:
 
             # evaluate on validation set
             if val_loader and len(val_loader) > 0:
-                vld_loss, vld_loss_Etot, vld_loss_Etot_per_atom, vld_loss_Force, vld_loss_Ei, val_loss_egroup, val_loss_virial, val_loss_virial_per_atom = valid(
+                vld_loss, vld_loss_Etot, vld_loss_Etot_per_atom, vld_loss_Force, vld_loss_Ei, val_loss_egroup, val_loss_virial, val_loss_virial_per_atom, val_loss_charge, val_loss_bec = valid(
                     val_loader, model, self.criterion, self.device, self.input_param
                 )
 
@@ -532,6 +540,10 @@ class nep_network:
                         train_log_line += f"{loss_egroup:18.10e}"
                     if self.input_param.optimizer_param.train_force:
                         train_log_line += f"{loss_Force:21.10e}"
+                    if self.input_param.optimizer_param.train_charge:
+                        train_log_line += f"{loss_charge:18.10e}"
+                    if self.input_param.optimizer_param.train_bec:
+                        train_log_line += f"{loss_bec:18.10e}"
                     if self.input_param.optimizer_param.train_virial:
                         train_log_line += f"{loss_virial_per_atom:23.10e}"
                     if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
@@ -551,6 +563,10 @@ class nep_network:
                             valid_log_line += f"{val_loss_egroup:18.10e}"
                         if self.input_param.optimizer_param.train_force:
                             valid_log_line += f"{vld_loss_Force:21.10e}"
+                        if self.input_param.optimizer_param.train_charge:
+                            valid_log_line += f"{val_loss_charge:18.10e}"
+                        if self.input_param.optimizer_param.train_bec:
+                            valid_log_line += f"{val_loss_bec:18.10e}"
                         if self.input_param.optimizer_param.train_virial:
                             valid_log_line += f"{val_loss_virial_per_atom:23.10e}"
                         f_valid_log.write(f"{valid_log_line}\n")
@@ -620,11 +636,14 @@ class nep_network:
             raise Exception("Error! the atom types in structure file is larger than the max atom types in model!")
         type_maps = np.array(type_map(atom_types_struc, input_atom_types)).reshape(1, -1)
 
-        ei_predict, force_predict, virial_predict = calc.inference(
+        inference_result = calc.inference(
             list(type_maps[0]), 
             list(np.array(image.lattice).transpose(1, 0).reshape(-1)), 
             np.array(image.position).transpose(1, 0).reshape(-1)
         )
+        ei_predict, force_predict, virial_predict = inference_result[:3]
+        charge_predict = inference_result[3] if len(inference_result) > 3 else []
+        bec_predict = inference_result[4] if len(inference_result) > 4 else []
 
         ei_predict = np.array(ei_predict).reshape(atom_nums)
         etot_predict = np.sum(ei_predict)
@@ -661,6 +680,47 @@ class nep_network:
         result["virial_label"] = virial_label
         result["virial_predict"] = virial_predict
 
+        charge_predict = np.array(charge_predict)
+        if charge_predict.size:
+            charge_predict = charge_predict.reshape(atom_nums)
+            charge_label = getattr(image, "charge", None)
+            if charge_label is None:
+                charge_label = getattr(image, "total_charge", 0.0)
+            charge_label = np.asarray(charge_label)
+            if charge_label.size == atom_nums:
+                charge_label = charge_label.reshape(atom_nums)
+                charge_rmse = np.sqrt(np.mean((charge_predict - charge_label) ** 2))
+                charge_predict_save = charge_predict
+            else:
+                charge_label = float(charge_label.reshape(-1)[0]) if charge_label.size else 0.0
+                charge_predict_save = np.sum(charge_predict)
+                charge_rmse = np.abs(charge_predict_save - charge_label)
+            result["charge_rmse"] = charge_rmse
+            result["charge_label"] = charge_label
+            result["charge_predict"] = charge_predict_save
+        else:
+            result["charge_rmse"] = -1e6
+            result["charge_label"] = np.array([])
+            result["charge_predict"] = np.array([])
+
+        bec_predict = np.array(bec_predict)
+        if bec_predict.size:
+            bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0)
+            bec_label = getattr(image, "bec", None)
+            if bec_label is not None:
+                bec_label = np.asarray(bec_label).reshape(-1, 9)
+                bec_rmse = np.sqrt(np.mean((bec_predict - bec_label) ** 2))
+            else:
+                bec_rmse = -1e6
+                bec_label = np.ones_like(bec_predict) * (-1e6)
+            result["bec_rmse"] = bec_rmse
+            result["bec_label"] = bec_label
+            result["bec_predict"] = bec_predict
+        else:
+            result["bec_rmse"] = -1e6
+            result["bec_label"] = np.array([])
+            result["bec_predict"] = np.array([])
+
         return result
 
     def multi_cpus_nep_inference(self, nep_txt_path):
@@ -668,10 +728,8 @@ class nep_network:
         print("The CPUs: {}".format(cpu_count))
         # cpu_count = 10 if cpu_count > 10 else cpu_count
         time0 = time.time()
-        train_lists = ["img_idx", "RMSE_Etot", "RMSE_Etot_per_atom", "RMSE_Ei", "RMSE_F", "RMSE_Virial", "RMSE_Virial_per_atom"]
         images = NepTestData(self.input_param).image_list
         # img_max_types = len(self.input_param.atom_type)
-        res_pd = pd.DataFrame(columns=train_lists)
         # Use ProcessPoolExecutor to run the processes in parallel
         global calc
         calc = FindNeigh()
@@ -695,9 +753,13 @@ class nep_network:
         force_label_list, force_predict_list = [], []
         virial_rmse, virial_atom_rmse = [], []
         virial_label_list, virial_predict_list = [], []
+        charge_label_list, charge_predict_list = [], []
+        bec_label_list, bec_predict_list = [], []
         atom_num_list = []
         virial_index = [0, 1, 2, 4, 5, 8]
         results = sorted(results, key=lambda x: x['idx'])
+        has_charge = any(np.asarray(result["charge_predict"]).size for result in results)
+        has_bec = any(np.asarray(result["bec_predict"]).size for result in results)
         for result in results:
             etot_rmse.append(result["etot_rmse"])
             etot_atom_rmse.append(result["etot_atom_rmse"])
@@ -716,10 +778,12 @@ class nep_network:
                 virial_atom_rmse.append(result["virial_atom_rmse"])
             virial_label_list.append(result["virial_label"][virial_index])
             virial_predict_list.append(result["virial_predict"][virial_index])
-            res_pd.loc[res_pd.shape[0]] = [
-                result["idx"], result["etot_rmse"], result["etot_atom_rmse"],
-                result["ei_rmse"], result["force_rmse"],
-                result["virial_rmse"], result["virial_atom_rmse"]]
+            if has_charge:
+                charge_label_list.append(result["charge_label"])
+                charge_predict_list.append(result["charge_predict"])
+            if has_bec:
+                bec_label_list.append(result["bec_label"])
+                bec_predict_list.append(result["bec_predict"])
 
         inference_path = self.input_param.file_paths.test_dir
         if os.path.exists(inference_path) is False:
@@ -736,13 +800,22 @@ class nep_network:
 
         write_arrays_to_file(os.path.join(inference_path, "dft_virial.txt"), virial_label_list, head_line="#\txx\txy\txz\tyy\tyz\tzz")
         write_arrays_to_file(os.path.join(inference_path, "inference_virial.txt"), virial_predict_list, head_line="#\txx\txy\txz\tyy\tyz\tzz")
+        if has_charge:
+            write_arrays_to_file(os.path.join(inference_path, "dft_charge.txt"), charge_label_list)
+            write_arrays_to_file(os.path.join(inference_path, "inference_charge.txt"), charge_predict_list)
+        if has_bec:
+            write_arrays_to_file(os.path.join(inference_path, "dft_bec.txt"), bec_label_list, head_line="#\txx\txy\txz\tyx\tyy\tyz\tzx\tzy\tzz")
+            write_arrays_to_file(os.path.join(inference_path, "inference_bec.txt"), bec_predict_list, head_line="#\txx\txy\txz\tyx\tyy\tyz\tzx\tzy\tzz")
 
-        # res_pd.to_csv(os.path.join(inference_path, "inference_loss.csv"))
-        rmse_E, rmse_F, rmse_V, e_r2, f_r2, v_r2 = inference_plot(inference_path)
+        rmse_E, rmse_F, rmse_V, e_r2, f_r2, v_r2, rmse_charge, charge_r2, rmse_bec, bec_r2 = inference_plot(inference_path, return_extra=True)
         inference_cout = ""
         inference_cout += "For {} images: \n".format(len(images))
         inference_cout += "Average RMSE of Etot per atom: {} R2: {}\n".format(rmse_E, e_r2)
         inference_cout += "Average RMSE of Force: {} R2: {}\n".format(rmse_F, f_r2)
+        if rmse_charge is not None:
+            inference_cout += "Average RMSE of Charge: {} R2: {}\n".format(rmse_charge, charge_r2)
+        if rmse_bec is not None:
+            inference_cout += "Average RMSE of BEC: {} R2: {}\n".format(rmse_bec, bec_r2)
         inference_cout += "Average RMSE of Virial per atom: {} R2: {}\n".format(rmse_V, v_r2)
         inference_cout += "\nMore details can be found under the file directory:\n{}\n".format(os.path.realpath(self.input_param.file_paths.test_dir))
         print(inference_cout)
@@ -821,5 +894,3 @@ class nep_network:
         print(inference_cout)
         with open(os.path.join(inference_path, "inference_summary.txt"), 'w') as wf:
             wf.writelines(inference_cout)
-
-

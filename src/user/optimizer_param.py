@@ -91,8 +91,8 @@ class OptimizerParam(object):
         self.pre_fac_ei = 1.0
         self.pre_fac_virial = 1.0
         self.pre_fac_egroup = 0.1
-        self.pre_fac_charge = 0.1
-        self.pre_fac_bec = 0.1
+        self.pre_fac_charge = 1.0
+        self.pre_fac_bec = 2.0
 
         if "KF" in self.opt_name.upper():
             self.pre_fac_force = get_parameter("pre_fac_force", optimizer_dict, 2.0)
@@ -100,25 +100,25 @@ class OptimizerParam(object):
             self.pre_fac_ei = get_parameter("pre_fac_ei", optimizer_dict, 1.0)
             self.pre_fac_virial = get_parameter("pre_fac_virial", optimizer_dict, 1.0)
             self.pre_fac_egroup = get_parameter("pre_fac_egroup", optimizer_dict, 0.1)
-            self.pre_fac_charge = get_parameter("pre_fac_charge", optimizer_dict, 0.1)
-            self.pre_fac_bec = get_parameter("pre_fac_bec", optimizer_dict, 0.1)
+            self.pre_fac_charge = get_parameter("pre_fac_charge", optimizer_dict, 1.0)
+            self.pre_fac_bec = get_parameter("pre_fac_bec", optimizer_dict, 2.0)
 
         elif "ADAM" in self.opt_name.upper():
-            self.start_pre_fac_force = get_parameter("start_pre_fac_force", optimizer_dict, 1000)
+            self.start_pre_fac_force = get_parameter("start_pre_fac_force", optimizer_dict, 1000.0)
             self.start_pre_fac_etot = get_parameter("start_pre_fac_etot", optimizer_dict, 0.02)
             self.start_pre_fac_ei = get_parameter("start_pre_fac_ei", optimizer_dict, 0.1)
             self.start_pre_fac_virial = get_parameter("start_pre_fac_virial", optimizer_dict, 50.0)
             self.start_pre_fac_egroup = get_parameter("start_pre_fac_egroup", optimizer_dict, 0.02)
-            self.start_pre_fac_charge = get_parameter("start_pre_fac_charge", optimizer_dict, 0.1)
-            self.start_pre_fac_bec = get_parameter("start_pre_fac_bec", optimizer_dict, 10.0)
+            self.start_pre_fac_charge = get_parameter("start_pre_fac_charge", optimizer_dict, 0.02)
+            self.start_pre_fac_bec = get_parameter("start_pre_fac_bec", optimizer_dict, 1000.0)
 
             self.end_pre_fac_force = get_parameter("end_pre_fac_force", optimizer_dict, 1.0)
             self.end_pre_fac_etot = get_parameter("end_pre_fac_etot", optimizer_dict, 1.0)
             self.end_pre_fac_ei = get_parameter("end_pre_fac_ei", optimizer_dict, 2.0)
             self.end_pre_fac_virial = get_parameter("end_pre_fac_virial", optimizer_dict, 1.0)
             self.end_pre_fac_egroup = get_parameter("end_pre_fac_egroup", optimizer_dict, 1.0)
-            self.end_pre_fac_charge = get_parameter("end_pre_fac_charge", optimizer_dict, 0.1)
-            self.end_pre_fac_bec = get_parameter("end_pre_fac_bec", optimizer_dict, 0.1)
+            self.end_pre_fac_charge = get_parameter("end_pre_fac_charge", optimizer_dict, 1.0)
+            self.end_pre_fac_bec = get_parameter("end_pre_fac_bec", optimizer_dict, 1.0)
 
     def to_linear_dict(self):
         opt_dict = {}

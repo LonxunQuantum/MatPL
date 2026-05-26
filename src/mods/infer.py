@@ -334,14 +334,14 @@ class Inference(object):
 
             ei_predict   = np.array(ei_predict).reshape(atom_nums)
             force_predict = np.array(force_predict).reshape(3, atom_nums).transpose(1, 0)
-            virial_predict = np.array(virial_predict)
+            virial_predict = np.array(virial_predict) #virial xx xy xz yx yy yz zx zy zz
             etot_predict = np.sum(ei_predict)
             charge_predict = np.array(charge_predict)
             bec_predict = np.array(bec_predict)
             if charge_predict.size:
                 charge_predict = charge_predict.reshape(atom_nums)
             if bec_predict.size:
-                bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0).reshape(atom_nums, 3, 3)
+                bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0) # bec: xx xy xz yx yy yz zx zy zz
 
             etot_list.append(etot_predict)
             ei_list.append(ei_predict)
@@ -388,7 +388,7 @@ class Inference(object):
         if charge_predict.size:
             charge_predict = charge_predict.reshape(atom_nums)
         if bec_predict.size:
-            bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0).reshape(atom_nums, 3, 3)
+            bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0)
         return etot_predict, ei_predict, force_predict, virial_predict, charge_predict, bec_predict
 
     # def inference_nep(self, structrue_file, format="pwmat/config", atom_names=None):

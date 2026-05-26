@@ -109,7 +109,7 @@ def get_nep_loss(
             optimizer_param.end_pre_fac_charge,
             real_lr,
         )
-        loss = loss + pref_charge * loss_Charge_val
+        loss = loss + pref_charge * loss_Charge_val / avg_atom_number
 
     if optimizer_param.train_bec and loss_BEC_val is not None:
         pref_bec = get_adam_loss_prefactor(
@@ -373,6 +373,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Egroup.root,
         loss_Virial.root,
         loss_Virial_per_atom.root,
+        loss_Charge.root,
+        loss_BEC.root,
         real_lr,
         loss_L1.root,
         loss_L2.root
@@ -527,7 +529,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         batch_time.all_reduce()
     """
     progress.display_summary(["Training Set:"])
-    return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root, loss_L1.root, loss_L2.root
+    return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root, 0.0, 0.0, loss_L1.root, loss_L2.root
 
 def valid(val_loader, model, criterion, device, args:InputParam):
     def run_validate(loader, base_progress=0):
@@ -700,7 +702,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
     if args.rank == 0:
         progress.display_summary(["Test Set:"])
 
-    return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root
+    return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root, loss_Charge.root, loss_BEC.root
 
 '''
 description:

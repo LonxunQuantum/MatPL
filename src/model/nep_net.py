@@ -833,7 +833,7 @@ class NEP(nn.Module):
         mask: List[Optional[torch.Tensor]] = [torch.ones_like(Ei)]
         dE = torch.autograd.grad([Ei], [Ri], grad_outputs=mask, retain_graph=True, create_graph=True)[0]
         '''
-        if True: # device.type == "cpu": #True: 
+        if device.type == "cpu": #True: 
             batch_size = num_atom.shape[0]
             image_atom_index = torch.cumsum(num_atom, dim=0).squeeze(-1)
             image_atom_index = torch.cat((torch.tensor([0], device=device), image_atom_index), dim=0)
