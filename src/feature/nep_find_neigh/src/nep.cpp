@@ -196,14 +196,16 @@ void apply_ann_one_layer_charge(
       w0_times_q += w0[n * dim + d] * q[d];
     }
     double x1 = tanh(w0_times_q - b0[n]);
-    const double y0 = w1[n * 2] * x1;
-    const double y1 = w1[n * 2 + 1] * x1;
+    const double energy_weight = w1[n];
+    const double charge_weight = w1[n + num_neurons1];
+    const double y0 = energy_weight * x1;
+    const double y1 = charge_weight * x1;
     energy += y0;
     charge += y1;
     for (int d = 0; d < dim; ++d) {
       double derivative = (1.0 - x1 * x1) * w0[n * dim + d];
-      energy_derivative[d] += w1[n * 2] * derivative;
-      charge_derivative[d] += w1[n * 2 + 1] * derivative;
+      energy_derivative[d] += energy_weight * derivative;
+      charge_derivative[d] += charge_weight * derivative;
     }
   }
   energy -= b1[0];
