@@ -56,7 +56,7 @@ class FindNeigh
   public:
     FindNeigh();
     std::tuple<std::vector<double>, std::vector<double>, std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>> getNeigh(double, double, int, std::vector<int>, std::vector<double>, std::vector<double>);
-    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> inference(std::vector<int>, std::vector<double>, std::vector<double>);
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>, std::vector<double>, std::vector<double>> inference(std::vector<int>, std::vector<double>, std::vector<double>);
     std::tuple<std::vector<int>, std::vector<double>> getNeighDP( int ntypes, 
                                                                   int max_neigh_num, 
                                                                   double rcut,
@@ -96,7 +96,7 @@ void FindNeigh::allocate_memory(const int N)
   }
 }
 
-std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> FindNeigh::inference(
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>, std::vector<double>, std::vector<double>> FindNeigh::inference(
   std::vector<int> atom_type_map,
   std::vector<double> box,
   std::vector<double> position
@@ -105,7 +105,7 @@ std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> FindNe
   int N = atom_type_map.size();
   allocate_memory(N);
   calc.compute(atom_type_map, box, position, potential, force, virial, total_virial);
-  return std::make_tuple(potential, force, total_virial);
+  return std::make_tuple(potential, force, total_virial, calc.charge, calc.bec);
 }
 
 std::tuple<std::vector<double>, std::vector<double>, std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>> FindNeigh::getNeigh(

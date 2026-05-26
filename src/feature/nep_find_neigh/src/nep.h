@@ -46,6 +46,7 @@ public:
     bool use_typewise_cutoff_zbl = false;
     double typewise_cutoff_zbl_factor = 0.0;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
+    int charge_mode = 0;
     int version = 4;
     double rc_radial = 0.0;
     double rc_angular = 0.0;
@@ -75,6 +76,7 @@ public:
     const double* w0[103];
     const double* b0[103];
     const double* w1[103];
+    const double* sqrt_epsilon_inf;
     const double* b1;
     const double* c;
     // for the scalar part of polarizability
@@ -82,6 +84,12 @@ public:
     const double* b0_pol[103];
     const double* w1_pol[103];
     const double* b1_pol;
+  };
+
+  struct Charge_Para {
+    int num_kpoints_max = 50000;
+    double alpha = 0.0;
+    double alpha_factor = 0.0;
   };
 
   struct ZBL {
@@ -129,6 +137,7 @@ public:
   ParaMB paramb;
   ANN annmb;
   ZBL zbl;
+  Charge_Para charge_para;
 
   int num_atoms = 0;
   int num_cells[3];
@@ -139,6 +148,17 @@ public:
   std::vector<double> r12_angular;
   std::vector<double> r12;
   std::vector<double> Fp;
+  std::vector<double> charge;
+  std::vector<double> charge_derivative;
+  std::vector<double> bec;
+  std::vector<double> D_real;
+  std::vector<int> num_kpoints;
+  std::vector<double> kx;
+  std::vector<double> ky;
+  std::vector<double> kz;
+  std::vector<double> G;
+  std::vector<double> S_real;
+  std::vector<double> S_imag;
   std::vector<double> sum_fxyz;
   std::vector<double> parameters;
   std::vector<std::string> element_list;
