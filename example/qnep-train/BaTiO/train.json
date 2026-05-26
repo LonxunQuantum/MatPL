@@ -1,0 +1,64 @@
+{
+    "model_type": "NEP",
+    "atom_type": [
+        "Ba","Ti","O"
+    ],
+    "model": {
+        "descriptor": {
+            "cutoff": [
+                8.0,
+                4.0
+            ],
+            "n_max": [
+                6,
+                6
+            ],
+            "basis_size": [
+                6,
+                6
+            ],
+            "l_max": [
+                4,
+                2,
+                0
+            ],
+        "charge_mode":true
+        },
+        "fitting_net": {
+            "network_size": [
+                30,
+                1
+            ]
+        }
+    },
+    "optimizer": {
+       "optimizer": "ADAM",
+        "epochs": 4,
+        "batch_size": 1,
+        "print_freq": 1,
+        "max_norm": 0.5,
+        "norm_type": 2,
+        "t_0": 2,
+        "t_mult": 2,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial": true,
+        "train_charge": true,
+        "train_bec": true,
+        "learning_rate": 0.001,
+        "stop_lr": 3.51e-08,
+        "_stop_step": 1000000,
+        "_decay_step": 5000,
+        "start_pre_fac_force": 10,
+        "start_pre_fac_etot": 1.0,
+        "end_pre_fac_force": 1.0,
+        "end_pre_fac_etot": 1.0
+    },
+    "seed": 2023,
+    "format":"extxyz",
+    "train_data": [
+        "reference-structures-BaTiO-R2SCAN.xyz"
+    ]
+
+}
+
