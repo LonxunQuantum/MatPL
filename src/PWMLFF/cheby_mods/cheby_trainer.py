@@ -6,7 +6,7 @@ from enum import Enum
 import torch
 from torch.utils.data import Subset
 from torch.autograd import Variable
-from src.loss.dploss import calc_loss, adjust_lr
+from src.loss.loss import calc_loss, adjust_lr
 from src.optimizer.KFWrapper import KFOptimizerWrapper
 # import horovod.torch as hvd
 from torch.profiler import profile, record_function, ProfilerActivity

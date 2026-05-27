@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from src.loss.dploss import adjust_lr, warmup_lr
+from src.loss.loss import adjust_lr, warmup_lr, get_loss, print_l1_l2
 
 from src.optimizer.KFWrapper import KFOptimizerWrapper
 # import horovod.torch as hvd
@@ -51,91 +51,6 @@ def get_bec_loss(bec_predict, sample, criterion, args:InputParam):
         return None, None
     return criterion(bec_predict[bec_mask], bec_label[bec_mask]), bec_mask
 
-
-def get_adam_loss_prefactor(start_prefactor, end_prefactor, real_lr, start_lr=0.001):
-    return end_prefactor + (start_prefactor - end_prefactor) * real_lr / start_lr
-
-
-def get_nep_loss(
-    args: InputParam,
-    real_lr,
-    avg_atom_number,
-    loss_F_val,
-    loss_Etot_val,
-    loss_Virial_val=None,
-    loss_Egroup_val=None,
-    loss_Charge_val=None,
-    loss_BEC_val=None,
-    train_virial=False,
-):
-    optimizer_param = args.optimizer_param
-    loss = torch.zeros_like(loss_F_val)
-
-    if optimizer_param.train_force:
-        pref_force = get_adam_loss_prefactor(
-            optimizer_param.start_pre_fac_force,
-            optimizer_param.end_pre_fac_force,
-            real_lr,
-        )
-        loss = loss + pref_force * loss_F_val
-
-    if optimizer_param.train_energy:
-        pref_etot = get_adam_loss_prefactor(
-            optimizer_param.start_pre_fac_etot,
-            optimizer_param.end_pre_fac_etot,
-            real_lr,
-        )
-        loss = loss + pref_etot * loss_Etot_val / avg_atom_number
-
-    if train_virial and loss_Virial_val is not None:
-        pref_virial = get_adam_loss_prefactor(
-            optimizer_param.start_pre_fac_virial,
-            optimizer_param.end_pre_fac_virial,
-            real_lr,
-        )
-        loss = loss + pref_virial * loss_Virial_val / avg_atom_number
-
-    if optimizer_param.train_egroup and loss_Egroup_val is not None:
-        pref_egroup = get_adam_loss_prefactor(
-            optimizer_param.start_pre_fac_egroup,
-            optimizer_param.end_pre_fac_egroup,
-            real_lr,
-        )
-        loss = loss + pref_egroup * loss_Egroup_val
-
-    if optimizer_param.train_charge and loss_Charge_val is not None:
-        pref_charge = get_adam_loss_prefactor(
-            optimizer_param.start_pre_fac_charge,
-            optimizer_param.end_pre_fac_charge,
-            real_lr,
-        )
-        loss = loss + pref_charge * loss_Charge_val / avg_atom_number
-
-    if optimizer_param.train_bec and loss_BEC_val is not None:
-        pref_bec = get_adam_loss_prefactor(
-            optimizer_param.start_pre_fac_bec,
-            optimizer_param.end_pre_fac_bec,
-            real_lr,
-        )
-        loss = loss + pref_bec * loss_BEC_val
-
-    return loss
-
-
-def print_l1_l2(model):
-    params = model.parameters()
-    dtype = next(params).dtype
-    device = next(params).device
-    L1 = torch.tensor(0.0, device=device, dtype=dtype).detach().requires_grad_(False)
-    L2 = torch.tensor(0.0, device=device, dtype=dtype).detach().requires_grad_(False)
-    nums_param = 0
-    for p in params:
-        L1 += torch.sum(torch.abs(p))
-        L2 += torch.sum(p**2)
-        nums_param += p.nelement()
-    L1 = L1 / nums_param
-    L2 = L2 / nums_param
-    return L1, L2
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam):
     def scale_learning_rate(ngpus, nbatch, avg_atom_nums, scaling_method):
@@ -304,7 +219,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                 loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
                 loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
 
-        loss = get_nep_loss(
+        loss = get_loss(
             args,
             real_lr,
             avg_atom_number,
