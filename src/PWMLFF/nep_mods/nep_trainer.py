@@ -166,9 +166,29 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
     loss_BEC = AverageMeter("BEC", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_L1 = AverageMeter("Loss_L1", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
+    progress_meters = [
+        batch_time,
+        data_time,
+        learning_rate,
+        losses,
+        loss_L1,
+        loss_L2,
+        loss_Etot,
+        loss_Etot_per_atom,
+        loss_Force,
+        loss_Ei,
+    ]
+    if args.optimizer_param.train_egroup:
+        progress_meters.append(loss_Egroup)
+    if args.optimizer_param.train_charge:
+        progress_meters.append(loss_Charge)
+    if args.optimizer_param.train_bec:
+        progress_meters.append(loss_BEC)
+    if args.optimizer_param.train_virial:
+        progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, learning_rate, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_BEC, loss_Virial, loss_Virial_per_atom],
+        progress_meters,
         prefix=f"Epoch: [{epoch}]",
     )
 
@@ -391,11 +411,32 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
     loss_Egroup = AverageMeter("Egroup", ":.4e", Summary.ROOT)
     loss_Virial = AverageMeter("Virial", ":.4e", Summary.ROOT)
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT)
+    loss_Charge = AverageMeter("Charge", ":.4e", Summary.ROOT)
+    loss_BEC = AverageMeter("BEC", ":.4e", Summary.ROOT)
     loss_L1 = AverageMeter("Loss_L1", ":.4e", Summary.ROOT)
     loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT)
+    progress_meters = [
+        batch_time,
+        data_time,
+        losses,
+        loss_L1,
+        loss_L2,
+        loss_Etot,
+        loss_Etot_per_atom,
+        loss_Force,
+        loss_Ei,
+    ]
+    if args.optimizer_param.train_egroup:
+        progress_meters.append(loss_Egroup)
+    if args.optimizer_param.train_charge:
+        progress_meters.append(loss_Charge)
+    if args.optimizer_param.train_bec:
+        progress_meters.append(loss_BEC)
+    if args.optimizer_param.train_virial:
+        progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
+        progress_meters,
         prefix="Epoch: [{}]".format(epoch),
     )
 
@@ -440,12 +481,17 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
             True #calculate_neighbor
         )
         kalman_inputs = [NN_radial, NL_radial, Ri_radial, NN_angular, NL_angular, Ri_angular, \
-                            sample["num_atom"], sample["atom_type_map"], None, None]
+                            sample["num_atom"], sample["atom_type_map"], None, None,
+                            sample.get("charge")]
         Virial_label = sample["virial"]
         Etot_label   = sample["energy"]
         Ei_label     = sample["ei"]
         Egroup_label = None
         Force_label  = sample["force"]
+        Charge_label = sample.get("charge")
+        BEC_label = sample.get("bec")
+        Charge_predict = None
+        Bec_predict = None
         if args.optimizer_param.train_virial is True:
             # check_cuda_memory(epoch, i, "train_virial start")
             Virial_predict = KFOptWrapper.update_virial(kalman_inputs, Virial_label, args.optimizer_param.pre_fac_virial, train_type = "NEP")
@@ -458,6 +504,12 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
 
         if args.optimizer_param.train_egroup is True:
             Egroup_predict = KFOptWrapper.update_egroup(kalman_inputs, Egroup_label, args.optimizer_param.pre_fac_egroup, train_type = "NEP")
+
+        if args.optimizer_param.train_charge is True and Charge_label is not None:
+            Charge_predict = KFOptWrapper.update_charge(kalman_inputs, Charge_label, args.optimizer_param.pre_fac_charge, train_type = "NEP")
+
+        if args.optimizer_param.train_bec is True and BEC_label is not None:
+            Bec_predict = KFOptWrapper.update_bec(kalman_inputs, BEC_label, args.optimizer_param.pre_fac_bec, train_type = "NEP")
 
         if args.optimizer_param.train_force is True:
             # check_cuda_memory(epoch, i, "update_force start")
@@ -474,11 +526,17 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
 
         loss_Ei_val = criterion(Ei_predict, Ei_label)
+        loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
+        loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
         loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
                     args.optimizer_param.pre_fac_etot * loss_Etot_val
+        if loss_Charge_val is not None:
+            loss_val += args.optimizer_param.pre_fac_charge * loss_Charge_val
+        if loss_BEC_val is not None:
+            loss_val += args.optimizer_param.pre_fac_bec * loss_BEC_val
 
         if args.optimizer_param.train_virial is True:
             data_mask = Virial_label[:, 0] > -1e6
@@ -505,6 +563,10 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         loss_Ei.update(loss_Ei_val.item(), Ei_predict.shape[0])
         if args.optimizer_param.train_egroup is True:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
+        if loss_Charge_val is not None:
+            loss_Charge.update(loss_Charge_val.item(), batch_size)
+        if loss_BEC_val is not None:
+            loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
         loss_Force.update(loss_F_val.item(), batch_size)
 
         # measure elapsed time
@@ -529,7 +591,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         batch_time.all_reduce()
     """
     progress.display_summary(["Training Set:"])
-    return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root, 0.0, 0.0, loss_L1.root, loss_L2.root
+    return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root, loss_Charge.root, loss_BEC.root, loss_L1.root, loss_L2.root
 
 def valid(val_loader, model, criterion, device, args:InputParam):
     def run_validate(loader, base_progress=0):
@@ -660,9 +722,25 @@ def valid(val_loader, model, criterion, device, args:InputParam):
     loss_Virial = AverageMeter("Virial", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT, device=device, world_size=args.world_size)
 
+    progress_meters = [
+        batch_time,
+        losses,
+        loss_Etot,
+        loss_Etot_per_atom,
+        loss_Force,
+        loss_Ei,
+    ]
+    if args.optimizer_param.train_egroup:
+        progress_meters.append(loss_Egroup)
+    if args.optimizer_param.train_charge:
+        progress_meters.append(loss_Charge)
+    if args.optimizer_param.train_bec:
+        progress_meters.append(loss_BEC)
+    if args.optimizer_param.train_virial:
+        progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Charge, loss_BEC, loss_Virial, loss_Virial_per_atom],
+        progress_meters,
         prefix="Test: ",
     )
     module = model.module if args.world_size > 1 else model

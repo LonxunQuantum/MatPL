@@ -816,17 +816,38 @@ class NEP(nn.Module):
                                 device: torch.device,
                                 dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
         # t7 = time.time()
+        grad_inputs = []
+        grad_names = []
         if self.train_2b:
-            mask: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
-            dE = torch.autograd.grad([Etot], [Ri], grad_outputs=mask, retain_graph=True, create_graph=True)[0]
-
+            grad_inputs.append(Ri)
+            grad_names.append("radial")
         if self.l_max_3b > 0:
-            mask_angular: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
-            dE_angular = torch.autograd.grad([Etot], [Ri_angular], grad_outputs=mask_angular, retain_graph=True, create_graph=True, allow_unused=True)[0]
-        
+            grad_inputs.append(Ri_angular)
+            grad_names.append("angular")
         if Ri_zbl is not None:
-            mask_zbl: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
-            dE_zbl = torch.autograd.grad([Etot], [Ri_zbl], grad_outputs=mask_zbl, retain_graph=True, create_graph=True)[0]
+            grad_inputs.append(Ri_zbl)
+            grad_names.append("zbl")
+
+        grads = torch.autograd.grad(
+            Etot,
+            grad_inputs,
+            grad_outputs=torch.ones_like(Etot),
+            retain_graph=True,
+            create_graph=True,
+            allow_unused=True)
+        grad_map = dict(zip(grad_names, grads))
+        if self.train_2b:
+            dE = grad_map["radial"]
+            if dE is None:
+                dE = torch.zeros_like(Ri)
+        if self.l_max_3b > 0:
+            dE_angular = grad_map["angular"]
+            if dE_angular is None:
+                dE_angular = torch.zeros_like(Ri_angular)
+        if Ri_zbl is not None:
+            dE_zbl = grad_map["zbl"]
+            if dE_zbl is None:
+                dE_zbl = torch.zeros_like(Ri_zbl)
         # t8 = time.time()
         '''
         # this result is same as the above code
