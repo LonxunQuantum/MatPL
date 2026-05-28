@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from src.user.input_param import InputParam
 
@@ -71,3 +72,43 @@ def warmup_lr(iter, iternum, cur_epoch, warm_epochs, start_lr, end_lr):
         return start_lr + (cur_epoch * iternum + iter) / (warm_epochs * iternum) * (end_lr - start_lr)
     else:
         raise Exception(f"ERROR! The current epochs {cur_epoch} > warmepoch nums {warm_epochs}")
+
+
+def wsd_lr(global_step, total_steps, peak_lr, stop_lr,
+           warmup_steps=0, stable_frac=0.9, decay_kind="cosine"):
+    """Warmup-Stable-Decay LR schedule.
+
+    Three phases over ``total_steps``:
+      * ``[0, warmup_steps)`` — linear ramp from ``stop_lr`` to ``peak_lr``.
+      * ``[warmup_steps, decay_start)`` — flat at ``peak_lr`` where
+        ``decay_start = warmup_steps + (total_steps - warmup_steps) * stable_frac``.
+      * ``[decay_start, total_steps]`` — decay from ``peak_lr`` to ``stop_lr``
+        with either linear or cosine profile.
+    """
+
+    if total_steps <= 0:
+        return peak_lr
+    step = max(0, min(int(global_step), int(total_steps)))
+    warmup = max(0, int(warmup_steps))
+    if warmup > total_steps:
+        warmup = total_steps
+
+    if step < warmup:
+        ratio = step / warmup
+        return stop_lr + (peak_lr - stop_lr) * ratio
+
+    decay_start = warmup + int((total_steps - warmup) * stable_frac)
+    decay_start = min(max(decay_start, warmup), total_steps)
+    if step < decay_start:
+        return peak_lr
+
+    decay_total = total_steps - decay_start
+    if decay_total <= 0:
+        return stop_lr
+    progress = (step - decay_start) / decay_total
+    progress = min(max(progress, 0.0), 1.0)
+    if decay_kind == "linear":
+        return peak_lr + (stop_lr - peak_lr) * progress
+    # cosine: smooth peak->stop transition
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return stop_lr + (peak_lr - stop_lr) * cosine

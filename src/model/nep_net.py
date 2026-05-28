@@ -12,6 +12,7 @@ from typing import List, Tuple, Optional
 from src.user.input_param import InputParam
 from src.user.nep_param import NepParam
 from src.utils.debug_operation import check_cuda_memory
+from src.utils.nvtx_helper import nvtx_range
 sys.path.append(os.getcwd())
 from src.model.nep_fitting import FittingNet
 if torch.cuda.is_available():
@@ -46,7 +47,7 @@ class NEP(nn.Module):
             self.dtype = torch.float32
         else:
             raise RuntimeError("train(): unsupported training data type")
-        self.energy_shift = energy_shift        
+        self.energy_shift = energy_shift
         self.set_cparam(np.mean(energy_shift))
         
         # 注册缓冲区
@@ -76,8 +77,18 @@ class NEP(nn.Module):
                                                     nep_txt_param = nep_txt_param,
                                                     last_bias= True,
                                                     #    self.nep_param["net_cfg"]["fitting_net"]["resnet_dt"],
-                                                    #    self.nep_param["net_cfg"]["fitting_net"]["activation"], 
+                                                    #    self.nep_param["net_cfg"]["fitting_net"]["activation"],
                                                     ))
+
+        # Phase 2.2: opt-in torch.compile of FittingNet.forward. Compile is
+        # applied per-instance after construction so the autograd graph treats
+        # the FittingNet call as a fused op. Phase 2.3 (same_nloc_sampler)
+        # provides the shape stability needed to avoid recompiles.
+        if getattr(input_param, "compile_fitting", False):
+            for fit_net in self.fitting_net:
+                fit_net.forward = torch.compile(
+                    fit_net.forward, mode="reduce-overhead", dynamic=False,
+                )
 
     def _initialize_buffers(self, q_scaler = None):
         """初始化缓冲区，设置 q_max, q_min, C3B, C4B, C5B, atom_type_device 和 q_scaler（如果 nep.txt 提供）。"""
@@ -316,62 +327,54 @@ class NEP(nn.Module):
         dtype = Ri_radial.dtype
         natoms_sum = NL_radial.shape[0]#no use
         # fitnet_index = self.get_fitnet_index()
+
         Ri, Ri_d, Ri_angular, Ri_d_angular = self.calculate_Ri(Ri_radial, Ri_angular, device, dtype)
         Ri = Ri_radial
         Ri.requires_grad_()
-
         Ri_angular = Ri_angular
         Ri_angular.requires_grad_()
-        
+
         if device.type == "cpu":
             NL_radial_type = NL_radial.new_full(NL_radial.shape, -1).requires_grad_(False)
-            mask = NL_radial != -1 
+            mask = NL_radial != -1
             NL_radial_type[mask] = atom_type_map[NL_radial[mask]]
 
             NL_angular_type = NL_angular.new_full(NL_angular.shape, -1).requires_grad_(False)
-            mask = NL_angular != -1 
+            mask = NL_angular != -1
             NL_angular_type[mask] = atom_type_map[NL_angular[mask]]
 
-            feats = self.calculate_qn(atom_type_map, NL_radial_type, Ri, NL_angular_type, Ri_angular, device, dtype)
-        else:# cuda ops
+            feats = self.calculate_qn(atom_type_map, NL_radial_type, Ri,
+                                      NL_angular_type, Ri_angular, device, dtype)
+        else:# cuda ops — CalcOps always fp64
             if self.train_2b:
-                feat_2b = torch.zeros(natoms_sum, self.two_feat_num, dtype=dtype, device=device, requires_grad=True)
-                feat_2b = CalcOps.calculateNepFeat(self.c_param_2, 
-                                                Ri, 
-                                                NL_radial, 
-                                                atom_type_map,
-                                                feat_2b, 
-                                                self.cutoff_radial,
-                                                self.multi_feat_num,
-                                                int(self.input_param.nep_param.fix_cij)
-                                                )[0]
+                with nvtx_range("descriptor_2b"):
+                    feat_2b = torch.zeros(natoms_sum, self.two_feat_num, dtype=dtype, device=device, requires_grad=True)
+                    feat_2b = CalcOps.calculateNepFeat(self.c_param_2,
+                                                    Ri,
+                                                    NL_radial,
+                                                    atom_type_map,
+                                                    feat_2b,
+                                                    self.cutoff_radial,
+                                                    self.multi_feat_num,
+                                                    int(self.input_param.nep_param.fix_cij))[0]
             if self.l_max_3b > 0:
-                feat_3b = torch.zeros(natoms_sum, self.multi_feat_num, dtype=dtype, device=device, requires_grad=True)
-                feat_3b = CalcOps.calculateNepMbFeat(self.c_param_3, 
-                                                        Ri_angular, 
-                                                        NL_angular, 
-                                                        atom_type_map, 
-                                                        feat_3b, 
-                                                        self.two_feat_num,
-                                                        self.l_max_3b, 
-                                                        self.l_max_4b, 
-                                                        self.l_max_5b, 
-                                                        self.cutoff_angular,
-                                                        int(self.input_param.nep_param.fix_cij)
-                                                        )[0]
+                with nvtx_range("descriptor_3b"):
+                    feat_3b = torch.zeros(natoms_sum, self.multi_feat_num, dtype=dtype, device=device, requires_grad=True)
+                    feat_3b = CalcOps.calculateNepMbFeat(self.c_param_3,
+                        Ri_angular, NL_angular, atom_type_map, feat_3b,
+                        self.two_feat_num, self.l_max_3b, self.l_max_4b, self.l_max_5b,
+                        self.cutoff_angular, int(self.input_param.nep_param.fix_cij))[0]
 
-                if self.train_2b:
-                    feats = torch.concat([feat_2b, feat_3b], dim=-1)
-                else:
-                    feats = feat_3b
+                feats = torch.concat([feat_2b, feat_3b], dim=-1) if self.train_2b else feat_3b
             else:
                 feats = feat_2b
 
         feats_in = self.q_scaler * feats
         # feats_in = (feats-self.q_min)/(self.q_max-self.q_min)
-        Ei = self.calculate_Ei(atom_type_map, feats_in, device)
+        with nvtx_range("fitnet_per_type_loop"):
+            Ei = self.calculate_Ei(atom_type_map, feats_in, device)
         assert Ei is not None
-        
+
         Egroup = self.get_egroup(Ei, Egroup_weight, divider) if Egroup_weight is not None else None
         # Ei = torch.squeeze(Ei, 1)
 
@@ -380,13 +383,14 @@ class NEP(nn.Module):
         # check_cuda_memory(-1, -1, "FORWAR Ei")
         exist_rij = False
         if self.zbl is not None:
-            condition = (Ri_angular[:, :, 0] > 0) & (Ri_angular[:, :, 0] < self.zbl)
-            exist_rij = condition.any().item()
-            if exist_rij:
-                Ei_zbl, ri_zbl, ri_d_zbl, neigh_zbl = self.calculate_zbl(Ri_angular, Ri_d_angular, NL_angular, atom_type_map)
-                Ei = Ei + Ei_zbl
-            else:
-                ri_zbl, ri_d_zbl, neigh_zbl = None, None, None
+            with nvtx_range("zbl"):
+                condition = (Ri_angular[:, :, 0] > 0) & (Ri_angular[:, :, 0] < self.zbl)
+                exist_rij = condition.any().item()
+                if exist_rij:
+                    Ei_zbl, ri_zbl, ri_d_zbl, neigh_zbl = self.calculate_zbl(Ri_angular, Ri_d_angular, NL_angular, atom_type_map)
+                    Ei = Ei + Ei_zbl
+                else:
+                    ri_zbl, ri_d_zbl, neigh_zbl = None, None, None
         else:
             ri_zbl, ri_d_zbl, neigh_zbl = None, None, None
         # t2 = time.time()
@@ -402,12 +406,12 @@ class NEP(nn.Module):
             # print("==single time: tall {} ei {} zbl ei {}".format(t2-t0, t1-t0, t2-t1))
         else:
             # t4 = time.time()
-            Force, Virial = self.calculate_force_virial(Ri, Ri_d, 
-                                                        Ri_angular, Ri_d_angular, 
+            Force, Virial = self.calculate_force_virial(Ri, Ri_d,
+                                                        Ri_angular, Ri_d_angular,
                                                         ri_zbl, ri_d_zbl,
-                                                        Etot, natoms_sum, 
-                                                        NL_radial, 
-                                                        NL_angular, 
+                                                        Etot, natoms_sum,
+                                                        NL_radial,
+                                                        NL_angular,
                                                         neigh_zbl,
                                                         num_atom,
                                                         device, dtype)
@@ -449,7 +453,7 @@ class NEP(nn.Module):
 
         return ImagedR, Ri_d, ImagedR_angular, Ri_d_angular
 
-    def calculate_Ei(self, 
+    def calculate_Ei(self,
                      Imagetype_map: torch.Tensor,
                      feats: torch.Tensor,
                      device: torch.device) -> Optional[torch.Tensor]:
@@ -467,20 +471,95 @@ class NEP(nn.Module):
         Returns:
             Optional[torch.Tensor]: The calculated energy Ei for each type of atom, or None if the calculation fails.
         """
+        # Phase 2.1: opt-in batched ntypes path (set MATPL_BATCHED_FITTING=1).
+        # Skips the Python for-loop by stacking all FittingNet weights and
+        # running one bmm per layer. Numerically identical to the loop path.
+        # Only enabled when ntypes >= 2; ntypes==1 has no scatter overhead.
+        if (
+            os.environ.get("MATPL_BATCHED_FITTING", "0") == "1"
+            and len(self.fitting_net) >= 2
+        ):
+            return self._calculate_Ei_batched(Imagetype_map, feats)
+
         Ei = torch.zeros_like(Imagetype_map, dtype=self.dtype)
-        # fit_net_dict = {idx: fit_net for idx, fit_net in enumerate(self.fitting_net)}
         for idx, fit_net in enumerate(self.fitting_net):
-            # fit_net = fit_net_dict.get(nn_i)
-            # S_Rij = Ri[:, indices, ntype_1 * self.maxNeighborNum:(ntype_1+1) * self.maxNeighborNum, 0].unsqueeze(-1)
             mask = (Imagetype_map == idx)
             if not mask.any():
                 continue
-            indices = torch.arange(len(Imagetype_map.flatten()),device=device)[mask]  
+            indices = torch.arange(len(Imagetype_map.flatten()), device=device)[mask]
             feat = feats[indices, :]
             Ei_ntype = fit_net.forward(feat)
             Ei[mask] = Ei_ntype.squeeze()
 
         return Ei
+
+    def _calculate_Ei_batched(self,
+                              Imagetype_map: torch.Tensor,
+                              feats: torch.Tensor) -> torch.Tensor:
+        """Phase 2.1: ntypes-batched FittingNet forward.
+
+        Layout per FittingNet (see nep_fitting.FittingNet.forward):
+          - L hidden layers: x_{l+1} = x_l + tanh(x_l @ W_l + b_l) * (skip)
+            where the residual skip applies for l > 0 with optional resnet_dt
+            scale (currently resnet_dt=False at construction site, so skip is
+            the identity-add). Layer 0 has no skip.
+          - Final linear layer: y = x @ W_last + b_last
+        We stack W_l, b_l across types into [T, in, hidden] / [T, 1, hidden],
+        gather the per-atom slice via type_idx, and run one bmm per layer.
+        """
+        ntypes = len(self.fitting_net)
+        ref = self.fitting_net[0]
+        n_layers = len(ref.layers)
+        natoms = feats.shape[0]
+        type_idx = Imagetype_map.to(torch.long)
+
+        x = feats.unsqueeze(1)  # [N, 1, in]
+        for li in range(n_layers - 1):
+            ref_layer = ref.layers[li]
+            W_stack = torch.stack(
+                [self.fitting_net[t].layers[li].weight for t in range(ntypes)],
+                dim=0,
+            )  # [T, in, hidden]
+            W_per_atom = W_stack.index_select(0, type_idx)  # [N, in, hidden]
+            hidden = torch.bmm(x, W_per_atom)  # [N, 1, hidden]
+            if ref.bias_flag and ref_layer.bias is not None:
+                b_stack = torch.stack(
+                    [self.fitting_net[t].layers[li].bias for t in range(ntypes)],
+                    dim=0,
+                )  # [T, 1, hidden]
+                b_per_atom = b_stack.index_select(0, type_idx)  # [N, 1, hidden]
+                hidden = hidden + b_per_atom
+            hidden = ref.activation(hidden)
+            if li > 0:
+                same_dim = ref.network_size[li + 1] == ref.network_size[li]
+                if same_dim and ref_layer.resnet_dt is not None:
+                    rd_stack = torch.stack(
+                        [self.fitting_net[t].layers[li].resnet_dt for t in range(ntypes)],
+                        dim=0,
+                    )  # [T, 1, hidden]
+                    rd_per_atom = rd_stack.index_select(0, type_idx)
+                    x = hidden * rd_per_atom + x
+                else:
+                    x = hidden + x
+            else:
+                x = hidden
+
+        last_layer = ref.layers[-1]
+        W_last = torch.stack(
+            [self.fitting_net[t].layers[-1].weight for t in range(ntypes)],
+            dim=0,
+        )  # [T, hidden, 1]
+        W_last_per_atom = W_last.index_select(0, type_idx)
+        out = torch.bmm(x, W_last_per_atom)  # [N, 1, 1]
+        if ref.last_bias and last_layer.bias is not None:
+            b_last = torch.stack(
+                [self.fitting_net[t].layers[-1].bias for t in range(ntypes)],
+                dim=0,
+            )  # [T, 1, 1]
+            b_last_per_atom = b_last.index_select(0, type_idx)
+            out = out + b_last_per_atom
+
+        return out.view(natoms)
      
     def calculate_force_virial(self, 
                                 Ri: torch.Tensor,
@@ -497,25 +576,47 @@ class NEP(nn.Module):
                                 num_atom: torch.Tensor,
                                 device: torch.device,
                                 dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
-        # t7 = time.time()
+        # Phase 1.4: merge 3 independent autograd.grad calls (2b/3b/zbl) into a
+        # single call. Reverse-mode AD computes dEtot/d{Ri, Ri_angular, Ri_zbl}
+        # in one backward pass, avoiding the 2-3x cost of building the
+        # backward graph three times. Numerically identical to the original.
+        grad_inputs: List[torch.Tensor] = []
+        slot_2b = -1
+        slot_3b = -1
+        slot_zbl = -1
         if self.train_2b:
-            mask: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
-            dE = torch.autograd.grad([Etot], [Ri], grad_outputs=mask, retain_graph=True, create_graph=True)[0]
-
+            slot_2b = len(grad_inputs)
+            grad_inputs.append(Ri)
         if self.l_max_3b > 0:
-            mask_angular: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
-            dE_angular = torch.autograd.grad([Etot], [Ri_angular], grad_outputs=mask_angular, retain_graph=True, create_graph=True, allow_unused=True)[0]
-        
+            slot_3b = len(grad_inputs)
+            grad_inputs.append(Ri_angular)
         if Ri_zbl is not None:
-            mask_zbl: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
-            dE_zbl = torch.autograd.grad([Etot], [Ri_zbl], grad_outputs=mask_zbl, retain_graph=True, create_graph=True)[0]
+            slot_zbl = len(grad_inputs)
+            grad_inputs.append(Ri_zbl)
+
+        if len(grad_inputs) > 0:
+            with nvtx_range("grad_merged"):
+                mask: List[Optional[torch.Tensor]] = [torch.ones_like(Etot)]
+                grads = torch.autograd.grad(
+                    [Etot], grad_inputs,
+                    grad_outputs=mask,
+                    retain_graph=True,
+                    create_graph=True,
+                    allow_unused=True,
+                )
+            if slot_2b >= 0:
+                dE = grads[slot_2b]
+            if slot_3b >= 0:
+                dE_angular = grads[slot_3b]
+            if slot_zbl >= 0:
+                dE_zbl = grads[slot_zbl]
         # t8 = time.time()
         '''
         # this result is same as the above code
         mask: List[Optional[torch.Tensor]] = [torch.ones_like(Ei)]
         dE = torch.autograd.grad([Ei], [Ri], grad_outputs=mask, retain_graph=True, create_graph=True)[0]
         '''
-        if device.type == "cpu": #True: 
+        if device.type == "cpu": #True:
             batch_size = num_atom.shape[0]
             image_atom_index = torch.cumsum(num_atom, dim=0).squeeze(-1)
             image_atom_index = torch.cat((torch.tensor([0], device=device), image_atom_index), dim=0)
@@ -584,6 +685,7 @@ class NEP(nn.Module):
                     Virial_zbl[i, 7] = Virial_zbl[i, 5]
                 Force_zbl = Force_zbl[1:, :]
         else: # gpu code
+          with nvtx_range("force_virial_gpu"):
             if self.train_2b:
                 Ri_d = Ri_d.view(natoms_sum, -1, 3)
                 dE_tmp = dE.view(natoms_sum, 1, -1)
@@ -612,9 +714,6 @@ class NEP(nn.Module):
                 Force_zbl = CalcOps.calculateNepForce(list_neigh_zbl, dE_zbl, Ri_d_zbl, Force_zbl)[0]
                 Virial_zbl = CalcOps.calculateNepVirial(list_neigh_zbl, dE_zbl, ImageDR_zbl, Ri_d_zbl, num_atom)[0]                
         # t9 = time.time()
-        # print("t8 {} t9 {}".format(t8-t7, t9-t8))
-        # del dE ???
-        # print(-Force)
         if Ri_zbl is not None:
             if self.train_2b and self.l_max_3b > 0:
                 return -(Force + Force_angular + Force_zbl), -(Virial + Virial_angular + Virial_zbl)

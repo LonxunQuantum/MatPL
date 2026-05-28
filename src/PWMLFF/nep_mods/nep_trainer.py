@@ -6,13 +6,14 @@ import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from src.loss.dploss import calc_loss, adjust_lr, warmup_lr
+from src.loss.dploss import calc_loss, adjust_lr, warmup_lr, wsd_lr
 
 from src.optimizer.KFWrapper import KFOptimizerWrapper
 # import horovod.torch as hvd
 # from torch.profiler import profile, record_function, ProfilerActivity
 from src.user.input_param import InputParam
 from src.utils.debug_operation import check_cuda_memory
+from src.utils.nvtx_helper import nvtx_range
 from collections import defaultdict
 from src.utils.train_log import AverageMeter, Summary, ProgressMeter
 
@@ -42,7 +43,7 @@ def print_l1_l2(model):
     L2 = L2 / nums_param
     return L1, L2
 
-def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam):
+def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam, ema=None):
     def scale_learning_rate(ngpus, nbatch, avg_atom_nums, scaling_method):
         if scaling_method == 'linear_gpu':
             return ngpus # 只乘以卡数
@@ -77,48 +78,63 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
 
     module = model.module if args.world_size > 1 else model
     model.train()
+
+    use_wsd = args.optimizer_param.lr_scheduler == "wsd"
+    if use_wsd:
+        wsd_total_steps = args.optimizer_param.epochs * len(train_loader)
+        wsd_warmup_steps = args.optimizer_param.wsd_warmup_steps
+        if wsd_warmup_steps is None:
+            wsd_warmup_steps = (args.optimizer_param.warmup or 0) * len(train_loader)
+        wsd_peak_lr = args.optimizer_param.learning_rate
+        wsd_stop_lr = args.optimizer_param.stop_lr
+        wsd_stable_frac = args.optimizer_param.wsd_stable_frac
+        wsd_decay_kind = args.optimizer_param.wsd_decay_kind
+
     end = time.time()
     for i, sample in enumerate(train_loader):
-        sample = {key: value.to(device) for key, value in sample.items()}
-        nn_radial, nn_angular = CalcOps.calculate_maxneigh(
-            sample["num_atom"],
-            sample["box"],
-            sample["box_original"],
-            sample["num_cell"],
-            sample["position"],
-            module.cutoff_radial,
-            module.cutoff_angular,
-            len(module.atom_type),
-            sample["atom_type_map"],
-            False
-        )
-        max_NN_radial = max(torch.max(nn_radial).item(), 10)
-        max_NN_angular = max(torch.max(nn_angular).item(), 10)
-        FFAtomType = torch.from_numpy(np.array(module.atom_type)).to(device=device, dtype=sample["atom_type_map"].dtype)
-        # mem_3c = (int(sample['num_atom_sum'][-1])  *  model.max_NN_angular + int(sample['num_atom_sum'][-1]) ) * len(args.atom_type) *args.nep_param.basis_size[1] * args.nep_param.n_max[1] * 8 / 1024/ 1024/ 1024
-        # line = f"Epoch {epoch} - iter {i}: Rank: {args.rank}, LocalRank: {args.local_rank} start: timeused {time.time() - end}"
-        # check_cuda_memory(epoch, args.optimizer_param.epochs, line, False, args.rank)
-        NN_radial, NN_angular, NL_radial, NL_angular, Ri_radial, Ri_angular = \
-            CalcOps.calculate_neighbor(
+      with nvtx_range(f"step_{i}"):
+        with nvtx_range("data_to_device"):
+            sample = {key: value.to(device) for key, value in sample.items()}
+        with nvtx_range("calc_neighbor"):
+            nn_radial, nn_angular = CalcOps.calculate_maxneigh(
                 sample["num_atom"],
-                sample["atom_type_map"],
-                FFAtomType - 1,
                 sample["box"],
                 sample["box_original"],
                 sample["num_cell"],
                 sample["position"],
                 module.cutoff_radial,
                 module.cutoff_angular,
-                max_NN_radial,
-                max_NN_angular,
-                True
+                len(module.atom_type),
+                sample["atom_type_map"],
+                False
             )
+            max_NN_radial = max(torch.max(nn_radial).item(), 10)
+            max_NN_angular = max(torch.max(nn_angular).item(), 10)
+            FFAtomType = torch.from_numpy(np.array(module.atom_type)).to(device=device, dtype=sample["atom_type_map"].dtype)
+            # mem_3c = (int(sample['num_atom_sum'][-1])  *  model.max_NN_angular + int(sample['num_atom_sum'][-1]) ) * len(args.atom_type) *args.nep_param.basis_size[1] * args.nep_param.n_max[1] * 8 / 1024/ 1024/ 1024
+            # line = f"Epoch {epoch} - iter {i}: Rank: {args.rank}, LocalRank: {args.local_rank} start: timeused {time.time() - end}"
+            # check_cuda_memory(epoch, args.optimizer_param.epochs, line, False, args.rank)
+            NN_radial, NN_angular, NL_radial, NL_angular, Ri_radial, Ri_angular = \
+                CalcOps.calculate_neighbor(
+                    sample["num_atom"],
+                    sample["atom_type_map"],
+                    FFAtomType - 1,
+                    sample["box"],
+                    sample["box_original"],
+                    sample["num_cell"],
+                    sample["position"],
+                    module.cutoff_radial,
+                    module.cutoff_angular,
+                    max_NN_radial,
+                    max_NN_angular,
+                    True
+                )
         Virial_label = sample["virial"]
         Etot_label = sample["energy"]
         Ei_label = sample["ei"]
         Egroup_label = None
         Force_label = sample["force"]
-       
+
         data_time.update(time.time() - end)
         batch_size = sample["num_atom"].shape[0]
         avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
@@ -127,101 +143,147 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         if args.optimizer_param.warmup is not None and epoch <= args.optimizer_param.warmup: # epoch 从1计数
             start_lr = args.optimizer_param.stop_lr * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
             end_lr = args.optimizer_param.learning_rate * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
-            real_lr = warmup_lr(iter=i, 
-                                iternum=len(train_loader), 
-                                cur_epoch=epoch, 
-                                warm_epochs=args.optimizer_param.warmup, 
+            real_lr = warmup_lr(iter=i,
+                                iternum=len(train_loader),
+                                cur_epoch=epoch,
+                                warm_epochs=args.optimizer_param.warmup,
                                 start_lr=start_lr,
                                 end_lr=end_lr
                                 )
             is_warmlr = True
-        else:  
+        else:
             is_warmlr = False
-            if scheduler is None: # 不启用周期性重启
+            if scheduler is None:
                 global_step = (epoch - 1) * len(train_loader) + i * nr_batch_sample
-                real_lr = adjust_lr(
-                    global_step, start_lr,
-                    args.optimizer_param.stop_step, args.optimizer_param.decay_step, args.optimizer_param.stop_lr
-                )
-                real_lr = real_lr * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method) # rl * (sqrt(batch*gpu)
+                if use_wsd:
+                    real_lr = wsd_lr(
+                        global_step, wsd_total_steps,
+                        peak_lr=wsd_peak_lr,
+                        stop_lr=wsd_stop_lr,
+                        warmup_steps=wsd_warmup_steps,
+                        stable_frac=wsd_stable_frac,
+                        decay_kind=wsd_decay_kind,
+                    )
+                else:
+                    real_lr = adjust_lr(
+                        global_step, start_lr,
+                        args.optimizer_param.stop_step, args.optimizer_param.decay_step, args.optimizer_param.stop_lr
+                    )
+                real_lr = real_lr * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = real_lr
             else: # 周期性重启
                 real_lr = optimizer.param_groups[0]["lr"] * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
-        
+
         learning_rate.update(real_lr)
         # check_cuda_memory(epoch, -1, f"before forword atomnums {Force_label.shape[0]}", False, args.rank)
-        Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
-            NN_radial, NL_radial, Ri_radial,
-            NN_angular, NL_angular, Ri_angular,
-            sample["num_atom"], sample["atom_type_map"], None, None
-        )
+        with nvtx_range("forward"):
+            Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
+                NN_radial, NL_radial, Ri_radial,
+                NN_angular, NL_angular, Ri_angular,
+                sample["num_atom"], sample["atom_type_map"], None, None
+            )
         # check_cuda_memory(epoch, -1, "end forword", False, args.rank)
-        optimizer.zero_grad()
-        loss_F_val = criterion(Force_predict, Force_label)
-        loss_Etot_val = criterion(Etot_predict, Etot_label)
-        loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
-        loss_Ei_val = criterion(Ei_predict, Ei_label)
-        loss_val = torch.zeros_like(loss_F_val)
+        with nvtx_range("loss"):
+            optimizer.zero_grad()
+            loss_F_val = criterion(Force_predict, Force_label)
+            loss_Etot_val = criterion(Etot_predict, Etot_label)
+            loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
+            loss_Ei_val = criterion(Ei_predict, Ei_label)
+            loss_val = torch.zeros_like(loss_F_val)
 
-        if args.optimizer_param.train_egroup:
-            loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
-        if args.optimizer_param.train_virial:
-            data_mask = Virial_label[:, 0] > -1e6
-            _Virial_label = Virial_label[:, [0, 1, 2, 4, 5, 8]][data_mask]
-            if data_mask.any().item():
-                loss_Virial_val = criterion(Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]], _Virial_label)
-                loss_Virial_per_atom_val = criterion(
-                    Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]] / sample["num_atom"][data_mask],
-                    _Virial_label / sample["num_atom"][data_mask]
+            if args.optimizer_param.train_egroup:
+                loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
+            if args.optimizer_param.train_virial:
+                data_mask = Virial_label[:, 0] > -1e6
+                _Virial_label = Virial_label[:, [0, 1, 2, 4, 5, 8]][data_mask]
+                if data_mask.any().item():
+                    loss_Virial_val = criterion(Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]], _Virial_label)
+                    loss_Virial_per_atom_val = criterion(
+                        Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]] / sample["num_atom"][data_mask],
+                        _Virial_label / sample["num_atom"][data_mask]
+                    )
+                    loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
+                    loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
+                    loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
+
+            w_f, w_e, w_v, w_eg, w_ei = 0, 0, 0, 0, 0
+            if args.optimizer_param.train_force:
+                w_f = 1.0
+                loss_val += loss_F_val
+            if args.optimizer_param.train_energy:
+                w_e = 1.0
+                loss_val += loss_Etot_val
+            if args.optimizer_param.train_virial and data_mask.any().item():
+                w_v = 1.0
+                loss_val += loss_Virial_val
+            if args.optimizer_param.train_egroup:
+                w_eg = 1.0
+                loss_val += loss_Egroup_val
+
+            if args.optimizer_param.train_egroup and args.optimizer_param.train_virial:
+                loss, _, _ = calc_loss(
+                    args, 0.001, real_lr, 1, w_f, loss_F_val, w_e, loss_Etot_val, w_v, loss_Virial_val, w_eg, loss_Egroup_val, w_ei, loss_Ei_val, avg_atom_number
                 )
-                loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
-                loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
-                loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
-
-        w_f, w_e, w_v, w_eg, w_ei = 0, 0, 0, 0, 0
-        if args.optimizer_param.train_force:
-            w_f = 1.0
-            loss_val += loss_F_val
-        if args.optimizer_param.train_energy:
-            w_e = 1.0
-            loss_val += loss_Etot_val
-        if args.optimizer_param.train_virial and data_mask.any().item():
-            w_v = 1.0
-            loss_val += loss_Virial_val
-        if args.optimizer_param.train_egroup:
-            w_eg = 1.0
-            loss_val += loss_Egroup_val
-
-        if args.optimizer_param.train_egroup and args.optimizer_param.train_virial:
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 1, w_f, loss_F_val, w_e, loss_Etot_val, w_v, loss_Virial_val, w_eg, loss_Egroup_val, w_ei, loss_Ei_val, avg_atom_number
-            )
-        elif args.optimizer_param.train_egroup and not args.optimizer_param.train_virial:
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 2, w_f, loss_F_val, w_e, loss_Etot_val, w_eg, loss_Egroup_val, w_ei, loss_Ei_val, avg_atom_number
-            )
-        elif not args.optimizer_param.train_egroup and args.optimizer_param.train_virial and data_mask.any().item():
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 3, w_f, loss_F_val, w_e, loss_Etot_val, w_v, loss_Virial_val, w_ei, loss_Ei_val, avg_atom_number
-            )
-        else:
-            loss, _, _ = calc_loss(
-                args, 0.001, real_lr, 4, w_f, loss_F_val, w_e, loss_Etot_val, w_ei, loss_Ei_val, avg_atom_number
-            )
+            elif args.optimizer_param.train_egroup and not args.optimizer_param.train_virial:
+                loss, _, _ = calc_loss(
+                    args, 0.001, real_lr, 2, w_f, loss_F_val, w_e, loss_Etot_val, w_eg, loss_Egroup_val, w_ei, loss_Ei_val, avg_atom_number
+                )
+            elif not args.optimizer_param.train_egroup and args.optimizer_param.train_virial and data_mask.any().item():
+                loss, _, _ = calc_loss(
+                    args, 0.001, real_lr, 3, w_f, loss_F_val, w_e, loss_Etot_val, w_v, loss_Virial_val, w_ei, loss_Ei_val, avg_atom_number
+                )
+            else:
+                loss, _, _ = calc_loss(
+                    args, 0.001, real_lr, 4, w_f, loss_F_val, w_e, loss_Etot_val, w_ei, loss_Ei_val, avg_atom_number
+                )
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
-        loss.backward()
-        torch.cuda.empty_cache() # 释放pytoch 缓存管理器持有的缓冲块，因为它对cuda算子不可见，导致算子内存不够用，这部分缓冲块 64batch下约10个G
+        with nvtx_range("backward"):
+            loss.backward()
+        # Phase 1.2: empty_cache removed. The original comment noted that
+        # CalcOps custom CUDA ops use cudaMalloc directly (invisible to
+        # PyTorch's caching allocator), causing ~10 GB contention at batch=64.
+        # After Phase 1.4 (merged grad), the retained graph is smaller and
+        # activations are freed earlier, reducing pressure. If OOM occurs on
+        # large systems, set MATPL_EMPTY_CACHE=1 to restore the old behavior.
+        if os.environ.get("MATPL_EMPTY_CACHE", "0") == "1":
+            torch.cuda.empty_cache()
         # check_cuda_memory(epoch, -1, "end backward", False, args.rank)
 
-        if args.optimizer_param.norm_type is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), args.optimizer_param.max_norm, args.optimizer_param.norm_type)
-        elif args.optimizer_param.clip_value is not None:
-            nn.utils.clip_grad_value_(model.parameters(), args.optimizer_param.clip_value)
-        optimizer.step()
+        with nvtx_range("clip_step"):
+            # NaN/Inf guard: a single pathological batch can produce non-finite
+            # gradients that, once fed through clip_grad_norm_ or optimizer.step(),
+            # poison every parameter and freeze the model in a NaN state for the
+            # rest of training. Detect non-finite grads before stepping; if any
+            # parameter has non-finite grad, zero everything and skip this step
+            # (also skipping the EMA update so the shadow is not contaminated).
+            if args.optimizer_param.norm_type is not None:
+                total_norm = nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    args.optimizer_param.max_norm,
+                    args.optimizer_param.norm_type,
+                    error_if_nonfinite=False,
+                )
+                grad_finite = torch.isfinite(total_norm).item()
+            else:
+                if args.optimizer_param.clip_value is not None:
+                    nn.utils.clip_grad_value_(model.parameters(), args.optimizer_param.clip_value)
+                grad_finite = all(
+                    torch.isfinite(p.grad).all().item()
+                    for p in model.parameters() if p.grad is not None
+                )
 
-        if scheduler is not None and is_warmlr is False:
-            scheduler.step()
+            if grad_finite:
+                optimizer.step()
+                if ema is not None:
+                    ema.update()
+            else:
+                if i % args.optimizer_param.print_freq == 0:
+                    print(f"[NaN guard] non-finite gradient at epoch {epoch} step {i}; skipping optimizer.step()")
+                optimizer.zero_grad()
+
+            if scheduler is not None and is_warmlr is False:
+                scheduler.step()
 
         loss_val = loss
         L1, L2 = print_l1_l2(model)
@@ -494,10 +556,10 @@ def valid(val_loader, model, criterion, device, args:InputParam):
 
                 # atom_type_map: we only need the first element, because it is same for each image of MOVEMENT
             Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = model(
-                    NN_radial, NL_radial, Ri_radial, 
+                    NN_radial, NL_radial, Ri_radial,
                         NN_angular, NL_angular, Ri_angular,
                             sample["num_atom"], sample["atom_type_map"], None, None)
-                                                    
+
             loss_F_val = criterion(Force_predict, Force_label)
             loss_Etot_val = criterion(Etot_predict, Etot_label)
             loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])

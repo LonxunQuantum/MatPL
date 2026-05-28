@@ -211,6 +211,14 @@ class InputParam(object):
         self.data_shuffle = get_parameter("data_shuffle", json_input, True)
         self.seed = get_parameter("seed", json_input, 2023)
         self.precision = get_parameter("precision", json_input, "float64")
+        if self.precision not in ("float64", "float32"):
+            raise ValueError(f"Unsupported precision '{self.precision}'. Choose float64 or float32.")
+        # Phase 2.3: opt-in same-nloc batch sampler (NEP only). Default False
+        # preserves the current per-image DistributedSampler behavior.
+        self.same_nloc_sampler = get_parameter("same_nloc_sampler", json_input, False)
+        # Phase 2.2: opt-in torch.compile on FittingNet.forward.
+        # Default False preserves eager execution.
+        self.compile_fitting = get_parameter("compile_fitting", json_input, False)
 
     '''
     description: 

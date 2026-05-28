@@ -49,6 +49,45 @@ class OptimizerParam(object):
         self.warmup = get_parameter("warm_epochs",optimizer_dict, None) #预热epochs
         self.scaling_method = get_parameter("scaling_method",optimizer_dict, "sqrt")  # linear_gpu sqrt_batch sqrt_gpu sqrt sqrt_batch_gpu_atom defalt is (avg_atom_nums) ** 0.5
 
+        # Phase 2.4: opt-in WSD (Warmup-Stable-Decay) LR schedule. Only applied
+        # in the Adam/AdamW/SGD path; default None preserves current behavior.
+        self.lr_scheduler = get_parameter("lr_scheduler", optimizer_dict, None)
+        if self.lr_scheduler is not None and str(self.lr_scheduler).lower() != "wsd":
+            raise Exception(
+                "ERROR! Unsupported 'lr_scheduler' value '{}'. Allowed: 'wsd' or null.".format(self.lr_scheduler)
+            )
+        if self.lr_scheduler is not None:
+            self.lr_scheduler = self.lr_scheduler.lower()
+        self.wsd_warmup_steps = get_parameter("wsd_warmup_steps", optimizer_dict, None)
+        self.wsd_stable_frac = get_parameter("wsd_stable_frac", optimizer_dict, 0.9)
+        self.wsd_decay_kind = get_parameter("wsd_decay_kind", optimizer_dict, "cosine")
+        if self.lr_scheduler is not None:
+            if self.t_0 is not None:
+                raise Exception(
+                    "ERROR! 'lr_scheduler' and 't_0'/'t_mult' (CosineAnnealingWarmRestarts) "
+                    "cannot be set simultaneously."
+                )
+            if self.wsd_decay_kind not in ("linear", "cosine"):
+                raise Exception(
+                    "ERROR! 'wsd_decay_kind' must be 'linear' or 'cosine', got '{}'.".format(self.wsd_decay_kind)
+                )
+            if self.wsd_stable_frac < 0.0 or self.wsd_stable_frac > 1.0:
+                raise Exception(
+                    "ERROR! 'wsd_stable_frac' must be in [0, 1], got {}.".format(self.wsd_stable_frac)
+                )
+            if self.wsd_warmup_steps is not None and self.wsd_warmup_steps < 0:
+                raise Exception(
+                    "ERROR! 'wsd_warmup_steps' must be >= 0, got {}.".format(self.wsd_warmup_steps)
+                )
+
+        # Phase 2.4: opt-in EMA over model weights. Default None disables EMA.
+        # Only applied in the Adam/AdamW/SGD path (LKF/GKF Kalman has its own averaging).
+        self.ema_decay = get_parameter("ema_decay", optimizer_dict, None)
+        if self.ema_decay is not None and not (0.0 < self.ema_decay < 1.0):
+            raise Exception(
+                "ERROR! 'ema_decay' must be in (0, 1), got {}.".format(self.ema_decay)
+            )
+
         if "KF" in self.opt_name.upper():  #set Kalman Filter Optimizer params
             self.kalman_lambda = get_parameter("kalman_lambda", optimizer_dict, 0.98)
             self.kalman_nue = get_parameter("kalman_nue", optimizer_dict, 0.9987)
@@ -190,5 +229,13 @@ class OptimizerParam(object):
                 opt_dict["t_0"] = self.t_0
             if self.t_mult is not None:
                 opt_dict["t_mult"] = self.t_mult
+            if self.lr_scheduler is not None:
+                opt_dict["lr_scheduler"] = self.lr_scheduler
+                if self.wsd_warmup_steps is not None:
+                    opt_dict["wsd_warmup_steps"] = self.wsd_warmup_steps
+                opt_dict["wsd_stable_frac"] = self.wsd_stable_frac
+                opt_dict["wsd_decay_kind"] = self.wsd_decay_kind
+            if self.ema_decay is not None:
+                opt_dict["ema_decay"] = self.ema_decay
 
         return opt_dict

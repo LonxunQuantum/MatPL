@@ -1,13 +1,113 @@
 import numpy as np
 import os
 import math
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import torch
 from src.user.input_param import InputParam
 from pwdata import Config
 from src.utils.debug_operation import check_cuda_memory
 import time
 # from src.feature.nep_find_neigh.findneigh import FindNeigh
+
+
+class SameNlocBatchSampler(Sampler):
+    """Phase 2.3: yield fixed-nloc batches so downstream shapes stay stable.
+
+    Single-GPU iterator. Groups image indices by ``num_atoms``, shuffles within
+    each bucket, slices into batches of ``batch_size``, then optionally
+    interleaves and shuffles batches across buckets so different shapes are
+    not all clumped together.
+
+    The sampler yields ``list[int]`` (one batch of image indices) and is meant
+    to be passed to ``DataLoader(batch_sampler=...)``. The collate function is
+    unchanged — every image in a batch has the same atom count, so the
+    existing ``variable_length_collate_fn`` packed-batch layout still works.
+    """
+
+    def __init__(self, dataset, batch_size, shuffle=True, drop_last=True, seed=0):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0, got {}".format(batch_size))
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+        self.seed = int(seed)
+        self.epoch = 0
+
+        nloc_groups: dict[int, list[int]] = {}
+        for idx, image in enumerate(dataset.image_list):
+            n = int(image.position.shape[0])
+            nloc_groups.setdefault(n, []).append(idx)
+        self._nloc_groups = nloc_groups
+
+    def _build_batches(self) -> list[list[int]]:
+        rng = np.random.default_rng(self.seed + self.epoch) if self.shuffle else None
+        all_batches: list[list[int]] = []
+        for nloc, indices in self._nloc_groups.items():
+            indices = list(indices)
+            if rng is not None:
+                rng.shuffle(indices)
+            n_full = len(indices) // self.batch_size
+            for b in range(n_full):
+                all_batches.append(indices[b * self.batch_size:(b + 1) * self.batch_size])
+            if not self.drop_last and len(indices) % self.batch_size != 0:
+                all_batches.append(indices[n_full * self.batch_size:])
+        if rng is not None:
+            rng.shuffle(all_batches)
+        return all_batches
+
+    def __iter__(self):
+        for batch in self._build_batches():
+            yield batch
+
+    def __len__(self):
+        n = 0
+        for indices in self._nloc_groups.values():
+            if self.drop_last:
+                n += len(indices) // self.batch_size
+            else:
+                n += math.ceil(len(indices) / self.batch_size)
+        return n
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+
+class DistributedSameNlocBatchSampler(Sampler):
+    """DDP variant: every rank builds the same global batch list with
+    ``seed + epoch`` and takes the strided slice ``all_batches[rank::world_size]``.
+
+    Strict shape stability across ranks is required for ``torch.compile`` —
+    otherwise rank 0 might be in nloc=64 bucket while rank 1 is in nloc=128,
+    and DDP all-reduce would break.
+    """
+
+    def __init__(self, dataset, batch_size, num_replicas, rank,
+                 shuffle=True, drop_last=True, seed=0):
+        if num_replicas <= 0 or not (0 <= rank < num_replicas):
+            raise ValueError(
+                "Invalid num_replicas/rank: {} / {}".format(num_replicas, rank)
+            )
+        self._inner = SameNlocBatchSampler(
+            dataset, batch_size, shuffle=shuffle, drop_last=drop_last, seed=seed,
+        )
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.epoch = 0
+
+    def __iter__(self):
+        self._inner.epoch = self.epoch
+        all_batches = self._inner._build_batches()
+        for batch in all_batches[self.rank::self.num_replicas]:
+            yield batch
+
+    def __len__(self):
+        return math.ceil(len(self._inner) / self.num_replicas)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self._inner.set_epoch(epoch)
+
 from typing import Union, Optional
 from tqdm import tqdm
 if torch.cuda.is_available():

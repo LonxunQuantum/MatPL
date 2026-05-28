@@ -14,7 +14,7 @@ from src.feature.nep_find_neigh.findneigh import FindNeigh
 import numpy as np
 import pandas as pd
 from src.model.nep_net import NEP
-from src.pre_data.nep_data_loader import calculate_neighbor_num_max_min, calculate_neighbor_scaler, UniDataset, variable_length_collate_fn, variable_length_collate_fn_nolimit, calculate_batch, type_map, NepTestData
+from src.pre_data.nep_data_loader import calculate_neighbor_num_max_min, calculate_neighbor_scaler, UniDataset, variable_length_collate_fn, variable_length_collate_fn_nolimit, calculate_batch, type_map, NepTestData, SameNlocBatchSampler, DistributedSameNlocBatchSampler
 from src.PWMLFF.nep_mods.nep_trainer import train_KF, train, valid, save_checkpoint, predict
 from src.user.input_param import InputParam
 from src.utils.file_operation import write_arrays_to_file, write_force_ei
@@ -26,6 +26,7 @@ from src.utils.debug_operation import check_cuda_memory, check_cpu_memory
 from src.utils.learning_rate import is_epoch_before_restart
 from src.optimizer.GKF import GKFOptimizer
 from src.optimizer.LKF import LKFOptimizer
+from src.optimizer.model_ema import ModelEMA
 
 # 动态添加路径
 codepath = str(pathlib.Path(__file__).parent.resolve())
@@ -136,18 +137,38 @@ class nep_network:
                 rank=self.input_param.rank,
                 shuffle=self.input_param.data_shuffle
             )
-            train_loader = torch.utils.data.DataLoader(
-                train_dataset,
-                batch_size=self.input_param.optimizer_param.batch_size,
-                shuffle=False,  # DistributedSampler 控制 shuffle
-                sampler=train_sampler,
-                collate_fn=variable_length_collate_fn, 
-                num_workers=self.input_param.workers,
-                drop_last=True,
-                pin_memory=True,
-                prefetch_factor=2,
-                persistent_workers=True
-            )
+            if self.input_param.same_nloc_sampler:
+                train_batch_sampler = DistributedSameNlocBatchSampler(
+                    train_dataset,
+                    batch_size=self.input_param.optimizer_param.batch_size,
+                    num_replicas=self.input_param.world_size,
+                    rank=self.input_param.rank,
+                    shuffle=self.input_param.data_shuffle,
+                    drop_last=True,
+                    seed=self.input_param.seed,
+                )
+                train_loader = torch.utils.data.DataLoader(
+                    train_dataset,
+                    batch_sampler=train_batch_sampler,
+                    collate_fn=variable_length_collate_fn,
+                    num_workers=self.input_param.workers,
+                    pin_memory=True,
+                    prefetch_factor=2,
+                    persistent_workers=True
+                )
+            else:
+                train_loader = torch.utils.data.DataLoader(
+                    train_dataset,
+                    batch_size=self.input_param.optimizer_param.batch_size,
+                    shuffle=False,  # DistributedSampler 控制 shuffle
+                    sampler=train_sampler,
+                    collate_fn=variable_length_collate_fn,
+                    num_workers=self.input_param.workers,
+                    drop_last=True,
+                    pin_memory=True,
+                    prefetch_factor=2,
+                    persistent_workers=True
+                )
             max_batch = calculate_batch(train_dataset.max_atom_nums, 400) # 按照最大默认400个近邻取batchsize
             forscaler_loader = torch.utils.data.DataLoader(
                 train_dataset,
@@ -167,18 +188,38 @@ class nep_network:
                 rank=self.input_param.rank,
                 shuffle=False
             )
-            val_loader = torch.utils.data.DataLoader(
-                valid_dataset,
-                batch_size=self.input_param.optimizer_param.batch_size,
-                shuffle=False,
-                sampler=valid_sampler,
-                collate_fn=variable_length_collate_fn,
-                num_workers=self.input_param.workers,
-                pin_memory=True,
-                drop_last=True,
-                prefetch_factor=2,
-                persistent_workers=True
-            )
+            if self.input_param.same_nloc_sampler:
+                val_batch_sampler = DistributedSameNlocBatchSampler(
+                    valid_dataset,
+                    batch_size=self.input_param.optimizer_param.batch_size,
+                    num_replicas=self.input_param.world_size,
+                    rank=self.input_param.rank,
+                    shuffle=False,
+                    drop_last=True,
+                    seed=self.input_param.seed,
+                )
+                val_loader = torch.utils.data.DataLoader(
+                    valid_dataset,
+                    batch_sampler=val_batch_sampler,
+                    collate_fn=variable_length_collate_fn,
+                    num_workers=self.input_param.workers,
+                    pin_memory=True,
+                    prefetch_factor=2,
+                    persistent_workers=True
+                )
+            else:
+                val_loader = torch.utils.data.DataLoader(
+                    valid_dataset,
+                    batch_size=self.input_param.optimizer_param.batch_size,
+                    shuffle=False,
+                    sampler=valid_sampler,
+                    collate_fn=variable_length_collate_fn,
+                    num_workers=self.input_param.workers,
+                    pin_memory=True,
+                    drop_last=True,
+                    prefetch_factor=2,
+                    persistent_workers=True
+                )
             return energy_shift, train_loader, val_loader, forscaler_loader
     
     '''
@@ -280,13 +321,15 @@ class nep_network:
                 optimizer = optim.Adam(
                     model.parameters(),
                     lr=init_lr,
-                    weight_decay=self.input_param.optimizer_param.lambda_2 or 0
+                    weight_decay=self.input_param.optimizer_param.lambda_2 or 0,
+                    fused=torch.cuda.is_available(),  # Phase 1.5: fused Adam
                 )
             elif self.input_param.optimizer_param.opt_name == "ADAMW":
                 optimizer = optim.AdamW(
                     model.parameters(),
                     lr=init_lr,
-                    weight_decay=self.input_param.optimizer_param.lambda_2 or 0
+                    weight_decay=self.input_param.optimizer_param.lambda_2 or 0,
+                    fused=torch.cuda.is_available(),  # Phase 1.5: fused AdamW
                 )
             elif self.input_param.optimizer_param.opt_name == "SGD":
                 optimizer = optim.SGD(
@@ -321,7 +364,18 @@ class nep_network:
         else:
             raise Exception("Error: Unsupported optimizer!")
 
-        return model, optimizer, scheduler
+        # Phase 2.4: opt-in EMA. Only valid on the Adam/AdamW/SGD path; KF
+        # optimizers have their own averaging behavior and are left untouched.
+        ema = None
+        if (
+            self.input_param.optimizer_param.ema_decay is not None
+            and self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]
+        ):
+            ema = ModelEMA(model, decay=self.input_param.optimizer_param.ema_decay)
+            if checkpoint is not None and "ema_state" in checkpoint:
+                ema.load_state_dict(checkpoint["ema_state"])
+
+        return model, optimizer, scheduler, ema
 
 
     def reset_lr(self, model, iterations, optimizer, scheduler):
@@ -331,13 +385,15 @@ class nep_network:
             optimizer = optim.Adam(
                 model.parameters(),
                 lr=init_lr,
-                weight_decay=self.input_param.optimizer_param.lambda_2 or 0
+                weight_decay=self.input_param.optimizer_param.lambda_2 or 0,
+                fused=torch.cuda.is_available(),  # Phase 1.5
             )
         elif self.input_param.optimizer_param.opt_name == "ADAMW":
             optimizer = optim.AdamW(
                 model.parameters(),
                 lr=init_lr,
-                weight_decay=self.input_param.optimizer_param.lambda_2 or 0
+                weight_decay=self.input_param.optimizer_param.lambda_2 or 0,
+                fused=torch.cuda.is_available(),  # Phase 1.5
             )
         elif self.input_param.optimizer_param.opt_name == "SGD":
             optimizer = optim.SGD(
@@ -361,6 +417,12 @@ class nep_network:
         return optimizer, scheduler
 
     def train(self):
+        # Phase 1.3: enable TF32 for fp32 matmul (A100/H100/4090) + cuDNN autotune
+        if self.input_param.precision == "float32":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
         energy_shift, train_loader, val_loader, forscaler_loader = self.load_data()
         if len(train_loader) < 1:
             print(f"ERROR! The training set size {len(train_loader)} is too small, please adjust the number of GPU or batch_size: training_set_size >= batch_size * gpu_nums")
@@ -420,11 +482,11 @@ class nep_network:
         if self.input_param.world_size > 1:
             dist.barrier()
 
-        model, optimizer, scheduler = self.load_model_optimizer(energy_shift, 
-                                                                avg_atom_num=1, 
-                                                                iterations=len(train_loader), 
-                                                                q_scaler = q_scaler, 
-                                                                max_NN_radial = max_NN_radial, 
+        model, optimizer, scheduler, ema = self.load_model_optimizer(energy_shift,
+                                                                avg_atom_num=1,
+                                                                iterations=len(train_loader),
+                                                                q_scaler = q_scaler,
+                                                                max_NN_radial = max_NN_radial,
                                                                 max_NN_angular = max_NN_angular)
 
         if self.is_rank_0 and not os.path.exists(self.input_param.file_paths.model_store_dir):
@@ -495,7 +557,9 @@ class nep_network:
             if self.input_param.optimizer_param.warmup is not None and self.input_param.optimizer_param.warmup + 1 == epoch: # epoch 从1计数
                 optimizer, scheduler = self.reset_lr(model, len(train_loader), optimizer, scheduler)
             # 设置 sampler 的 epoch 以确保 shuffle 一致
-            if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+            if hasattr(train_loader.batch_sampler, "set_epoch"):
+                train_loader.batch_sampler.set_epoch(epoch)
+            elif isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
                 train_loader.sampler.set_epoch(epoch)
 
             if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
@@ -505,82 +569,89 @@ class nep_network:
             else:
                 loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, real_lr, loss_l1, loss_l2 = train(
                     train_loader, model, self.criterion, optimizer, scheduler, epoch,
-                        self.input_param.optimizer_param.learning_rate, self.device, self.input_param
+                        self.input_param.optimizer_param.learning_rate, self.device, self.input_param,
+                        ema=ema,
                 )
 
             time_end = time.time()
             # self.convert_to_gpumd(model)
 
-            # evaluate on validation set
-            if val_loader and len(val_loader) > 0:
-                vld_loss, vld_loss_Etot, vld_loss_Etot_per_atom, vld_loss_Force, vld_loss_Ei, val_loss_egroup, val_loss_virial, val_loss_virial_per_atom = valid(
-                    val_loader, model, self.criterion, self.device, self.input_param
-                )
-
-            if self.is_rank_0:
-                with open(train_log, "a") as f_train_log:
-                    train_log_line = f"{epoch:5d}{loss:20.10e}"
-                    if self.input_param.optimizer_param.lambda_1:
-                        train_log_line += f"{loss_l1:18.10e}"
-                    if self.input_param.optimizer_param.lambda_2:
-                        train_log_line += f"{loss_l2:18.10e}"
-                    if self.input_param.optimizer_param.train_energy:
-                        train_log_line += f"{loss_Etot_per_atom:21.10e}"
-                    if self.input_param.optimizer_param.train_ei:
-                        train_log_line += f"{loss_Ei:18.10e}"
-                    if self.input_param.optimizer_param.train_egroup:
-                        train_log_line += f"{loss_egroup:18.10e}"
-                    if self.input_param.optimizer_param.train_force:
-                        train_log_line += f"{loss_Force:21.10e}"
-                    if self.input_param.optimizer_param.train_virial:
-                        train_log_line += f"{loss_virial_per_atom:23.10e}"
-                    if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
-                        train_log_line += "%15.4f" % (time_end - time_start)
-                    else:
-                        train_log_line += f"{real_lr:18.10e}{(time_end - time_start):15.4f}"
-                    f_train_log.write(f"{train_log_line}\n")
-
+            # Phase 2.4: validate / save with EMA weights swapped in (DPA4 convention).
+            if ema is not None:
+                ema.apply_shadow()
+            try:
+                # evaluate on validation set
                 if val_loader and len(val_loader) > 0:
-                    with open(valid_log, "a") as f_valid_log:
-                        valid_log_line = f"{epoch:5d}{vld_loss:20.10e}"
-                        if self.input_param.optimizer_param.train_energy:
-                            valid_log_line += f"{vld_loss_Etot_per_atom:21.10e}"
-                        if self.input_param.optimizer_param.train_ei:
-                            valid_log_line += f"{vld_loss_Ei:18.10e}"
-                        if self.input_param.optimizer_param.train_egroup:
-                            valid_log_line += f"{val_loss_egroup:18.10e}"
-                        if self.input_param.optimizer_param.train_force:
-                            valid_log_line += f"{vld_loss_Force:21.10e}"
-                        if self.input_param.optimizer_param.train_virial:
-                            valid_log_line += f"{val_loss_virial_per_atom:23.10e}"
-                        f_valid_log.write(f"{valid_log_line}\n")
-            # 保存检查点
-            if self.is_rank_0:
-                checkpoint_dict = {
-                    "json_file": self.input_param.to_dict(),
-                    "epoch": epoch,
-                    "state_dict": model.state_dict()
-                    # "energy_shift": energy_shift,
-                    # "max_neighbor": [model.module.max_NN_radial, model.module.max_NN_angular],
-                    # "atom_type_order": self.input_param.atom_type
-                    # "q_scaler": model.module.get_q_scaler(),
-                }
-                if self.input_param.optimizer_param.opt_name in ["LKF", "GKF"] and self.input_param.file_paths.save_p_matrix:
-                    checkpoint_dict["optimizer"] = optimizer.state_dict()
-                save_checkpoint(
-                    checkpoint_dict,
-                    self.input_param.file_paths.model_name,
-                    self.input_param.file_paths.model_store_dir,
-                )
-                self.convert_to_gpumd()
+                    vld_loss, vld_loss_Etot, vld_loss_Etot_per_atom, vld_loss_Force, vld_loss_Ei, val_loss_egroup, val_loss_virial, val_loss_virial_per_atom = valid(
+                        val_loader, model, self.criterion, self.device, self.input_param
+                    )
 
-                if self.input_param.optimizer_param.t_0 is not None and \
-                    is_epoch_before_restart(self.input_param.optimizer_param.t_0, self.input_param.optimizer_param.t_mult, epoch):
-                    save_checkpoint(checkpoint_dict,
-                                    f'epoch_{epoch}_{self.input_param.file_paths.model_name}',
-                                    self.input_param.file_paths.model_store_dir,
-                                    )
-                    self.convert_to_gpumd(prefix=f"epoch_{epoch}_")
+                if self.is_rank_0:
+                    with open(train_log, "a") as f_train_log:
+                        train_log_line = f"{epoch:5d}{loss:20.10e}"
+                        if self.input_param.optimizer_param.lambda_1:
+                            train_log_line += f"{loss_l1:18.10e}"
+                        if self.input_param.optimizer_param.lambda_2:
+                            train_log_line += f"{loss_l2:18.10e}"
+                        if self.input_param.optimizer_param.train_energy:
+                            train_log_line += f"{loss_Etot_per_atom:21.10e}"
+                        if self.input_param.optimizer_param.train_ei:
+                            train_log_line += f"{loss_Ei:18.10e}"
+                        if self.input_param.optimizer_param.train_egroup:
+                            train_log_line += f"{loss_egroup:18.10e}"
+                        if self.input_param.optimizer_param.train_force:
+                            train_log_line += f"{loss_Force:21.10e}"
+                        if self.input_param.optimizer_param.train_virial:
+                            train_log_line += f"{loss_virial_per_atom:23.10e}"
+                        if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
+                            train_log_line += "%15.4f" % (time_end - time_start)
+                        else:
+                            train_log_line += f"{real_lr:18.10e}{(time_end - time_start):15.4f}"
+                        f_train_log.write(f"{train_log_line}\n")
+
+                    if val_loader and len(val_loader) > 0:
+                        with open(valid_log, "a") as f_valid_log:
+                            valid_log_line = f"{epoch:5d}{vld_loss:20.10e}"
+                            if self.input_param.optimizer_param.train_energy:
+                                valid_log_line += f"{vld_loss_Etot_per_atom:21.10e}"
+                            if self.input_param.optimizer_param.train_ei:
+                                valid_log_line += f"{vld_loss_Ei:18.10e}"
+                            if self.input_param.optimizer_param.train_egroup:
+                                valid_log_line += f"{val_loss_egroup:18.10e}"
+                            if self.input_param.optimizer_param.train_force:
+                                valid_log_line += f"{vld_loss_Force:21.10e}"
+                            if self.input_param.optimizer_param.train_virial:
+                                valid_log_line += f"{val_loss_virial_per_atom:23.10e}"
+                            f_valid_log.write(f"{valid_log_line}\n")
+
+                # 保存检查点
+                if self.is_rank_0:
+                    checkpoint_dict = {
+                        "json_file": self.input_param.to_dict(),
+                        "epoch": epoch,
+                        "state_dict": model.state_dict()
+                    }
+                    if self.input_param.optimizer_param.opt_name in ["LKF", "GKF"] and self.input_param.file_paths.save_p_matrix:
+                        checkpoint_dict["optimizer"] = optimizer.state_dict()
+                    if ema is not None:
+                        checkpoint_dict["ema_state"] = ema.state_dict()
+                    save_checkpoint(
+                        checkpoint_dict,
+                        self.input_param.file_paths.model_name,
+                        self.input_param.file_paths.model_store_dir,
+                    )
+                    self.convert_to_gpumd()
+
+                    if self.input_param.optimizer_param.t_0 is not None and \
+                        is_epoch_before_restart(self.input_param.optimizer_param.t_0, self.input_param.optimizer_param.t_mult, epoch):
+                        save_checkpoint(checkpoint_dict,
+                                        f'epoch_{epoch}_{self.input_param.file_paths.model_name}',
+                                        self.input_param.file_paths.model_store_dir,
+                                        )
+                        self.convert_to_gpumd(prefix=f"epoch_{epoch}_")
+            finally:
+                if ema is not None:
+                    ema.restore()
 
         # 清理 DDP 环境
         if self.input_param.world_size > 1:
@@ -778,11 +849,11 @@ class nep_network:
         # model.max_NN_radial  = max(model.max_NN_radial, max_NN_radial) # for single gpu
         # model.max_NN_angular = max(model.max_NN_angular, max_NN_angular)
         q_scaler = 1.0 / (local_global_max - local_global_min)
-        model, optimizer,_ = self.load_model_optimizer(energy_shift, 
-                                                    avg_atom_num=1, 
-                                                    iterations=len(train_loader), 
-                                                    q_scaler = q_scaler, 
-                                                    max_NN_radial = local_max_NN_radial, 
+        model, optimizer, _, _ = self.load_model_optimizer(energy_shift,
+                                                    avg_atom_num=1,
+                                                    iterations=len(train_loader),
+                                                    q_scaler = q_scaler,
+                                                    max_NN_radial = local_max_NN_radial,
                                                     max_NN_angular = local_max_NN_angular)
 
 
