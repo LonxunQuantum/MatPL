@@ -38,9 +38,18 @@ using namespace LAMMPS_NS;
 template<class DeviceType>
 PairNEPKokkos<DeviceType>::PairNEPKokkos(LAMMPS *lmp) : PairNEP(lmp)
 {
+  centroidstressflag = CENTROID_AVAIL;
+  local_maxeatom = 0;
+  local_maxvatom = 0;
+  local_maxcvatom = 0;
   respa_enable = 0;
-  suffix_flag |= Suffix::KOKKOS;
 
+  restartinfo = 0;
+  manybody_flag = 1;
+  single_enable = 0;
+  one_coeff = 1;
+
+  suffix_flag |= Suffix::KOKKOS;
   kokkosable = 1;
   atomKK = (AtomKokkos *) atom;
   execution_space = ExecutionSpaceFromDevice<DeviceType>::space;
@@ -48,7 +57,7 @@ PairNEPKokkos<DeviceType>::PairNEPKokkos(LAMMPS *lmp) : PairNEP(lmp)
   datamask_modify = F_MASK | ENERGY_MASK | VIRIAL_MASK;
 
   me = comm->me;
-  h_etot_virial_global.resize(7);
+  h_etot_virial_global.resize(10);
   // 这种方式可以直接输出到log.lammps中
   // if (comm->me == 0) {
   //   utils::logmesg(lmp, "=== PairNEPKokkos Constructor Finished ===\n");
@@ -64,8 +73,9 @@ PairNEPKokkos<DeviceType>::~PairNEPKokkos()
   if (copymode) return;
 
   if (allocated) {
-    memoryKK->destroy_kokkos(k_eatom, eatom);
-    memoryKK->destroy_kokkos(k_vatom, vatom);
+    if(local_maxeatom > 0) memoryKK->destroy_kokkos(k_eatom, eatom);
+    if(local_maxvatom > 0) memoryKK->destroy_kokkos(k_vatom, vatom);
+    if(local_maxcvatom> 0) memoryKK->destroy_kokkos(k_cvatom, cvatom);
   }
   h_etot_virial_global = decltype(h_etot_virial_global)();
   // printf("=====rank %d device %d doing ~pairnep end =====\n", rank, device_id);
@@ -171,7 +181,7 @@ void PairNEPKokkos<DeviceType>::coeff(int narg, char **arg)
 {
   if (!allocated) allocate();
   for (int f1 = 0; f1 < num_ff; f1++) {
-    std::vector<int> atom_type_module = nep_gpu_models[f1].element_atomic_number_list;
+    std::vector<int> atom_type_module = nep_gpu_models[f1].cpu_element_atomic_number_list;
     std::vector<int> atom_types;
     for (int ii = 2; ii < narg; ++ii) {
       std::string element = utils::strdup(arg[ii]);  // LAMMPS提供的安全转换
@@ -184,8 +194,8 @@ void PairNEPKokkos<DeviceType>::coeff(int narg, char **arg)
           // model_atom_type_idx.push_back(index); 
           // atom_types.push_back(temp);
           atom_types.push_back(index);
-          // printf("=== rank %d device_id %d coeff the config atom type %d index in ff is %d\n",
-          //   rank, device_id, temp, index);
+          // printf("=== rank %d device_id %d coeff the config atom type %d index in ff is %d\n",\
+            rank, device_id, temp, index);
       }
       else
       {
@@ -221,11 +231,11 @@ void PairNEPKokkos<DeviceType>::init_style()
                            !std::is_same<DeviceType,LMPDeviceType>::value);
   request->set_kokkos_device(std::is_same<DeviceType,LMPDeviceType>::value);
 
-  // if (is_rank_0) printf("======== in init_style: neighflag = %d =========\n", neighflag);
+  if (is_rank_0) printf("======== in init_style: neighflag = %d =========\n", neighflag);
   // if (force->newton_pair == 0)
   //   error->all(FLERR,"Pair style matpl/nep/kk requires newton pair on");
   newton_pair = force->newton_pair;
-  printf("===== DEBUG: newton_pair = %d =====\n", newton_pair);
+  // printf("===== DEBUG: newton_pair = %d =====\n", newton_pair);
 }
 
 /* ----------------------------------------------------------------------
@@ -303,20 +313,13 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
 {
   eflag = eflag_in;
   vflag = vflag_in;
+  // if (neighflag == FULL)  
+  no_virial_fdotr_compute = 1;
   ev_init(eflag, vflag, 0);
   // size_t total, used, free;
   bigint ntimestep = update->ntimestep;
+  const bool neighbor_rebuilt = (neighbor && neighbor->ago == 0);
   bool is_devi_step = (num_ff > 1) && (ntimestep % out_freq == 0);
-  // printf("===== is_devi_step %d numff %d ntimestep %d out_freq %d========\n", is_devi_step, num_ff, ntimestep, out_freq);
-  // eflag_atom=2;
-  // printf("DEBUG rank=%d device_id=%d step=%d eflag=%d, vflag=%d, eflag_atom=%d, vflag_atom=%d vflag_global=%d\n", \
-        rank, device_id, ntimestep, eflag, vflag, eflag_atom, vflag_atom, vflag_global);
-  //eflag, vflag, eflag_atom, vflag_atom
-  // 计算eflag 总能，需要每个原子的能量，为了避免atomicadd in nep核函数，需要分别计算每个原子的能量，然后累加
-  // 计算 vfag 总的应力，需要计算每个原子的应力，然后累加
-  // 对于每原子的能量、受力、应力，先计算到一个数组中，然后需要再copy?
-  // nep_gpu_model.getGPUMemoryStats(total, used, free);
-  // printf("MB-before-0 rank=%d device_id=%d step=%d Total=%f Used=%f Free=%f (GB)\n", rank, device_id, ntimestep, total / (1024.0 * 1024.0 * 1024.0), used / (1024.0 * 1024.0 * 1024.0), free / (1024.0 * 1024.0 * 1024.0));
 
   atomKK->sync(execution_space,X_MASK|F_MASK|TYPE_MASK); //同步原子数据到设备
   if (eflag || vflag) atomKK->modified(execution_space,datamask_modify);
@@ -329,16 +332,38 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   nall = atom->nlocal + atom->nghost;
   inum = list->inum;
 
+  // printf("DEBUG rank=%d device_id=%d step=%d eflag=%d, vflag=%d, vflag_fdotr=%d eflag_atom=%d, vflag_atom=%d cvflag_atom=%d vflag_global=%d vflag_either %d centroidstressflag=%d atom->nmax %d maxeatom %d->%d maxvatom %d->%d maxcvatom %d->%d nlocal %d inum %d nall %d neighbor->includegroup %d no_virial_fdotr_compute %d lmp->kokkos->neighflag %d \n", \
+        rank, device_id, ntimestep, eflag, vflag, vflag_fdotr, eflag_atom, vflag_atom, cvflag_atom, vflag_global, vflag_either, centroidstressflag, atom->nmax, maxeatom, local_maxeatom, maxvatom, local_maxvatom, maxcvatom, local_maxcvatom, nlocal, inum, nall, neighbor->includegroup, no_virial_fdotr_compute, lmp->kokkos->neighflag);
+  // printf("======compute before k_eatom.extent(0) %d k_vatom.extent(0) %d k_cvatom.extent(0) %d ======\n",k_eatom.extent(0), k_vatom.extent(0), k_cvatom.extent(0));
+  
+  cur_atom_max = max(cur_atom_max, atom->nmax);
   if (eflag_atom) {
   memoryKK->destroy_kokkos(k_eatom,eatom);
   memoryKK->create_kokkos(k_eatom,eatom,maxeatom,"pair:eatom");
   d_eatom = k_eatom.view<DeviceType>();
   }
 
-  if (vflag_either) {
-    memoryKK->destroy_kokkos(k_vatom,vatom);
-    memoryKK->create_kokkos(k_vatom,vatom,maxvatom,"pair:vatom");
-    d_vatom = k_vatom.view<DeviceType>();
+  if (cvflag_atom) {
+    if (local_maxcvatom < cur_atom_max) local_maxcvatom = cur_atom_max;
+    memoryKK->destroy_kokkos(k_cvatom, cvatom);           // 销毁旧的
+    memoryKK->create_kokkos(k_cvatom, cvatom, local_maxcvatom, "pair:cvatom");
+    // printf("cvatom grow to %d\n", nmax_cvatom);
+    // for (int i = 0; i < std::min(5, nlocal); ++i) {
+    //   printf(" init local cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
+    // }
+    // for (int i = nall-6; i < nall; ++i) {
+    //   printf(" init ghost cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
+    // }
+  }
+
+  if (!cvflag_atom && vflag_either) {
+    if (local_maxvatom < cur_atom_max) local_maxvatom = cur_atom_max;
+      memoryKK->destroy_kokkos(k_vatom, vatom);
+      memoryKK->create_kokkos(k_vatom, vatom, local_maxvatom, "pair:vatom");
+      d_vatom = k_vatom.view<DeviceType>();
+      // printf("vatom grow to %d\n", local_maxvatom);
   }
   
   if (num_ff > 1) {
@@ -401,6 +426,7 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
       vflag_either,
       vflag_global,
       vflag_atom,
+      cvflag_atom,
       nall,                    // nall = nlocal + nghost
       inum,                    // inum = number of local atoms
       nlocal,                  // nlocal
@@ -419,6 +445,7 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
       f.data(),                                       // 力输出 如果num_ff 大于0，只输出到full_f
       nullptr,                                        // 如果 num_ff 大于0，输出到f 和 full_f
       d_vatom.data(),                                 // 总维里输出
+      cvflag_atom ? k_cvatom.d_view.data() : nullptr,          // device 侧 9 分量指针
       h_etot_virial_global.data()
     );
     // printf("=========end start compute force  etot %f ==========\n", h_etot_virial_global[0]);
@@ -437,6 +464,7 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         vflag_either,
         vflag_global,
         vflag_atom,
+        cvflag_atom,
         nall,                    // nall = nlocal + nghost
         inum,                    // inum = number of local atoms
         nlocal,                  // nlocal
@@ -455,7 +483,9 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         f.data(),                                       // 力输出 如果num_ff 大于0，只输出到full_f
         full_f_ptr,                                  // 如果 num_ff 大于0，输出到f 和 full_f
         d_vatom.data(),                                 // 总维里输出
+        cvflag_atom ? k_cvatom.d_view.data() : nullptr,
         h_etot_virial_global.data()
+        // neighbor_rebuilt
       );
       // printf("=========end start compute force  etot %f ==========\n", h_etot_virial_global[0]);
       // Wait for NEP computation to complete
@@ -538,6 +568,39 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     fflush(explrError_fp);
   }
 
+  if (cvflag_atom) {
+    // 同步代码执行后cvatom 会自动同步到结果，只是结果是按照device中的列优先存储的。
+    k_cvatom.template modify<DeviceType>();
+    k_cvatom.sync<LMPHostType>();
+
+    // auto h_cv = k_cvatom.h_view;
+    // for (int i = 0; i < maxcvatom; ++i) {
+    //   cvatom[i] = h_cv.data() + i * 9;
+    // }
+
+    // for (int i = 0; i < nall; ++i) {
+    //   cvatom[i][0] = h_cv.data()[i + 0 * nall];  // xx
+    //   cvatom[i][1] = h_cv.data()[i + 1 * nall];  // yy
+    //   cvatom[i][2] = h_cv.data()[i + 2 * nall];  // zz
+    //   cvatom[i][3] = h_cv.data()[i + 3 * nall];  // xy
+    //   cvatom[i][4] = h_cv.data()[i + 4 * nall];  // xz
+    //   cvatom[i][5] = h_cv.data()[i + 5 * nall];  // yz
+    //   cvatom[i][6] = h_cv.data()[i + 6 * nall];  // yx
+    //   cvatom[i][7] = h_cv.data()[i + 7 * nall];  // zx
+    //   cvatom[i][8] = h_cv.data()[i + 8 * nall];  // zy
+    // }
+
+    // for (int i = 0; i < std::min(10, nlocal); ++i) {
+    //   printf(" local cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
+    // }
+    // for (int i = nall-11; i < nall; ++i) {
+    //   printf(" ghost cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
+    // }
+
+  }
+
   if (need_dup)
     Kokkos::Experimental::contribute(f, dup_f);
 
@@ -566,7 +629,7 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     k_vatom.template sync<LMPHostType>();
   }
 
-  if (vflag_fdotr) pair_virial_fdotr_compute(this);
+  // if (vflag_fdotr) pair_virial_fdotr_compute(this); error in many body force.
 
   copymode = 0;
   // free duplicated memory

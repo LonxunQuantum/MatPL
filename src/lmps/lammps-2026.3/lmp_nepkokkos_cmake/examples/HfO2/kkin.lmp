@@ -1,4 +1,4 @@
-package kokkos neigh full comm device
+package kokkos neigh half comm device
 newton on
 
 variable        NSTEPS          equal 100
