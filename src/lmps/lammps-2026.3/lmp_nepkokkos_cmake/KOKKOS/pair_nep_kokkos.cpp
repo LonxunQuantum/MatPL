@@ -561,11 +561,13 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         glb_avg_ei_err = 0.0;
     }
 
-    fprintf(explrError_fp, "%9lld %16.9f %16.9f %16.9f %16.9f %16.9f %16.9f\n",
-            update->ntimestep,
-            glb_avg_f_err, glb_min_f_err, glb_max_f_err,
-            glb_avg_ei_err, glb_min_ei_err, glb_max_ei_err);
-    fflush(explrError_fp);
+    if (is_rank_0) {
+      fprintf(explrError_fp, "%9lld %16.9f %16.9f %16.9f %16.9f %16.9f %16.9f\n",
+              update->ntimestep,
+              glb_avg_f_err, glb_min_f_err, glb_max_f_err,
+              glb_avg_ei_err, glb_min_ei_err, glb_max_ei_err);
+      fflush(explrError_fp);
+    }
   }
 
   if (cvflag_atom) {
