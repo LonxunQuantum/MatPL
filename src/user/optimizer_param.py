@@ -132,6 +132,20 @@ class OptimizerParam(object):
             self.muon_enable_gram = get_parameter("muon_enable_gram", optimizer_dict, True)
             self.muon_flash = get_parameter("muon_flash", optimizer_dict, True)
             self.muon_magma = get_parameter("muon_magma", optimizer_dict, True)
+            # Phase 3.3 safety: HybridMuon's bf16 momentum buffer + Frobenius-only
+            # update normalization don't tame raw gradient spikes the way Adam's
+            # per-param eps denominator does. On water_5k (288 atoms/frame, 2 elements)
+            # this caused training NaN at epoch 1 step 3700. Require explicit
+            # gradient clipping; small_Si pays nothing for it.
+            if self.max_norm is None and self.clip_value is None:
+                raise Exception(
+                    "ERROR! optimizer 'MUON' requires gradient clipping to be set "
+                    "explicitly. Add either 'max_norm': 2.0 (with 'norm_type': 2) or "
+                    "'clip_value': <float> to the optimizer block. "
+                    "Reason: HybridMuon's bf16 momentum buffer overflows under raw "
+                    "force-gradient spikes on multi-atom systems (>50 atoms/frame), "
+                    "where Adam's per-param eps denominator would have damped them."
+                )
         else:
             pass
 
