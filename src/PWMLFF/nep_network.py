@@ -27,6 +27,7 @@ from src.utils.learning_rate import is_epoch_before_restart
 from src.optimizer.GKF import GKFOptimizer
 from src.optimizer.LKF import LKFOptimizer
 from src.optimizer.model_ema import ModelEMA
+from src.optimizer.hybrid_muon import HybridMuonOptimizer
 
 # 动态添加路径
 codepath = str(pathlib.Path(__file__).parent.resolve())
@@ -311,9 +312,9 @@ class nep_network:
 
         # optimizer, and learning rate scheduler
         scheduler = None
-        if self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]:
+        if self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD", "MUON"]:
             if self.input_param.optimizer_param.warmup is not None:# 如果采用预热，则前n个epoch 学习率线性增加,一般前5% epochs，从最小增加
-                init_lr = self.input_param.optimizer_param.stop_lr 
+                init_lr = self.input_param.optimizer_param.stop_lr
             else:
                 init_lr = self.input_param.optimizer_param.learning_rate
 
@@ -337,6 +338,27 @@ class nep_network:
                     lr=init_lr,
                     momentum=self.input_param.optimizer_param.momentum,
                     weight_decay=self.input_param.optimizer_param.weight_decay
+                )
+            elif self.input_param.optimizer_param.opt_name == "MUON":
+                # Phase 3.3: HybridMuon. lambda_2 (norm reg) overrides weight_decay if set.
+                wd_muon = (
+                    self.input_param.optimizer_param.lambda_2
+                    if self.input_param.optimizer_param.lambda_2 is not None
+                    else self.input_param.optimizer_param.weight_decay
+                )
+                base_model = model.module if hasattr(model, "module") else model
+                optimizer = HybridMuonOptimizer(
+                    model.parameters(),
+                    lr=init_lr,
+                    momentum=self.input_param.optimizer_param.momentum,
+                    weight_decay=wd_muon,
+                    lr_adjust=self.input_param.optimizer_param.muon_lr_adjust,
+                    lr_adjust_coeff=self.input_param.optimizer_param.muon_lr_adjust_coeff,
+                    muon_mode=self.input_param.optimizer_param.muon_mode,
+                    named_parameters=list(base_model.named_parameters()),
+                    enable_gram=self.input_param.optimizer_param.muon_enable_gram,
+                    flash_muon=self.input_param.optimizer_param.muon_flash,
+                    magma_muon=self.input_param.optimizer_param.muon_magma,
                 )
             # 初始化学习率调度器
             if self.input_param.optimizer_param.t_0 and self.input_param.optimizer_param.opt_name not in ["LKF", "GKF"]:
@@ -364,12 +386,12 @@ class nep_network:
         else:
             raise Exception("Error: Unsupported optimizer!")
 
-        # Phase 2.4: opt-in EMA. Only valid on the Adam/AdamW/SGD path; KF
+        # Phase 2.4: opt-in EMA. Only valid on the Adam/AdamW/SGD/Muon path; KF
         # optimizers have their own averaging behavior and are left untouched.
         ema = None
         if (
             self.input_param.optimizer_param.ema_decay is not None
-            and self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]
+            and self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD", "MUON"]
         ):
             ema = ModelEMA(model, decay=self.input_param.optimizer_param.ema_decay)
             if checkpoint is not None and "ema_state" in checkpoint:
@@ -401,6 +423,26 @@ class nep_network:
                 lr=init_lr,
                 momentum=self.input_param.optimizer_param.momentum,
                 weight_decay=self.input_param.optimizer_param.weight_decay
+            )
+        elif self.input_param.optimizer_param.opt_name == "MUON":
+            wd_muon = (
+                self.input_param.optimizer_param.lambda_2
+                if self.input_param.optimizer_param.lambda_2 is not None
+                else self.input_param.optimizer_param.weight_decay
+            )
+            base_model = model.module if hasattr(model, "module") else model
+            optimizer = HybridMuonOptimizer(
+                model.parameters(),
+                lr=init_lr,
+                momentum=self.input_param.optimizer_param.momentum,
+                weight_decay=wd_muon,
+                lr_adjust=self.input_param.optimizer_param.muon_lr_adjust,
+                lr_adjust_coeff=self.input_param.optimizer_param.muon_lr_adjust_coeff,
+                muon_mode=self.input_param.optimizer_param.muon_mode,
+                named_parameters=list(base_model.named_parameters()),
+                enable_gram=self.input_param.optimizer_param.muon_enable_gram,
+                flash_muon=self.input_param.optimizer_param.muon_flash,
+                magma_muon=self.input_param.optimizer_param.muon_magma,
             )
         else:
             raise Exception("Error: Unsupported optimizer!")

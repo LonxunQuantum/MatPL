@@ -111,6 +111,27 @@ class OptimizerParam(object):
             self.stop_lr = get_parameter("stop_lr",optimizer_dict, 3.51e-8)
             # self.set_adam_sgd_params(learning_rate, weight_decay, momentum,\
             #                                 gamma, step, scheduler, stop_step, decay_step, stop_lr)
+        elif "MUON" in self.opt_name.upper():   # Phase 3.3: HybridMuon (DPA4 port)
+            # HybridMuon has the same lr / stop_lr / scheduler interface as Adam.
+            # Defaults match DPA4 paper recipe (DeepSeek-V4 §2.4); users can override.
+            self.learning_rate = get_parameter("learning_rate", optimizer_dict, 5e-4)
+            self.weight_decay = get_parameter("weight_decay", optimizer_dict, 1e-3)
+            self.momentum = get_parameter("momentum", optimizer_dict, 0.95)
+            self.stop_step = get_parameter("stop_step", optimizer_dict, 1000000)
+            self.decay_step = get_parameter("decay_step", optimizer_dict, 5000)
+            self.stop_lr = get_parameter("stop_lr", optimizer_dict, 3.51e-8)
+            # Muon-specific knobs (defaults from DPA4 hybrid_muon.py:921-936)
+            self.muon_lr_adjust = get_parameter("muon_lr_adjust", optimizer_dict, 0.0)
+            self.muon_lr_adjust_coeff = get_parameter("muon_lr_adjust_coeff", optimizer_dict, 0.18)
+            self.muon_mode = get_parameter("muon_mode", optimizer_dict, "slice")
+            if self.muon_mode not in ("2d", "flat", "slice"):
+                raise Exception(
+                    "ERROR! 'muon_mode' must be one of '2d', 'flat', 'slice', got '{}'.".format(self.muon_mode)
+                )
+            # Optional toggles (default ON; auto-fall-back if Triton/torch.compile unavailable)
+            self.muon_enable_gram = get_parameter("muon_enable_gram", optimizer_dict, True)
+            self.muon_flash = get_parameter("muon_flash", optimizer_dict, True)
+            self.muon_magma = get_parameter("muon_magma", optimizer_dict, True)
         else:
             pass
 
@@ -136,18 +157,18 @@ class OptimizerParam(object):
             self.pre_fac_virial = get_parameter("pre_fac_virial", optimizer_dict, 1.0) 
             self.pre_fac_egroup = get_parameter("pre_fac_egroup", optimizer_dict, 0.1) 
             
-        elif "ADAM" in self.opt_name.upper():
-            self.start_pre_fac_force = get_parameter("start_pre_fac_force", optimizer_dict, 1000) 
-            self.start_pre_fac_etot = get_parameter("start_pre_fac_etot", optimizer_dict, 0.02) 
-            self.start_pre_fac_ei = get_parameter("start_pre_fac_ei", optimizer_dict, 0.1) 
-            self.start_pre_fac_virial = get_parameter("start_pre_fac_virial", optimizer_dict, 50.0) 
-            self.start_pre_fac_egroup = get_parameter("start_pre_fac_egroup", optimizer_dict, 0.02) 
+        elif ("ADAM" in self.opt_name.upper()) or ("MUON" in self.opt_name.upper()):
+            self.start_pre_fac_force = get_parameter("start_pre_fac_force", optimizer_dict, 1000)
+            self.start_pre_fac_etot = get_parameter("start_pre_fac_etot", optimizer_dict, 0.02)
+            self.start_pre_fac_ei = get_parameter("start_pre_fac_ei", optimizer_dict, 0.1)
+            self.start_pre_fac_virial = get_parameter("start_pre_fac_virial", optimizer_dict, 50.0)
+            self.start_pre_fac_egroup = get_parameter("start_pre_fac_egroup", optimizer_dict, 0.02)
 
-            self.end_pre_fac_force = get_parameter("end_pre_fac_force", optimizer_dict, 1.0) 
-            self.end_pre_fac_etot = get_parameter("end_pre_fac_etot", optimizer_dict, 1.0) 
-            self.end_pre_fac_ei = get_parameter("end_pre_fac_ei", optimizer_dict, 2.0) 
-            self.end_pre_fac_virial = get_parameter("end_pre_fac_virial", optimizer_dict, 1.0) 
-            self.end_pre_fac_egroup = get_parameter("end_pre_fac_egroup", optimizer_dict, 1.0) 
+            self.end_pre_fac_force = get_parameter("end_pre_fac_force", optimizer_dict, 1.0)
+            self.end_pre_fac_etot = get_parameter("end_pre_fac_etot", optimizer_dict, 1.0)
+            self.end_pre_fac_ei = get_parameter("end_pre_fac_ei", optimizer_dict, 2.0)
+            self.end_pre_fac_virial = get_parameter("end_pre_fac_virial", optimizer_dict, 1.0)
+            self.end_pre_fac_egroup = get_parameter("end_pre_fac_egroup", optimizer_dict, 1.0)
 
     def to_linear_dict(self):
         opt_dict = {}
@@ -191,10 +212,19 @@ class OptimizerParam(object):
 
             opt_dict["p0_weight"] = self.p0_weight
 
-        elif "SGD" in self.opt_name or "ADAM" in self.opt_name:
+        elif "SGD" in self.opt_name or "ADAM" in self.opt_name or "MUON" in self.opt_name.upper():
             if "SGD" in self.opt_name:
                 opt_dict["weight_decay"]= self.weight_decay
                 opt_dict["momentum"]= self.momentum
+            if "MUON" in self.opt_name.upper():
+                opt_dict["weight_decay"] = self.weight_decay
+                opt_dict["momentum"] = self.momentum
+                opt_dict["muon_lr_adjust"] = self.muon_lr_adjust
+                opt_dict["muon_lr_adjust_coeff"] = self.muon_lr_adjust_coeff
+                opt_dict["muon_mode"] = self.muon_mode
+                opt_dict["muon_enable_gram"] = self.muon_enable_gram
+                opt_dict["muon_flash"] = self.muon_flash
+                opt_dict["muon_magma"] = self.muon_magma
 
             opt_dict["learning_rate"]= self.learning_rate
             opt_dict["stop_lr"] = self.stop_lr
