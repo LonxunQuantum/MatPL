@@ -1197,3 +1197,4 @@ find_q_with_5body(const int n_max_angular_plus_1, const int n, const double* s, 
   q[5 * n_max_angular_plus_1 + n] = C5B[0] * s0_sq * s0_sq + C5B[1] * s0_sq * s1_sq_plus_s2_sq +
                                     C5B[2] * s1_sq_plus_s2_sq * s1_sq_plus_s2_sq;
 }
+

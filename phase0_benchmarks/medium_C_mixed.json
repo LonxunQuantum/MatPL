@@ -1,0 +1,48 @@
+{
+    "model_type": "NEP",
+    "atom_type": ["C"],
+    "_max_neigh_num": 100,
+    "seed": 4972,
+    "recover_train": false,
+    "precision": "mixed",
+    "model": {
+        "descriptor": {
+            "cutoff": [7.0, 4.0],
+            "n_max": [12, 8],
+            "basis_size": [16, 12],
+            "l_max": [4, 2, 1],
+            "_zbl": 1.4
+        },
+        "fitting_net": {
+            "network_size": [100, 1]
+        }
+    },
+    "optimizer": {
+        "optimizer": "ADAM",
+        "_lambda_2": 0.01,
+        "epochs": 1,
+        "batch_size": 1,
+        "print_freq": 10,
+        "max_norm": 5.0,
+        "norm_type": 2,
+        "t_0": 2,
+        "t_mult": 2,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial": true,
+        "learning_rate": 0.001,
+        "stop_lr": 3.51e-08,
+        "_stop_step": 1000000,
+        "_decay_step": 5000,
+        "start_pre_fac_force": 100.0,
+        "start_pre_fac_etot": 1.0,
+        "start_pre_fac_virial": 0.1,
+        "end_pre_fac_force": 1.0,
+        "end_pre_fac_virial": 0.1,
+        "end_pre_fac_etot": 1.0
+    },
+    "format": "extxyz",
+    "train_data": [
+        "/data/home/pfsuo/pfsuo/software/build/nep-data/2023_Fan_C_GAP2020/train.xyz"
+    ]
+}

@@ -117,11 +117,16 @@ class NEPStructure(BaseEstimator, TransformerMixin):
         features = np.array([self._compute_one(s) for s in structures])
         return features
 
-    def _compute_one(self, structure) -> np.ndarray:
+    def compute_peratom(self, structure) -> tuple[np.ndarray, list[str]]:
+        """Return per-atom descriptors (N_atoms, dim) and element symbols."""
         atoms = self._to_ase(structure)
         type_map, box, position = self._atoms_to_nep_input(atoms)
         desc_flat = self._calc.getDescriptor(type_map, box, position)
         desc = np.array(desc_flat).reshape(-1, self._dim)
+        return desc, atoms.get_chemical_symbols()
+
+    def _compute_one(self, structure) -> np.ndarray:
+        desc, _ = self.compute_peratom(structure)
         if self.pool == "mean":
             return desc.mean(axis=0)
         elif self.pool == "sum":

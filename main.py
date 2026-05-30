@@ -32,11 +32,18 @@ if __name__ == "__main__":
         # cmd_type = "train".upper()
         # cmd_type = "infer".upper()
         # cmd_type = "explore".upper()
-        if cmd_type.lower() not in ["train", "test", "extract_ff", "compress", "totxt", "script", "infer", "model_devi", "kpu"]:
+        if cmd_type.lower() not in ["train", "test", "extract_ff", "compress", "totxt", "script", "infer", "model_devi", "kpu", "nep_profile"]:
             raise Exception("Error! The input command {} can not be recognized, please use 'MatPL -h' to query all available commands!".format(cmd_type))
         if cmd_type == "extract_ff".upper():
             ckpt_file = sys.argv[2]
             extract_force_field(ckpt_file, cmd_type)
+        elif cmd_type == "nep_profile".upper():
+            json_path = sys.argv[2]
+            extra = sys.argv[3:]
+            os.chdir(os.path.dirname(os.path.abspath(json_path)))
+            json_file = json.load(open(json_path))
+            from src.user.nep_profile_work import nep_profile
+            nep_profile(json_file, extra)
         elif cmd_type == "compress".upper():
             ckpt_file = sys.argv[2]
             compress_force_field(ckpt_file)

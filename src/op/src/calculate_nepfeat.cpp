@@ -27,27 +27,27 @@ void torch_launch_calculate_nepfeat(
         (const double *) d12_radial.data_ptr(),
         (const int64_t *) NL_radial.data_ptr(),
         (const int64_t *) atom_map.data_ptr(),
-        rcut_radial, 
+        rcut_radial,
         (double *) feat_2b.data_ptr(),
         (double *) dfeat_c2.data_ptr(),
         (double *) dfeat_2b.data_ptr(),
         (double *) dfeat_2b_noc.data_ptr(),
-        natoms, neigh_num, n_max, n_base, n_types, 
+        natoms, neigh_num, n_max, n_base, n_types,
         device_id
     );
 }
 
-void torch_launch_calculate_nepfeat_grad(const torch::Tensor &grad_output, 
-                                const torch::Tensor &dfeat_c2, 
-                                const torch::Tensor &dfeat_2b, 
-                                const torch::Tensor atom_map, 
-                                int64_t atom_nums, 
-                                int64_t maxneighs, 
-                                int64_t n_max_2b, 
-                                int64_t n_base_2b, 
-                                int64_t n_types, 
+void torch_launch_calculate_nepfeat_grad(const torch::Tensor &grad_output,
+                                const torch::Tensor &dfeat_c2,
+                                const torch::Tensor &dfeat_2b,
+                                const torch::Tensor atom_map,
+                                int64_t atom_nums,
+                                int64_t maxneighs,
+                                int64_t n_max_2b,
+                                int64_t n_base_2b,
+                                int64_t n_types,
                                 int64_t multi_feat_num,
-                                torch::Tensor &grad_coeff2, 
+                                torch::Tensor &grad_coeff2,
                                 torch::Tensor &grad_d12_radial)
 {
     auto dtype = dfeat_c2.dtype();

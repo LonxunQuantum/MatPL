@@ -148,6 +148,7 @@ void launch_calculate_nepfeat_grad(
     }
     grid_size = (natoms * neigh_num - 1) / BLOCK_SIZE + 1;
     dfeat_2b_calc<<<grid_size, BLOCK_SIZE>>>(
-            grad_output, dfeat_2b, grad_d12_radial, 
+            grad_output, dfeat_2b, grad_d12_radial,
                         natoms, neigh_num, n_max_2b, multi_feat_num);
 }
+

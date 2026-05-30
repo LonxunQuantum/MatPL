@@ -1,0 +1,41 @@
+{
+    "model_type": "NEP",
+    "atom_type": ["O", "H"],
+    "_max_neigh_num": 100,
+    "seed": 4972,
+    "recover_train": false,
+    "model": {
+        "descriptor": {
+            "cutoff": [6.0, 4.0],
+            "n_max": [9, 7],
+            "basis_size": [9, 7],
+            "l_max": [4, 2, 0],
+            "_zbl": 1.4
+        },
+        "fitting_net": {
+            "network_size": [100, 1]
+        }
+    },
+    "optimizer": {
+        "optimizer": "ADAM",
+        "_lambda_2": 0.01,
+        "epochs": 1,
+        "batch_size": 1,
+        "print_freq": 50,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial": true,
+        "learning_rate": 0.001,
+        "stop_lr": 3.51e-08,
+        "start_pre_fac_force": 100.0,
+        "start_pre_fac_etot": 1.0,
+        "start_pre_fac_virial": 0.1,
+        "end_pre_fac_force": 1.0,
+        "end_pre_fac_virial": 0.1,
+        "end_pre_fac_etot": 1.0
+    },
+    "format": "extxyz",
+    "train_data": [
+        "/data/home/pfsuo/pfsuo/software/build/PWMLFF_test/MatPL_Agent_dev/MatPL/phase0_benchmarks/water_5k.xyz"
+    ]
+}
