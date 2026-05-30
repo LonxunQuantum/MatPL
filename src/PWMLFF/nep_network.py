@@ -359,6 +359,7 @@ class nep_network:
                     enable_gram=self.input_param.optimizer_param.muon_enable_gram,
                     flash_muon=self.input_param.optimizer_param.muon_flash,
                     magma_muon=self.input_param.optimizer_param.muon_magma,
+                    compile_gram=self.input_param.optimizer_param.muon_compile_gram,
                 )
             # 初始化学习率调度器
             if self.input_param.optimizer_param.t_0 and self.input_param.optimizer_param.opt_name not in ["LKF", "GKF"]:
@@ -443,6 +444,7 @@ class nep_network:
                 enable_gram=self.input_param.optimizer_param.muon_enable_gram,
                 flash_muon=self.input_param.optimizer_param.muon_flash,
                 magma_muon=self.input_param.optimizer_param.muon_magma,
+                compile_gram=self.input_param.optimizer_param.muon_compile_gram,
             )
         else:
             raise Exception("Error: Unsupported optimizer!")

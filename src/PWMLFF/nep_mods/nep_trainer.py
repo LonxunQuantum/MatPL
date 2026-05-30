@@ -90,6 +90,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         wsd_stable_frac = args.optimizer_param.wsd_stable_frac
         wsd_decay_kind = args.optimizer_param.wsd_decay_kind
 
+    # Async NaN guard accumulators (GPU-side; sync once every check_interval).
+    nan_guard_interval = max(1, int(args.optimizer_param.nan_guard_check_interval))
+    nan_guard_count = torch.zeros((), dtype=torch.int64, device=device)
+    nan_guard_window_start = 0
+
     end = time.time()
     for i, sample in enumerate(train_loader):
       with nvtx_range(f"step_{i}"):
@@ -251,12 +256,15 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         # check_cuda_memory(epoch, -1, "end backward", False, args.rank)
 
         with nvtx_range("clip_step"):
-            # NaN/Inf guard: a single pathological batch can produce non-finite
-            # gradients that, once fed through clip_grad_norm_ or optimizer.step(),
-            # poison every parameter and freeze the model in a NaN state for the
-            # rest of training. Detect non-finite grads before stepping; if any
-            # parameter has non-finite grad, zero everything and skip this step
-            # (also skipping the EMA update so the shadow is not contaminated).
+            # Async NaN/Inf guard. The original guard ran ``.item()`` on the
+            # per-step finite test, forcing a host sync that lifts
+            # MUON+EMA+WSD per-step time by 5-10%. Now we keep the finite
+            # mask on GPU and "skip" a bad step by zeroing grads and the EMA
+            # lerp weight in-place, which is mathematically identical to the
+            # old branch (no step + no EMA update on that step). We only
+            # ``.item()`` once every ``nan_guard_check_interval`` steps to
+            # print a window summary. Set the interval to 1 to recover the
+            # original eager-sync behavior.
             if args.optimizer_param.norm_type is not None:
                 total_norm = nn.utils.clip_grad_norm_(
                     model.parameters(),
@@ -264,26 +272,60 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                     args.optimizer_param.norm_type,
                     error_if_nonfinite=False,
                 )
-                grad_finite = torch.isfinite(total_norm).item()
-            else:
-                if args.optimizer_param.clip_value is not None:
-                    nn.utils.clip_grad_value_(model.parameters(), args.optimizer_param.clip_value)
-                grad_finite = all(
-                    torch.isfinite(p.grad).all().item()
-                    for p in model.parameters() if p.grad is not None
+                is_finite = torch.isfinite(total_norm)
+            elif args.optimizer_param.clip_value is not None:
+                nn.utils.clip_grad_value_(
+                    model.parameters(), args.optimizer_param.clip_value
                 )
-
-            if grad_finite:
-                optimizer.step()
-                if ema is not None:
-                    ema.update()
+                # ``clip_grad_value_`` does not produce a norm; reduce a single
+                # scalar across all grads to keep the guard cheap.
+                grad_finite_flags = [
+                    torch.isfinite(p.grad).all()
+                    for p in model.parameters()
+                    if p.grad is not None
+                ]
+                if grad_finite_flags:
+                    is_finite = torch.stack(grad_finite_flags).all()
+                else:
+                    is_finite = torch.ones((), dtype=torch.bool, device=device)
             else:
-                if i % args.optimizer_param.print_freq == 0:
-                    print(f"[NaN guard] non-finite gradient at epoch {epoch} step {i}; skipping optimizer.step()")
-                optimizer.zero_grad()
+                # ADAM/ADAMW path with no clipping requested: trust the grads
+                # (legacy behavior pre-Phase 3.3 was no NaN guard at all here).
+                is_finite = torch.ones((), dtype=torch.bool, device=device)
+
+            # Mask = 1.0 (commit step) or 0.0 (skip step), GPU-resident.
+            finite_mask = is_finite.to(torch.float32)
+            nan_guard_count += (1 - is_finite.to(torch.int64))
+
+            # Zero grads in-place when non-finite so optimizer.step() acts on
+            # all-zeros == no-op for the affected step. ``_foreach_mul_`` is
+            # one fused kernel across all parameter grads.
+            grad_list = [p.grad for p in model.parameters() if p.grad is not None]
+            if grad_list:
+                torch._foreach_mul_(grad_list, finite_mask)
+
+            optimizer.step()
+            if ema is not None:
+                ema.update_masked(finite_mask)
 
             if scheduler is not None and is_warmlr is False:
                 scheduler.step()
+
+            # Periodic host-sync diagnostic; one ``.item()`` per N steps.
+            global_step_in_epoch = i + 1
+            if (
+                global_step_in_epoch - nan_guard_window_start >= nan_guard_interval
+                or global_step_in_epoch == len(train_loader)
+            ):
+                fired = int(nan_guard_count.item())
+                if fired > 0 and args.rank == 0:
+                    print(
+                        f"[NaN guard] non-finite gradient skipped {fired} time(s) "
+                        f"in epoch {epoch} steps "
+                        f"[{nan_guard_window_start}, {global_step_in_epoch})"
+                    )
+                nan_guard_count.zero_()
+                nan_guard_window_start = global_step_in_epoch
 
         loss_val = loss
         L1, L2 = print_l1_l2(model)

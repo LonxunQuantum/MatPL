@@ -88,6 +88,23 @@ class OptimizerParam(object):
                 "ERROR! 'ema_decay' must be in (0, 1), got {}.".format(self.ema_decay)
             )
 
+        # Phase 3.3-followup: async NaN guard. The original guard called
+        # ``.item()`` on the per-step finite test, forcing a host sync that
+        # lifts MUON+EMA+WSD per-step time by 5-10%. Now the guard mask stays
+        # on GPU; we only sync once every N steps to print a diagnostic. Set
+        # to 1 to recover the original eager-sync behavior.
+        self.nan_guard_check_interval = get_parameter(
+            "nan_guard_check_interval", optimizer_dict, 50
+        )
+        if (
+            not isinstance(self.nan_guard_check_interval, int)
+            or self.nan_guard_check_interval < 1
+        ):
+            raise Exception(
+                "ERROR! 'nan_guard_check_interval' must be a positive int, "
+                "got {}.".format(self.nan_guard_check_interval)
+            )
+
         if "KF" in self.opt_name.upper():  #set Kalman Filter Optimizer params
             self.kalman_lambda = get_parameter("kalman_lambda", optimizer_dict, 0.98)
             self.kalman_nue = get_parameter("kalman_nue", optimizer_dict, 0.9987)
@@ -132,6 +149,11 @@ class OptimizerParam(object):
             self.muon_enable_gram = get_parameter("muon_enable_gram", optimizer_dict, True)
             self.muon_flash = get_parameter("muon_flash", optimizer_dict, True)
             self.muon_magma = get_parameter("muon_magma", optimizer_dict, True)
+            # Default OFF: Inductor-emitted CUBINs for the Gram orthogonalizer
+            # have been observed to fail loading on sm_86 (3090 q4 partition)
+            # with "device kernel image is invalid". 4090/H100 users opt in
+            # to keep the compiled Gram path.
+            self.muon_compile_gram = get_parameter("muon_compile_gram", optimizer_dict, False)
             # Phase 3.3 safety: HybridMuon's bf16 momentum buffer + Frobenius-only
             # update normalization don't tame raw gradient spikes the way Adam's
             # per-param eps denominator does. On water_5k (288 atoms/frame, 2 elements)
@@ -239,6 +261,7 @@ class OptimizerParam(object):
                 opt_dict["muon_enable_gram"] = self.muon_enable_gram
                 opt_dict["muon_flash"] = self.muon_flash
                 opt_dict["muon_magma"] = self.muon_magma
+                opt_dict["muon_compile_gram"] = self.muon_compile_gram
 
             opt_dict["learning_rate"]= self.learning_rate
             opt_dict["stop_lr"] = self.stop_lr

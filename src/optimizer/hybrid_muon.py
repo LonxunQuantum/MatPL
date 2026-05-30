@@ -491,7 +491,7 @@ class _GramNewtonSchulzOrthogonalizer:
     used by HybridMuon.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, compile_gram: bool = False) -> None:
         # Gram path uses NS_EPS (same numerical role as Standard NS norm clamp).
         # It intentionally does NOT share the smaller ADAM_EPS, because the
         # Polar-Express recipe normalizes before its first iteration and a
@@ -501,11 +501,18 @@ class _GramNewtonSchulzOrthogonalizer:
             (float(a), float(b), float(c)) for a, b, c in POLAR_EXPRESS_COEFFICIENTS
         )
         self._restart_iteration_set = frozenset((2,))
-        self._compiled_call = torch.compile(
-            self._orthogonalize_impl,
-            fullgraph=True,
-            dynamic=True,
-        )
+        # Inductor lowering of this method has shipped CUBINs that fail to load
+        # on Ampere (sm_86) under several PyTorch / Triton combinations
+        # ("device kernel image is invalid"). Default off so 3090 just works;
+        # 4090/H100 users opt in via ``muon_compile_gram=true``.
+        if compile_gram:
+            self._compiled_call = torch.compile(
+                self._orthogonalize_impl,
+                fullgraph=True,
+                dynamic=True,
+            )
+        else:
+            self._compiled_call = self._orthogonalize_impl
 
     def __call__(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -935,6 +942,7 @@ class HybridMuonOptimizer(Optimizer):
         enable_gram: bool = True,
         flash_muon: bool = True,
         magma_muon: bool = True,
+        compile_gram: bool = False,
         use_foreach: bool | None = None,
     ) -> None:
         # === Step 1. Validate routing mode ===
@@ -976,6 +984,23 @@ class HybridMuonOptimizer(Optimizer):
             tuple[torch.Tensor, torch.Tensor],
         ] = {}
         self._gram_orthogonalizer: _GramNewtonSchulzOrthogonalizer | None = None
+        # Default off: torch.compile/Inductor produces sm_86-incompatible CUBINs
+        # in some PyTorch/Triton stacks (3090 q4 partition: "device kernel image
+        # is invalid"). 4090/H100 users opt in via ``muon_compile_gram=true``
+        # to keep the Inductor-fused Gram path.
+        self._compile_gram = bool(compile_gram)
+        if self._compile_gram and torch.cuda.is_available():
+            major, _ = torch.cuda.get_device_capability(0)
+            if major < 8 or torch.cuda.get_device_capability(0) < (8, 9):
+                import warnings as _warnings
+                _warnings.warn(
+                    "muon_compile_gram=True on a non-Ada GPU "
+                    f"(sm_{major}{torch.cuda.get_device_capability(0)[1]}). "
+                    "Inductor-emitted CUBINs have been observed to fail loading "
+                    "on sm_86 with 'device kernel image is invalid'. If training "
+                    "crashes at first MUON step, retry with muon_compile_gram=false.",
+                    stacklevel=2,
+                )
 
         # === Step 5. Foreach acceleration ===
         # Defaults to True for single-GPU / DDP / ZeRO-1 (plain tensors). Callers
@@ -1337,7 +1362,9 @@ class HybridMuonOptimizer(Optimizer):
             Shared Gram orthogonalizer instance for the optimizer.
         """
         if self._gram_orthogonalizer is None:
-            self._gram_orthogonalizer = _GramNewtonSchulzOrthogonalizer()
+            self._gram_orthogonalizer = _GramNewtonSchulzOrthogonalizer(
+                compile_gram=self._compile_gram,
+            )
         return self._gram_orthogonalizer
 
     def _process_merged_gram_buckets(

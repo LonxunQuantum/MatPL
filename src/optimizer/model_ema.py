@@ -41,6 +41,21 @@ class ModelEMA:
         torch._foreach_lerp_(self._shadows, self._params, 1.0 - self.decay)
 
     @torch.no_grad()
+    def update_masked(self, finite_mask: torch.Tensor) -> None:
+        """Same as ``update`` but multiplied by a GPU-side 0/1 mask.
+
+        ``finite_mask`` is a 0-d tensor (1.0 keeps the lerp, 0.0 freezes the
+        shadow this step). Used by the async NaN guard so a non-finite step
+        no longer requires a host sync to decide whether to skip EMA — the
+        mask collapses ``1 - decay`` to 0 on those steps.
+        """
+        if not self._shadows:
+            return
+        # weight = (1 - decay) * mask, evaluated on-device
+        weight = finite_mask.to(self._shadows[0].dtype) * (1.0 - self.decay)
+        torch._foreach_lerp_(self._shadows, self._params, weight)
+
+    @torch.no_grad()
     def apply_shadow(self) -> None:
         if self._backup is not None:
             raise RuntimeError("apply_shadow called twice without restore()")

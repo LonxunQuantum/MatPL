@@ -41,9 +41,16 @@ src/feature/NEP_GPU/*/*.o
 src/feature/NEP_GPU/nep3_module.so
 src/feature/NEP_GPU_largebox_findneigh_error
 src/feature/nep_find_neigh/.vscode
+src/feature/nep_find_neigh/build_py39/
 src/std_compile.log
 env.sh
 src/test/test_workdir*
 src/test/tmp.py
 src/test/template_lmps.json
 src/test/test_util/test_result_detail*
+# Phase 0 benchmark workdir (datasets, logs, model dumps).
+# Smoke / perf scripts (.sh) and config (.json) are tracked explicitly via `git add -f`.
+phase0_benchmarks/*
+!phase0_benchmarks/*.sh
+!phase0_benchmarks/*.json
+!phase0_benchmarks/.gitkeep
