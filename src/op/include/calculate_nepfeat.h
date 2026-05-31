@@ -1,3 +1,21 @@
+void launch_calculate_nepfeat(
+    const double * coeff2,
+    const double * d12_radial,
+    const int64_t* NL_radial,
+    const int64_t* atom_map,
+    const double rcut_radial,
+    double * feat_2b,
+    double * dfeat_c2,
+    double * dfeat_2b,
+    double * dfeat_2b_noc,
+    const int natoms,
+    const int neigh_num,
+    const int n_max,
+    const int n_base,
+    const int num_types,
+    const int device
+);
+
 void launch_calculate_nepforce(
     const int64_t * nblist,
     const double * dE,

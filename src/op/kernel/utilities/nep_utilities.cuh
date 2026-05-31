@@ -65,16 +65,23 @@ static __device__ __forceinline__ void find_fc(double rc, double rcinv, double d
   }
 }
 
+template <typename T>
+__device__ __host__ __forceinline__ void find_fc_and_fcp(
+        T rc, T rcinv, T d12, T& fc, T& fcp) {
+    if (d12 < rc) {
+        T x = d12 * rcinv;
+        fc = T(0.5) * cos(T(PI) * x) + T(0.5);
+        fcp = -T(HALF_PI) * sin(T(PI) * x) * rcinv;
+    } else {
+        fc = T(0.0);
+        fcp = T(0.0);
+    }
+}
+
+// Keep non-template overload for existing callers that pass double directly
 __device__ __host__ __forceinline__ void find_fc_and_fcp(
         double rc, double rcinv, double d12, double& fc, double& fcp) {
-    if (d12 < rc) {
-        double x = d12 * rcinv;
-        fc = 0.5 * cos(PI * x) + 0.5;
-        fcp = -HALF_PI * sin(PI * x) * rcinv;
-    } else {
-        fc = 0.0;
-        fcp = 0.0;
-    }
+    find_fc_and_fcp<double>(rc, rcinv, d12, fc, fcp);
 }
 
 static __device__ __forceinline__ void
@@ -230,29 +237,36 @@ find_fn(const int n_max, const double rcinv, const double d12, const double fc12
   }
 }
 
+template <typename T>
 __device__ __host__ __forceinline__ void find_fn_and_fnp(
-        const int n_max, const double rcinv, const double d12, const double fc12, const double fcp12, double* fn, double* fnp) {
-    double x = 2.0 * (d12 * rcinv - 1.0) * (d12 * rcinv - 1.0) - 1.0;
-    fn[0] = 1.0;
-    fnp[0] = 0.0;
+        const int n_max, const T rcinv, const T d12, const T fc12, const T fcp12, T* fn, T* fnp) {
+    T x = T(2.0) * (d12 * rcinv - T(1.0)) * (d12 * rcinv - T(1.0)) - T(1.0);
+    fn[0] = T(1.0);
+    fnp[0] = T(0.0);
     fn[1] = x;
-    fnp[1] = 1.0;
-    double u0 = 1.0;
-    double u1 = 2.0 * x;
-    double u2;
+    fnp[1] = T(1.0);
+    T u0 = T(1.0);
+    T u1 = T(2.0) * x;
+    T u2;
     for (int m = 2; m < n_max; ++m) {
-        fn[m] = 2.0 * x * fn[m - 1] - fn[m - 2];
-        fnp[m] = m * u1;
-        u2 = 2.0 * x * u1 - u0;
+        fn[m] = T(2.0) * x * fn[m - 1] - fn[m - 2];
+        fnp[m] = T(m) * u1;
+        u2 = T(2.0) * x * u1 - u0;
         u0 = u1;
         u1 = u2;
     }
     for (int m = 0; m < n_max; ++m) {
-        fn[m] = (fn[m] + 1.0) * 0.5;
-        fnp[m] *= 2.0 * (d12 * rcinv - 1.0) * rcinv;
+        fn[m] = (fn[m] + T(1.0)) * T(0.5);
+        fnp[m] *= T(2.0) * (d12 * rcinv - T(1.0)) * rcinv;
         fnp[m] = fnp[m] * fc12 + fn[m] * fcp12;
         fn[m] *= fc12;
     }
+}
+
+// Keep non-template overload for existing callers that pass double directly
+__device__ __host__ __forceinline__ void find_fn_and_fnp(
+        const int n_max, const double rcinv, const double d12, const double fc12, const double fcp12, double* fn, double* fnp) {
+    find_fn_and_fnp<double>(n_max, rcinv, d12, fc12, fcp12, fn, fnp);
 }
 
 static __device__ __forceinline__ void get_f12_1(
