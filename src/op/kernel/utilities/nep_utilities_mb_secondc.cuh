@@ -2,39 +2,40 @@
 #include "nep_utilities.cuh"
 
 
+template <typename T>
 static __device__ __forceinline__ void
-scd_accumulate_blm_rij(const double d12, 
-                    const double x, 
-                    const double y, 
-                    const double z, 
-                    double* blm,
-                    double* rij_blm,
-                    double* dblm_x,
-                    double* dblm_y,
-                    double* dblm_z,
-                    double* dblm_r)
+scd_accumulate_blm_rij(const T d12, 
+                    const T x, 
+                    const T y, 
+                    const T z, 
+                    T* blm,
+                    T* rij_blm,
+                    T* dblm_x,
+                    T* dblm_y,
+                    T* dblm_z,
+                    T* dblm_r)
 {
-  double d12inv = 1.0 / d12;
-  double x12 = x * d12inv;
-  double y12 = y * d12inv;
-  double z12 = z * d12inv;
-  double x2 = x * x;
-  double y2 = y * y;
-  double z2 = z * z;
-  double xy = x * y;
-  double xz = x * z;
-  double yz = y * z;
-  double r2 = d12 * d12;
-  double x2my2 = x2 - y2;
-  double xyz = x * yz;
-  double x3 = x * x2;
-  double y3 = y * y2;
-  double z3 = z * z2;
-  double r3 = d12 * r2;
-  double x12sq = x12 * x12;
-  double y12sq = y12 * y12;
-  double z12sq = z12 * z12;
-  double x12sq_minus_y12sq = x12sq - y12sq;
+  T d12inv = 1.0 / d12;
+  T x12 = x * d12inv;
+  T y12 = y * d12inv;
+  T z12 = z * d12inv;
+  T x2 = x * x;
+  T y2 = y * y;
+  T z2 = z * z;
+  T xy = x * y;
+  T xz = x * z;
+  T yz = y * z;
+  T r2 = d12 * d12;
+  T x2my2 = x2 - y2;
+  T xyz = x * yz;
+  T x3 = x * x2;
+  T y3 = y * y2;
+  T z3 = z * z2;
+  T r3 = d12 * r2;
+  T x12sq = x12 * x12;
+  T y12sq = y12 * y12;
+  T z12sq = z12 * z12;
+  T x12sq_minus_y12sq = x12sq - y12sq;
   // L = 1 s0
   blm[0]     = z;                                             // Y10 blm
   dblm_r[0]  = 0.0;                                           // Y10 blm/dr
@@ -209,40 +210,41 @@ scd_accumulate_blm_rij(const double d12,
 }
 
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_1(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double *s,
-  const double *r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T *s,
+  const T *r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_base_angular, 
   const int dsnlm_start_idx,
   const int type_j,
   const int ntypes,
   const int n1, 
   const int n2,
-  double *f12k)
+  T *f12k)
 { //l = 1
-  double dfk = 0.0; // dgn(rij)/dc
+  T dfk = 0.0; // dgn(rij)/dc
   int dsnlm_idx = dsnlm_start_idx + type_j * n_base_angular * NUM_OF_ABC;
   for(int k=0; k < n_base_angular; k++) {
     int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-    double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
-    double rr0 = 0.0, rr1 = 0.0, rr2 = 0.0;
-    double rrr0 = 0.0, rrr1 = 0.0, rrr2=0.0;
+    T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+    T rr0 = 0.0, rr1 = 0.0, rr2 = 0.0;
+    T rrr0 = 0.0, rrr1 = 0.0, rrr2=0.0;
     // 左边项 rij
     rr0 =       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0]; 
     rr1 = 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fnp * blm[1];
@@ -277,39 +279,40 @@ static __device__ __forceinline__ void scd_get_f12_1(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_2(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_base_angular, 
   const int dsnlm_start_idx,
   const int type_j,
   const int ntypes,
   const int n1, 
   const int n2,
-  double *f12k
+  T *f12k
   )
 {
   // L = 2 c3b 3 4 5 6 7
   int dsnlm_idx = dsnlm_start_idx + type_j * n_base_angular * NUM_OF_ABC;
   for(int k=0; k < n_base_angular; k++) {
     int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-    double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+    T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
     // 左边项 rij
     tmpr +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * (fnp * blm[3] + fn * dblm_r[3]) + 
                   2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fnp * blm[4] + 
@@ -365,68 +368,69 @@ static __device__ __forceinline__ void scd_get_f12_2(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_4body(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_base_angular,
   const int dsnlm_start_idx, 
   const int type_j,
   const int ntypes,
   const int n1, 
   const int n2,
-  double *f12k)
+  T *f12k)
 {
   // L = 2 c3b 3 4 5 6 7
 
   int dsnlm_idx = dsnlm_start_idx + type_j * n_base_angular * NUM_OF_ABC;
 
-  double dnlm_drij[5] = {0.0};
+  T dnlm_drij[5] = {0.0};
   dnlm_drij[0] = fnp * blm[3] + fn * dblm_r[3];
   dnlm_drij[1] = fnp * blm[4];
   dnlm_drij[2] = fnp * blm[5];
   dnlm_drij[3] = fnp * blm[6];
   dnlm_drij[4] = fnp * blm[7];
-  double dnlm_dxij[5] = {0.0};
+  T dnlm_dxij[5] = {0.0};
   dnlm_dxij[0] = 0.0;
   dnlm_dxij[1] = fn * dblm_x[4];
   dnlm_dxij[2] = 0.0;
   dnlm_dxij[3] = fn * dblm_x[6];
   dnlm_dxij[4] = fn * dblm_x[7];
-  double dnlm_dyij[5] = {0.0};
+  T dnlm_dyij[5] = {0.0};
   dnlm_dyij[0] = 0.0;
   dnlm_dyij[1] = 0.0;
   dnlm_dyij[2] = fn * dblm_y[5];
   dnlm_dyij[3] = fn * dblm_y[6];
   dnlm_dyij[4] = fn * dblm_y[7];
-  double dnlm_dzij[5] = {0.0};
+  T dnlm_dzij[5] = {0.0};
   dnlm_dzij[0] = fn * dblm_z[3];
   dnlm_dzij[1] = fn * dblm_z[4];
   dnlm_dzij[2] = fn * dblm_z[5];
   dnlm_dzij[3] = 0.0;
   dnlm_dzij[4] = 0.0;
-  double dnlm_dc[5] = {0.0};
-  double dnlm_drij_dc[5] = {0.0};
-  double dnlm_dxij_dc[5] = {0.0};
-  double dnlm_dyij_dc[5] = {0.0};
-  double dnlm_dzij_dc[5] = {0.0};
+  T dnlm_dc[5] = {0.0};
+  T dnlm_drij_dc[5] = {0.0};
+  T dnlm_dxij_dc[5] = {0.0};
+  T dnlm_dyij_dc[5] = {0.0};
+  T dnlm_dzij_dc[5] = {0.0};
 
-  double s2[5] = {0.0};
+  T s2[5] = {0.0};
   s2[0] = s[0] * s[0];
   s2[1] = s[1] * s[1];
   s2[2] = s[2] * s[2];
@@ -435,7 +439,7 @@ static __device__ __forceinline__ void scd_get_f12_4body(
   
   for(int k=0; k < n_base_angular; k++) {
     int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-    double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+    T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
     dnlm_dc[0] = dsnlm_dc[dsnlm_i + 3];
     dnlm_dc[1] = dsnlm_dc[dsnlm_i + 4];
     dnlm_dc[2] = dsnlm_dc[dsnlm_i + 5];
@@ -614,69 +618,70 @@ static __device__ __forceinline__ void scd_get_f12_4body(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_5body(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_base_angular,
   const int dsnlm_start_idx,
   const int type_j,
   const int ntypes,
   const int n1, 
   const int n2,
-  double *f12k
+  T *f12k
 )
 {
   // L = 1
   int dsnlm_idx = dsnlm_start_idx + type_j * n_base_angular * NUM_OF_ABC;
-  double dnlm_drij[3] = {0.0};
+  T dnlm_drij[3] = {0.0};
   dnlm_drij[0] = fnp * blm[0]; // fn * dblm/drij = 0
   dnlm_drij[1] = fnp * blm[1];
   dnlm_drij[2] = fnp * blm[2];
-  double dnlm_dxij[3] = {0.0};
+  T dnlm_dxij[3] = {0.0};
   dnlm_dxij[0] = 0.0;
   dnlm_dxij[1] = fn; //  dblm_x[1] = 1.0
   dnlm_dxij[2] = 0.0;
-  double dnlm_dyij[3] = {0.0};
+  T dnlm_dyij[3] = {0.0};
   dnlm_dyij[0] = 0.0;
   dnlm_dyij[1] = 0.0;
   dnlm_dyij[2] = fn; //  dblm_y[2] = 1.0
-  double dnlm_dzij[3] = {0.0};
+  T dnlm_dzij[3] = {0.0};
   dnlm_dzij[0] = fn; // dblm_z[0] = 1.0
   dnlm_dzij[1] = 0.0;
   dnlm_dzij[2] = 0.0;
-  double dnlm_dc[3] = {0.0};
-  double dnlm_drij_dc[3] = {0.0};
-  double dnlm_dxij_dc[3] = {0.0};
-  double dnlm_dyij_dc[3] = {0.0};
-  double dnlm_dzij_dc[3] = {0.0};
+  T dnlm_dc[3] = {0.0};
+  T dnlm_drij_dc[3] = {0.0};
+  T dnlm_dxij_dc[3] = {0.0};
+  T dnlm_dyij_dc[3] = {0.0};
+  T dnlm_dzij_dc[3] = {0.0};
 
-  double s2[3] = {0.0};
+  T s2[3] = {0.0};
   s2[0] = s[0] * s[0];
   s2[1] = s[1] * s[1];
   s2[2] = s[2] * s[2];
   
-  double ds1s2 = 0.0;
-  double ds1s2_c = 0.0;
-  double d_tmp = 0.0;
+  T ds1s2 = 0.0;
+  T ds1s2_c = 0.0;
+  T d_tmp = 0.0;
   for(int k=0; k < n_base_angular; k++) {
     int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-    double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+    T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
     dnlm_dc[0] = dsnlm_dc[dsnlm_i + 0];
     dnlm_dc[1] = dsnlm_dc[dsnlm_i + 1];
     dnlm_dc[2] = dsnlm_dc[dsnlm_i + 2];
@@ -760,38 +765,39 @@ static __device__ __forceinline__ void scd_get_f12_5body(
   // }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_3(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_base_angular, 
   const int dsnlm_start_idx,
   const int type_j,
   const int ntypes,
   const int n1, 
   const int n2,
-  double *f12k)
+  T *f12k)
 {
   // L = 3 c3b 8 9 10 11 12 13 14  s 0 1 2 3 4 5 6
   int dsnlm_idx = dsnlm_start_idx + type_j * n_base_angular * NUM_OF_ABC;
   for(int k=0; k < n_base_angular; k++) {
     int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-    double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+    T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
     // 左边项 rij
     tmpr +=         C3B[8]  * dsnlm_dc[dsnlm_i+8] * (fnp * blm[8]  + fn * dblm_r[8]) + 
               2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9] * (fnp * blm[9]  + fn * dblm_r[9]) + 
@@ -819,9 +825,9 @@ static __device__ __forceinline__ void scd_get_f12_3(
               2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_x[13] +
               2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_x[14];     
     // 右边项
-    tmpx +=      // s[0] * fn12[k] * rij_Lsq * dblm_x[8]  + //db30/dx = 0
+    tmpx +=      // s[0] * fn12[k] * rij_Lsq * dblm_x[8]  + 
               2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[9]  + 
-              // 2.0 * s[2] * fn12[k] * rij_Lsq * dblm_x[10] + //db33/dx = 0
+              // 2.0 * s[2] * fn12[k] * rij_Lsq * dblm_x[10] + 
               2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[11] + 
               2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[12] + 
               2.0 * s[5] * fn12[k] * rij_Lsq * dblm_x[13] + 
@@ -870,37 +876,38 @@ static __device__ __forceinline__ void scd_get_f12_3(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_4(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_base_angular, 
   const int dsnlm_start_idx,
   const int type_j,
   const int ntypes,
   const int n1, 
   const int n2,
-  double *f12k)
+  T *f12k)
 {
   int dsnlm_idx = dsnlm_start_idx + type_j * n_base_angular * NUM_OF_ABC;
   for(int k=0; k < n_base_angular; k++) {
     int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-    double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+    T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
     // 左边项 rij
     tmpr +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * (fnp * blm[15] + fn * dblm_r[15]) + 
             2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * (fnp * blm[16] + fn * dblm_r[16]) + 
@@ -1001,25 +1008,26 @@ static __device__ __forceinline__ void scd_get_f12_4(
 
 
 // others J of C_nk_iJ
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_1_J(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double *s,
-  const double *r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T *s,
+  const T *r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_max_angular,
   const int n_base_angular, 
   const int dsnlm_start_idx,
@@ -1029,7 +1037,7 @@ static __device__ __forceinline__ void scd_get_f12_1_J(
   const int n2,
   const int* __restrict__ uniq_type,
   const int len_map,
-  double *f12k)
+  T *f12k)
 { //l = 1
   int k_idx = 0;
   for (int uj =0; uj < len_map; uj++) {
@@ -1039,7 +1047,7 @@ static __device__ __forceinline__ void scd_get_f12_1_J(
     int k_start_idx = uj * n_base_angular;
     for(int k=0; k < n_base_angular; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+      T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       k_idx = k_start_idx + k;
       // 左边项 rij
       tmpr +=       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0]; 
@@ -1067,25 +1075,26 @@ static __device__ __forceinline__ void scd_get_f12_1_J(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_4body_J(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_max_angular,
   const int n_base_angular,
   const int dsnlm_start_idx, 
@@ -1095,34 +1104,34 @@ static __device__ __forceinline__ void scd_get_f12_4body_J(
   const int n2,
   const int* __restrict__ uniq_type,
   const int len_map,
-  double *f12k)
+  T *f12k)
 {
   // L = 2 c3b 3 4 5 6 7
-  double dnlm_drij[5] = {0.0};
+  T dnlm_drij[5] = {0.0};
   dnlm_drij[0] = fnp * blm[3] + fn * dblm_r[3];
   dnlm_drij[1] = fnp * blm[4];
   dnlm_drij[2] = fnp * blm[5];
   dnlm_drij[3] = fnp * blm[6];
   dnlm_drij[4] = fnp * blm[7];
-  double dnlm_dxij[5] = {0.0};
+  T dnlm_dxij[5] = {0.0};
   dnlm_dxij[0] = 0.0;
   dnlm_dxij[1] = fn * dblm_x[4];
   dnlm_dxij[2] = 0.0;
   dnlm_dxij[3] = fn * dblm_x[6];
   dnlm_dxij[4] = fn * dblm_x[7];
-  double dnlm_dyij[5] = {0.0};
+  T dnlm_dyij[5] = {0.0};
   dnlm_dyij[0] = 0.0;
   dnlm_dyij[1] = 0.0;
   dnlm_dyij[2] = fn * dblm_y[5];
   dnlm_dyij[3] = fn * dblm_y[6];
   dnlm_dyij[4] = fn * dblm_y[7];
-  double dnlm_dzij[5] = {0.0};
+  T dnlm_dzij[5] = {0.0};
   dnlm_dzij[0] = fn * dblm_z[3];
   dnlm_dzij[1] = fn * dblm_z[4];
   dnlm_dzij[2] = fn * dblm_z[5];
   dnlm_dzij[3] = 0.0;
   dnlm_dzij[4] = 0.0;
-  double dnlm_dc[5] = {0.0};
+  T dnlm_dc[5] = {0.0};
   int k_idx = 0;
   for (int uj =0; uj < len_map; uj++) {
     int j = uniq_type[uj];
@@ -1131,7 +1140,7 @@ static __device__ __forceinline__ void scd_get_f12_4body_J(
     int k_start_id = uj * n_base_angular;
     for(int k=0; k < n_base_angular; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+      T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       k_idx = k_start_id + k;
       dnlm_dc[0] = dsnlm_dc[dsnlm_i + 3];
       dnlm_dc[1] = dsnlm_dc[dsnlm_i + 4];
@@ -1289,25 +1298,26 @@ static __device__ __forceinline__ void scd_get_f12_4body_J(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_5body_J(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_max_angular,
   const int n_base_angular,
   const int dsnlm_start_idx,
@@ -1317,36 +1327,36 @@ static __device__ __forceinline__ void scd_get_f12_5body_J(
   const int n2,
   const int* __restrict__ uniq_type,
   const int len_map,
-  double *f12k
+  T *f12k
 )
 {
   // L = 1
-  double dnlm_drij[3] = {0.0};
+  T dnlm_drij[3] = {0.0};
   dnlm_drij[0] = fnp * blm[0]; // fn * dblm/drij = 0
   dnlm_drij[1] = fnp * blm[1];
   dnlm_drij[2] = fnp * blm[2];
-  double dnlm_dxij[3] = {0.0};
+  T dnlm_dxij[3] = {0.0};
   dnlm_dxij[0] = 0.0;
   dnlm_dxij[1] = fn; //  dblm_x[1] = 1.0
   dnlm_dxij[2] = 0.0;
-  double dnlm_dyij[3] = {0.0};
+  T dnlm_dyij[3] = {0.0};
   dnlm_dyij[0] = 0.0;
   dnlm_dyij[1] = 0.0;
   dnlm_dyij[2] = fn; //  dblm_y[2] = 1.0
-  double dnlm_dzij[3] = {0.0};
+  T dnlm_dzij[3] = {0.0};
   dnlm_dzij[0] = fn; // dblm_z[0] = 1.0
   dnlm_dzij[1] = 0.0;
   dnlm_dzij[2] = 0.0;
-  double dnlm_dc[3] = {0.0};
+  T dnlm_dc[3] = {0.0};
 
-  double s2[3] = {0.0};
+  T s2[3] = {0.0};
   s2[0] = s[0] * s[0];
   s2[1] = s[1] * s[1];
   s2[2] = s[2] * s[2];
   
-  double ds1s2 = 0.0;
-  double ds1s2_c = 0.0;
-  double d_tmp = 0.0;
+  T ds1s2 = 0.0;
+  T ds1s2_c = 0.0;
+  T d_tmp = 0.0;
   int k_idx = 0;
   for (int uj =0; uj < len_map; uj++) {
     int j = uniq_type[uj];
@@ -1355,7 +1365,7 @@ static __device__ __forceinline__ void scd_get_f12_5body_J(
     int k_start_id = uj * n_base_angular;
     for(int k=0; k < n_base_angular; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+      T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       k_idx = k_start_id + k;
       dnlm_dc[0] = dsnlm_dc[dsnlm_i + 0];
       dnlm_dc[1] = dsnlm_dc[dsnlm_i + 1];
@@ -1423,25 +1433,26 @@ static __device__ __forceinline__ void scd_get_f12_5body_J(
   // }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_2_J(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_max_angular,
   const int n_base_angular, 
   const int dsnlm_start_idx,
@@ -1451,7 +1462,7 @@ static __device__ __forceinline__ void scd_get_f12_2_J(
   const int n2,
   const int* __restrict__ uniq_type,
   const int len_map,
-  double *f12k
+  T *f12k
   )
 {
   // L = 2 c3b 3 4 5 6 7
@@ -1463,7 +1474,7 @@ static __device__ __forceinline__ void scd_get_f12_2_J(
     int k_idx = 0;
     for(int k=0; k < n_base_angular; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+      T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       k_idx = k_start_idx + k;
       // 左边项 rij
       tmpr +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * (fnp * blm[3] + fn * dblm_r[3]) + 
@@ -1502,25 +1513,26 @@ static __device__ __forceinline__ void scd_get_f12_2_J(
 }
 
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_3_J(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_max_angular,
   const int n_base_angular, 
   const int dsnlm_start_idx,
@@ -1530,7 +1542,7 @@ static __device__ __forceinline__ void scd_get_f12_3_J(
   const int n2,
   const int* __restrict__ uniq_type,
   const int len_map,
-  double *f12k)
+  T *f12k)
 {
   // L = 3 c3b 8 9 10 11 12 13 14  s 0 1 2 3 4 5 6
   int k_idx = 0;
@@ -1541,7 +1553,7 @@ static __device__ __forceinline__ void scd_get_f12_3_J(
     int k_start_idx = uj * n_base_angular;   
     for(int k=0; k < n_base_angular; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+      T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       k_idx = k_start_idx + k;
       // 左边项 rij
       tmpr +=         C3B[8]  * dsnlm_dc[dsnlm_i+8] * (fnp * blm[8]  + fn * dblm_r[8]) + 
@@ -1591,25 +1603,26 @@ static __device__ __forceinline__ void scd_get_f12_3_J(
 }
 
 
+template <typename T>
 static __device__ __forceinline__ void scd_get_f12_4_J(
-  const double *fn12,
-  const double *fnp12,
-  const double *blm,
-  const double *rij_blm,
-  const double *dblm_x,
-  const double *dblm_y,
-  const double *dblm_z,
-  const double *dblm_r,
-  const double *scd_r12,
-  const double *dsnlm_dc,
-  const double* s,
-  const double* r12,
-  const double d12inv,
-  const double rij_Lsq, 
-  const double rij_L2sq, 
-  const double fn,
-  const double fnp,
-  const double Fp,
+  const T *fn12,
+  const T *fnp12,
+  const T *blm,
+  const T *rij_blm,
+  const T *dblm_x,
+  const T *dblm_y,
+  const T *dblm_z,
+  const T *dblm_r,
+  const T *scd_r12,
+  const T *dsnlm_dc,
+  const T* s,
+  const T* r12,
+  const T d12inv,
+  const T rij_Lsq, 
+  const T rij_L2sq, 
+  const T fn,
+  const T fnp,
+  const T Fp,
   const int n_max_angular,
   const int n_base_angular, 
   const int dsnlm_start_idx,
@@ -1619,7 +1632,7 @@ static __device__ __forceinline__ void scd_get_f12_4_J(
   const int n2,
   const int* __restrict__ uniq_type,
   const int len_map,
-  double *f12k)
+  T *f12k)
 {
   int k_idx = 0;
   for (int uj =0; uj < len_map; uj++) {
@@ -1629,7 +1642,7 @@ static __device__ __forceinline__ void scd_get_f12_4_J(
     int k_start_idx = uj * n_base_angular;   
     for(int k=0; k < n_base_angular; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
+      T tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       k_idx = k_start_idx + k;
       // 左边项 rij
       tmpr +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * (fnp * blm[15] + fn * dblm_r[15]) + 
@@ -1686,26 +1699,27 @@ static __device__ __forceinline__ void scd_get_f12_4_J(
   }
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_accumulate_f12(
   const int n,
-  const double d12,
-  const double* r12,
-  double fn,
-  double fnp,
-  const double* Fp,// dEi/dq
-  const double* dsnlm_dc, // dsnlm/dc 与Nmax无关
-  const double* sum_fxyz, //[i, n, 24]
-  double* blm,
-  double* rij_blm,
-  double* dblm_x,
-  double* dblm_y,
-  double* dblm_z,
-  double* dblm_r,
-  double* f12,//rij坐标的导数
-  double* f12k,// rij坐标的导数，以nbase3b展开
-  double* scd_r12,//对坐标的二阶导
-  double* fn12,// fk
-  double* fnp12,// fk对rij的导
+  const T d12,
+  const T* r12,
+  T fn,
+  T fnp,
+  const T* Fp,// dEi/dq
+  const T* dsnlm_dc, // dsnlm/dc 与Nmax无关
+  const T* sum_fxyz, //[i, n, 24]
+  T* blm,
+  T* rij_blm,
+  T* dblm_x,
+  T* dblm_y,
+  T* dblm_z,
+  T* dblm_r,
+  T* f12,//rij坐标的导数
+  T* f12k,// rij坐标的导数，以nbase3b展开
+  T* scd_r12,//对坐标的二阶导
+  T* fn12,// fk
+  T* fnp12,// fk对rij的导
   const int type_j,//邻居类型
   const int ntypes,
   const int lmax_3,
@@ -1720,13 +1734,13 @@ static __device__ __forceinline__ void scd_accumulate_f12(
   const int len_map
 ) // i-> [ntype, nmax, nbase]-> [ntyp, ]
 {
-  const double d12inv = 1.0 / d12;
+  const T d12inv = 1.0 / d12;
   // l = 1
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
-  double rij_Lsq = d12inv;
-  double rij_L2sq= d12inv  * d12inv;
-  double s1[3] = {
+  T rij_Lsq = d12inv;
+  T rij_L2sq= d12inv  * d12inv;
+  T s1[3] = {
     sum_fxyz[n * NUM_OF_ABC + 0] * C3B[0],
     sum_fxyz[n * NUM_OF_ABC + 1] * C3B[1],
     sum_fxyz[n * NUM_OF_ABC + 2] * C3B[2]};
@@ -1747,7 +1761,7 @@ static __device__ __forceinline__ void scd_accumulate_f12(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s2[5] = {
+  T s2[5] = {
     sum_fxyz[n * NUM_OF_ABC + 3] * C3B[3],
     sum_fxyz[n * NUM_OF_ABC + 4] * C3B[4],
     sum_fxyz[n * NUM_OF_ABC + 5] * C3B[5],
@@ -1771,7 +1785,7 @@ static __device__ __forceinline__ void scd_accumulate_f12(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;  
-  double s3[7] = {
+  T s3[7] = {
     sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
     sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
     sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
@@ -1796,7 +1810,7 @@ static __device__ __forceinline__ void scd_accumulate_f12(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s4[9] = {
+  T s4[9] = {
     sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
     sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
     sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],
@@ -1820,26 +1834,27 @@ static __device__ __forceinline__ void scd_accumulate_f12(
 
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_accumulate_f12_with_4body(
   const int n,
-  const double d12,
-  const double* r12,
-  double fn,
-  double fnp,
-  const double* Fp,
-  const double* dsnlm_dc, // dsnlm/dc 与Nmax无关
-  const double* sum_fxyz,
-  double* blm,
-  double* rij_blm,
-  double* dblm_x,
-  double* dblm_y,
-  double* dblm_z,
-  double* dblm_r,
-  double* f12,//rij坐标的导数
-  double* f12k,// rij坐标的导数，以nbase3b展开
-  double* scd_r12,//对坐标的二阶导
-  double* fn12,
-  double* fnp12,
+  const T d12,
+  const T* r12,
+  T fn,
+  T fnp,
+  const T* Fp,
+  const T* dsnlm_dc, // dsnlm/dc 与Nmax无关
+  const T* sum_fxyz,
+  T* blm,
+  T* rij_blm,
+  T* dblm_x,
+  T* dblm_y,
+  T* dblm_z,
+  T* dblm_r,
+  T* f12,//rij坐标的导数
+  T* f12k,// rij坐标的导数，以nbase3b展开
+  T* scd_r12,//对坐标的二阶导
+  T* fn12,
+  T* fnp12,
   const int type_j,
   const int ntypes,
   const int lmax_3,
@@ -1853,13 +1868,13 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_4body(
   const int* __restrict__ uniq_type,
   const int len_map)
 {
-  const double d12inv = 1.0 / d12;
-  double rij_Lsq = d12inv;
-  double rij_L2sq= d12inv  * d12inv;
+  const T d12inv = 1.0 / d12;
+  T rij_Lsq = d12inv;
+  T rij_L2sq= d12inv  * d12inv;
   // l = 1
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
-  double s1[3] = {
+  T s1[3] = {
     sum_fxyz[n * NUM_OF_ABC + 0] * C3B[0],
     sum_fxyz[n * NUM_OF_ABC + 1] * C3B[1],
     sum_fxyz[n * NUM_OF_ABC + 2] * C3B[2]};
@@ -1880,7 +1895,7 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_4body(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s2[5] = {
+  T s2[5] = {
     sum_fxyz[n * NUM_OF_ABC + 3],
     sum_fxyz[n * NUM_OF_ABC + 4],
     sum_fxyz[n * NUM_OF_ABC + 5],
@@ -1920,7 +1935,7 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_4body(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;  
-  double s3[7] = {
+  T s3[7] = {
     sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
     sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
     sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
@@ -1945,7 +1960,7 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_4body(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s4[9] = {
+  T s4[9] = {
     sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
     sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
     sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],
@@ -1968,26 +1983,27 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_4body(
                 n_max_angular, n_base_angular, dsnlm_start_idx, type_j, ntypes, n1, n2, uniq_type, len_map, f12k);
 }
 
+template <typename T>
 static __device__ __forceinline__ void scd_accumulate_f12_with_5body(
   const int n,
-  const double d12,
-  const double* r12,
-  double fn,
-  double fnp,
-  const double* Fp,
-  const double* dsnlm_dc, // dsnlm/dc 与Nmax无关
-  const double* sum_fxyz,
-  double* blm,
-  double* rij_blm,
-  double* dblm_x,
-  double* dblm_y,
-  double* dblm_z,
-  double* dblm_r,
-  double* f12,//rij坐标的导数
-  double* f12k,// rij坐标的导数，以nbase3b展开
-  double* scd_r12,//对坐标的二阶导
-  double* fn12,
-  double* fnp12,
+  const T d12,
+  const T* r12,
+  T fn,
+  T fnp,
+  const T* Fp,
+  const T* dsnlm_dc, // dsnlm/dc 与Nmax无关
+  const T* sum_fxyz,
+  T* blm,
+  T* rij_blm,
+  T* dblm_x,
+  T* dblm_y,
+  T* dblm_z,
+  T* dblm_r,
+  T* f12,//rij坐标的导数
+  T* f12k,// rij坐标的导数，以nbase3b展开
+  T* scd_r12,//对坐标的二阶导
+  T* fn12,
+  T* fnp12,
   const int type_j,
   const int ntypes,
   const int lmax_3,
@@ -2001,13 +2017,13 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_5body(
   const int* __restrict__ uniq_type,
   const int len_map)
 {
-  const double d12inv = 1.0 / d12;
-  double rij_Lsq = d12inv;
-  double rij_L2sq= d12inv  * d12inv;
+  const T d12inv = 1.0 / d12;
+  T rij_Lsq = d12inv;
+  T rij_L2sq= d12inv  * d12inv;
   // l = 1
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
-  double s1[3] = {
+  T s1[3] = {
     sum_fxyz[n * NUM_OF_ABC + 0], sum_fxyz[n * NUM_OF_ABC + 1], sum_fxyz[n * NUM_OF_ABC + 2]};
   scd_get_f12_5body(fn12, fnp12, 
               blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
@@ -2041,7 +2057,7 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_5body(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s2[5] = {
+  T s2[5] = {
     sum_fxyz[n * NUM_OF_ABC + 3],
     sum_fxyz[n * NUM_OF_ABC + 4],
     sum_fxyz[n * NUM_OF_ABC + 5],
@@ -2081,7 +2097,7 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_5body(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s3[7] = {
+  T s3[7] = {
     sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
     sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
     sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
@@ -2106,7 +2122,7 @@ static __device__ __forceinline__ void scd_accumulate_f12_with_5body(
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s4[9] = {
+  T s4[9] = {
     sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
     sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
     sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],

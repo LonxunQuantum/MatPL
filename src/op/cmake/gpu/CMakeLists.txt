@@ -39,6 +39,8 @@ target_include_directories(CalcOps_cuda PRIVATE
 # 设置CUDA架构属性
 set_target_properties(CalcOps_cuda PROPERTIES
     CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90"
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
 )
 

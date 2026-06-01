@@ -4,18 +4,19 @@
 #include "./utilities/nep_feature.cuh"
 #include <iostream>
 
+template <typename T>
 void launch_calculate_nepmbfeat_grad(
-            const double * grad_output,
-            const double * coeff3, 
-            const double * r12,
+            const T * grad_output,
+            const T * coeff3, 
+            const T * r12,
             const int64_t * NL, 
             const int64_t * atom_map, 
-            double * sum_fxyz,
-            double * grad_coeff3, 
-            double * grad_d12_3b,
-            double * dsnlm_dc, // dsnlm/dc_NK_IJ used in second grad mb c
-            double * dfeat_drij,
-            const int rcut_angular,
+            T * sum_fxyz,
+            T * grad_coeff3, 
+            T * grad_d12_3b,
+            T * dsnlm_dc, // dsnlm/dc_NK_IJ used in second grad mb c
+            T * dfeat_drij,
+            const T rcut_angular,
             const int atom_nums, 
             const int neigh_num, 
             const int feat_2b_num, 
@@ -30,7 +31,7 @@ void launch_calculate_nepmbfeat_grad(
     cudaSetDevice(device_id);
     const int N = atom_nums; // N = natoms * batch_size
     const int num_types_sq = n_types * n_types;
-    double rcinv_angular = 1.0 / rcut_angular;
+    T rcinv_angular = 1.0 / rcut_angular;
     
     int feat_3b_num = 0;
     if (lmax_3 > 0) feat_3b_num += n_max_3b * lmax_3;
@@ -40,7 +41,7 @@ void launch_calculate_nepmbfeat_grad(
     // 计算共享内存大小
     const int Fp_size = MAX_DIM_ANGULAR;
     const int sum_fxyz_size = n_max_3b * NUM_OF_ABC;
-    size_t shared_mem_size = Fp_size * sizeof(double) + sum_fxyz_size * sizeof(double);
+    size_t shared_mem_size = Fp_size * sizeof(T) + sum_fxyz_size * sizeof(T);
     // 对齐到256字节边界
     shared_mem_size = (shared_mem_size + 255) & ~255;
     int maxneighs = neigh_num;
@@ -54,11 +55,11 @@ void launch_calculate_nepmbfeat_grad(
         threads_per_block = ((maxneighs + 31) / 32) * 32;
     }
     // printf("nepmbfeat_grad dfeat_c3 N * n_types * n_max_3b * n_base_3b=%d %d %d %d\n", N, n_types, n_max_3b, n_base_3b);
-    GPU_Vector<double> dfeat_c3(N * n_types * n_max_3b * n_base_3b, 0.0);
+    GPU_Vector<T> dfeat_c3(N * n_types * n_max_3b * n_base_3b, 0.0);
     // const int BLOCK_SIZE = 64;
     const int grid_size = N; // 每个block处理一个中心原子
     // find_angular_gard<<<grid_size, BLOCK_SIZE>>>(
-    find_angular_gard<<<grid_size, threads_per_block, shared_mem_size>>>(
+    find_angular_gard<T><<<grid_size, threads_per_block, shared_mem_size>>>(
         N,
         n_types,
         num_types_sq,
@@ -126,7 +127,7 @@ void launch_calculate_nepmbfeat_grad(
     int total_elements = N * n_max_3b * n_base_3b;
     threads_per_block = 256;
     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    aggregate_features<<<num_blocks, threads_per_block>>>(
+    aggregate_features<T><<<num_blocks, threads_per_block>>>(
     dfeat_c3.data(), 
     atom_map, 
     grad_coeff3, 
@@ -175,7 +176,7 @@ void launch_calculate_nepmbfeat_grad(
 //             double * grad_d12_3b,
 //             double * dsnlm_dc, // dsnlm/dc_NK_IJ used in second grad mb c
 //             double * dfeat_drij,
-//             const int rcut_angular,
+//             const double rcut_angular,
 //             const int atom_nums, 
 //             const int neigh_num, 
 //             const int feat_2b_num, 
@@ -275,7 +276,7 @@ void launch_calculate_nepmbfeat_grad(
 //     int total_elements = atom_nums * n_max_3b * n_base_3b;
 //     int threads_per_block = 256;
 //     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-//     aggregate_features<<<num_blocks, threads_per_block>>>(
+//     aggregate_features<T><<<num_blocks, threads_per_block>>>(
 //     dfeat_c3.data(), 
 //     atom_map, 
 //     grad_coeff3, 
@@ -301,7 +302,7 @@ void launch_calculate_nepmbfeat_grad(
 //             double * grad_d12_3b,
 //             double * dsnlm_dc, // dsnlm/dc_NK_IJ used in second grad mb c
 //             double * dfeat_drij,
-//             const int rcut_angular,
+//             const double rcut_angular,
 //             const int atom_nums, 
 //             const int neigh_num, 
 //             const int feat_2b_num, 
@@ -412,7 +413,7 @@ void launch_calculate_nepmbfeat_grad(
 //     int total_elements = N * n_max_3b * n_base_3b;
 //     threads_per_block = 256;
 //     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-//     aggregate_features<<<num_blocks, threads_per_block>>>(
+//     aggregate_features<T><<<num_blocks, threads_per_block>>>(
 //     dfeat_c3.data(), 
 //     atom_map, 
 //     grad_coeff3, 
@@ -424,3 +425,15 @@ void launch_calculate_nepmbfeat_grad(
 //     // print_grad_coeff3(grad_coeff3, n_types, n_max_3b, n_base_3b);
 
 // }
+// Explicit instantiations
+template void launch_calculate_nepmbfeat_grad<double>(
+    const double*, const double*, const double*, const int64_t*, const int64_t*,
+    double*, double*, double*, double*, double*,
+    const double, const int, const int, const int, const int, const int,
+    const int, const int, const int, const int, const int);
+template void launch_calculate_nepmbfeat_grad<float>(
+    const float*, const float*, const float*, const int64_t*, const int64_t*,
+    float*, float*, float*, float*, float*,
+    const float, const int, const int, const int, const int, const int,
+    const int, const int, const int, const int, const int);
+

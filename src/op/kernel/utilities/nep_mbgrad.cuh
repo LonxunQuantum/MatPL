@@ -21,22 +21,23 @@ __global__ void buildTypeMapKernel(
     }
 }
 
+template <typename T>
 static __global__ void find_angular_gardc_neigh(
   const int N,
-  const double* grad_second,
-  const double* g_d12,
+  const T* grad_second,
+  const T* g_d12,
   const int64_t* g_NL,
-  const double* de_dfeat,
-  const double* dsnlm_dc, //[i, J, nbase, 24]
-  const double* g_sum_fxyz,
+  const T* de_dfeat,
+  const T* dsnlm_dc, //[i, J, nbase, 24]
+  const T* g_sum_fxyz,
   const int64_t* g_type,
   const int* __restrict__ uniq_map,  // the map of atom type(unique) type-> index
   const int* __restrict__ uniq_type, // index -> type
   const int len_map,    // the len of the atom type map(unique)
-  const double * coeff3,
-  double * dfeat_c3,
-  const double rc_angular,
-  const double rcinv_angular,
+  const T * coeff3,
+  T * dfeat_c3,
+  const T rc_angular,
+  const T rcinv_angular,
   const int atom_nums,
   const int neigh_num,
   const int max_3b,
@@ -61,8 +62,8 @@ static __global__ void find_angular_gardc_neigh(
   
   int* s_uniq_map = (int*)shared_mem_raw;
   int* s_uniq_type = s_uniq_map + uniq_map_size;
-  double* s_Fp = (double*)(s_uniq_type + uniq_type_size);
-  double* s_sum_fxyz = s_Fp + Fp_size;
+  T* s_Fp = (T*)(s_uniq_type + uniq_type_size);
+  T* s_sum_fxyz = s_Fp + Fp_size;
   
   int tid = threadIdx.x;
   int n1 = blockIdx.x;
@@ -134,37 +135,37 @@ static __global__ void find_angular_gardc_neigh(
   int dsnlm_start_idx = n1 * num_types * base_3b * NUM_OF_ABC;
   
   // 线程私有变量
-  double fn12[MAX_NUM_N];
-  double fnp12[MAX_NUM_N];
+  T fn12[MAX_NUM_N];
+  T fnp12[MAX_NUM_N];
   
   int rij_idx = r12_start_idx + i1 * 4;
-  double d12 = g_d12[rij_idx];
+  T d12 = g_d12[rij_idx];
   if (d12 > rc_angular) return;
   
-  double r12[3] = {g_d12[rij_idx+1], g_d12[rij_idx+2], g_d12[rij_idx+3]};
-  double scd_r12[4] = {grad_second[rij_idx], grad_second[rij_idx+1], 
+  T r12[3] = {g_d12[rij_idx+1], g_d12[rij_idx+2], g_d12[rij_idx+3]};
+  T scd_r12[4] = {grad_second[rij_idx], grad_second[rij_idx+1], 
                        grad_second[rij_idx+2], grad_second[rij_idx+3]};
-  double f12[4] = {0.0};
-  double fc12, fcp12;
+  T f12[4] = {0.0};
+  T fc12, fcp12;
   find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
   find_fn_and_fnp(base_3b, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
   
   int c_I_J_idx = t1 * num_types * max_3b * base_3b + t2 * max_3b * base_3b;
   
-  double blm[NUM_OF_ABC] = {0.0};
-  double rij_blm[NUM_OF_ABC] = {0.0};
-  double dblm_x[NUM_OF_ABC] = {0.0};
-  double dblm_y[NUM_OF_ABC] = {0.0};
-  double dblm_z[NUM_OF_ABC] = {0.0};
-  double dblm_r[NUM_OF_ABC] = {0.0};
+  T blm[NUM_OF_ABC] = {0.0};
+  T rij_blm[NUM_OF_ABC] = {0.0};
+  T dblm_x[NUM_OF_ABC] = {0.0};
+  T dblm_y[NUM_OF_ABC] = {0.0};
+  T dblm_z[NUM_OF_ABC] = {0.0};
+  T dblm_r[NUM_OF_ABC] = {0.0};
   
   scd_accumulate_blm_rij(d12, r12[0], r12[1], r12[2], 
       blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r);
   
   // 为每个n计算并处理
   for (int n = 0; n < max_3b; ++n) {
-    double gn12 = 0.0;
-    double gnp12 = 0.0;
+    T gn12 = 0.0;
+    T gnp12 = 0.0;
     
     for (int k = 0; k < base_3b; ++k) {
       int c_index = c_I_J_idx + n * base_3b + k;
@@ -172,7 +173,7 @@ static __global__ void find_angular_gardc_neigh(
       gnp12 += fnp12[k] * coeff3[c_index];
     }
     
-    double* f12k = dfeat_c3 + (dc_c3_start + n * len_map * base_3b);
+    T* f12k = dfeat_c3 + (dc_c3_start + n * len_map * base_3b);
     
     // 使用共享内存中的Fp和sum_fxyz
     if (L_max5 > 0) {
@@ -200,22 +201,23 @@ static __global__ void find_angular_gardc_neigh(
   }
 }
 
+template <typename T>
 static __global__ void find_angular_gardc_neigh_bk(
   const int N,
-  const double* grad_second,
-  const double* g_d12,
+  const T* grad_second,
+  const T* g_d12,
   const int64_t* g_NL,
-  const double* de_dfeat,
-  const double* dsnlm_dc, //[i, J, nbase, 24]
-  const double* g_sum_fxyz,
+  const T* de_dfeat,
+  const T* dsnlm_dc, //[i, J, nbase, 24]
+  const T* g_sum_fxyz,
   const int64_t* g_type,
   const int* __restrict__ uniq_map,  // the map of atom type(unique) type-> index
   const int* __restrict__ uniq_type, // index -> type
   const int len_map,    // the len of the atom type map(unique)
-  const double * coeff3,
-  double * dfeat_c3,
-  const double rc_angular,
-  const double rcinv_angular,
+  const T * coeff3,
+  T * dfeat_c3,
+  const T rc_angular,
+  const T rcinv_angular,
   const int atom_nums,
   const int neigh_num,
   const int max_3b,
@@ -264,8 +266,8 @@ static __global__ void find_angular_gardc_neigh_bk(
   int de_start = n1 * (feat_3b_nums + feat_2b_nums);// dE/dq
   int dsnlm_start_idx = n1 * num_types * base_3b * NUM_OF_ABC;
   
-  double Fp[MAX_DIM_ANGULAR] = {0.0};
-  double sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
+  T Fp[MAX_DIM_ANGULAR] = {0.0};
+  T sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
   int b3_nums = max_3b * L_max3;
   int dd = 0;
 
@@ -310,39 +312,39 @@ static __global__ void find_angular_gardc_neigh_bk(
 
   int rij_idx = r12_start_idx + i1*4;
   // int dsnlm_idx = dsnlm_start_idx + t2 * base_3b * NUM_OF_ABC;
-  double d12 = g_d12[rij_idx];
+  T d12 = g_d12[rij_idx];
   if (d12 > rc_angular) return;
-  double r12[3] = {g_d12[rij_idx+1], g_d12[rij_idx+2], g_d12[rij_idx+3]};
-  double scd_r12[4] = {grad_second[rij_idx],grad_second[rij_idx+1],grad_second[rij_idx+2],grad_second[rij_idx+3]};// [r x y z]
-  double f12[4] = {0.0};
-  double fc12, fcp12;
+  T r12[3] = {g_d12[rij_idx+1], g_d12[rij_idx+2], g_d12[rij_idx+3]};
+  T scd_r12[4] = {grad_second[rij_idx],grad_second[rij_idx+1],grad_second[rij_idx+2],grad_second[rij_idx+3]};// [r x y z]
+  T f12[4] = {0.0};
+  T fc12, fcp12;
   find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
 
-  double fn12[MAX_NUM_N];
-  double fnp12[MAX_NUM_N];
+  T fn12[MAX_NUM_N];
+  T fnp12[MAX_NUM_N];
   find_fn_and_fnp(
     base_3b, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
   
   int c_I_J_idx = c3_start_idx + t2 * max_3b * base_3b;
-  // double s[NUM_OF_ABC*6] = {0.0}; //[sij/(rij_^L), blm, blm/drij, blm/dx, blm/dy, blm/dz]
-  double blm[NUM_OF_ABC] = {0.0};
-  double rij_blm[NUM_OF_ABC]= {0.0};
-  double dblm_x[NUM_OF_ABC] = {0.0};
-  double dblm_y[NUM_OF_ABC] = {0.0};
-  double dblm_z[NUM_OF_ABC] = {0.0};
-  double dblm_r[NUM_OF_ABC] = {0.0};
+  // double s[NUM_OF_ABC*6] = {0.0}; 
+  T blm[NUM_OF_ABC] = {0.0};
+  T rij_blm[NUM_OF_ABC]= {0.0};
+  T dblm_x[NUM_OF_ABC] = {0.0};
+  T dblm_y[NUM_OF_ABC] = {0.0};
+  T dblm_z[NUM_OF_ABC] = {0.0};
+  T dblm_r[NUM_OF_ABC] = {0.0};
   scd_accumulate_blm_rij(d12, r12[0], r12[1], r12[2], 
       blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r);
   for (int n = 0; n < max_3b; ++n) {
-    double gn12 = 0.0;
-    double gnp12 = 0.0;
+    T gn12 = 0.0;
+    T gnp12 = 0.0;
     for (int k = 0; k < base_3b; ++k) {
       int c_index = c_I_J_idx + n * base_3b + k;
       gn12 += fn12[k] * coeff3[c_index];
       gnp12 += fnp12[k] * coeff3[c_index];
     }
 
-    double* f12k = dfeat_c3 + (dc_c3_start + n * len_map * base_3b);
+    T* f12k = dfeat_c3 + (dc_c3_start + n * len_map * base_3b);
     if (L_max5 > 0) {
       scd_accumulate_f12_with_5body(
         n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
@@ -369,22 +371,22 @@ static __global__ void find_angular_gardc_neigh_bk(
     // for (int j = 0; j < num_types; ++j){
     //   if (uniq_map[j] == -1) {
     //     continue;
-    //     // for (int k = 0; k < base_3b; ++k){
-    //     //   int k_id = j * base_3b * 4 + k * 4;
-    //     //   printf("type=-1, [%d > 0] %f %f %f %f\n",\
-    //     //     (f12k[k_id]+f12k[k_id+1]+f12k[k_id+2]+f12k[k_id+3]) > 0,\
-    //     //         f12k[k_id], f12k[k_id+1], f12k[k_id+2], f12k[k_id+3]);
-    //     // }
+    //     
+    //     
+    //     
+    //     
+    //     
+    //     
     //   } else {
     //     for (int k = 0; k < base_3b; ++k){
-    //       // int dc_id = dc_start_idx + j * max_3b * base_3b + n*base_3b + k;
+    //       
     //       int dc_id = dc_c3_start + uniq_map[j] * max_3b * base_3b + n*base_3b + k;
     //       int k_id = j * base_3b * 4 + k * 4;
-    //       dfeat_c3[dc_id] += f12k[k_id]; //(f12k[k_id] + f12k[k_id+1] + f12k[k_id+2] + f12k[k_id+3]);
-    //     // if (n1 == 0 && i1==15){
-    //     //   printf("n1=%d t1=%d i1=%d n2=%d t2=%d n=%d j=%d k=%d dc=%f frxyz %f\n",n1, t1, i1, n2, t2, n, j, k, 
-    //     //     dfeat_c3[dc_id], f12k[k_id]);
-    //     //   }
+    //       dfeat_c3[dc_id] += f12k[k_id]; 
+    //     
+    //     
+    //     
+    //     
     //     }
     //   }
     // }
@@ -394,11 +396,12 @@ static __global__ void find_angular_gardc_neigh_bk(
 }
 
 
+template <typename T>
 static __global__ void aggregate_dfeat_c3(
   const int64_t* g_NL,
   const int64_t* g_type,
-  const double* dfeat_c3,
-  double* tmp_dfeat_c3,
+  const T* dfeat_c3,
+  T* tmp_dfeat_c3,
   const int* unique_types,
   const int len_map,  // the len of the atom type map(unique)
   const int N,

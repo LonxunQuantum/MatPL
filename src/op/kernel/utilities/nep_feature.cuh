@@ -16,10 +16,11 @@ static __device__ __inline__ double atomicAdd(double* address, double val)
 #endif
 
 //后面删除了nepmb的代码之后，将这部分移动到mbnepgrad下面
+template <typename T>
 static __global__ void aggregate_features(
-    double* dfeat_c2,     // 输入张量，维度 [N, n_types, n_max_2b, n_base_2b]
+    T* dfeat_c2,     // 输入张量，维度 [N, n_types, n_max_2b, n_base_2b]
     const int64_t* atom_map,       // 原子类型映射，维度 [N]
-    double* output,             // 输出张量，维度 [n_types, n_types, n_max_2b, n_base_2b]
+    T* output,             // 输出张量，维度 [n_types, n_types, n_max_2b, n_base_2b]
     int N,                     // 中心原子数量
     int n_types,
     int n_max_2b,
@@ -49,6 +50,7 @@ static __global__ void aggregate_features(
     }
 }
 
+template <typename T>
 static __global__ void find_mb_descriptor(
   const int N,
   const int num_types,
@@ -58,23 +60,23 @@ static __global__ void find_mb_descriptor(
   const int L_max4,
   const int L_max5,
   const int feat_nums,
-  const double rc_angular,
-  const double rcinv_angular,
+  const T rc_angular,
+  const T rcinv_angular,
   const int n_max_angular,
   const int basis_size_angular,
   const int64_t* g_NL,
-  const double * coeff3,
-  double * feats,
+  const T * coeff3,
+  T * feats,
   const int64_t* g_type,
-  const double* g_d12_radial,
-  double* g_sum_fxyz)
+  const T* g_d12_radial,
+  T* g_sum_fxyz)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int t1 = g_type[n1];
     // double q[MAX_DIM] = {static_cast<double>(0.0)};
     // get radial descriptors
-    double q[MAX_DIM] = {0.0};
+    T q[MAX_DIM] = {0.0};
     int neigh_start_idx = n1 * neigh_num;
     int r12_start_idx =  n1 * neigh_num * 4;
     int feat_start_idx = n1 * feat_nums; 
@@ -82,20 +84,20 @@ static __global__ void find_mb_descriptor(
     int c3_start_idx = t1 * num_types * n_max_angular * basis_size_angular;
     int sum_s_start_idx = n1 * n_max_angular * NUM_OF_ABC;
     for (int n = 0; n < n_max_angular; ++n) {
-      double s[NUM_OF_ABC] = {0.0};
+      T s[NUM_OF_ABC] = {0.0};
       for (int i1 = 0; i1 < neigh_num; ++i1) {
         int n2 = g_NL[neigh_start_idx + i1];
         if (n2 < 0) break;
         int t2 = g_type[n2];
         int rij_idx = r12_start_idx + i1*4;
-        double d12 = g_d12_radial[rij_idx];
+        T d12 = g_d12_radial[rij_idx];
         if (d12 > rc_angular) break;
-        double r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
-        double fc12;
+        T r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
+        T fc12;
         find_fc(rc_angular, rcinv_angular, d12, fc12);
-        double fn12[MAX_NUM_N];
+        T fn12[MAX_NUM_N];
         find_fn(basis_size_angular, rcinv_angular, d12, fc12, fn12);
-        double gn12 = 0.0;
+        T gn12 = 0.0;
         int c_I_J_idx = c3_start_idx + t2 * n_max_angular * basis_size_angular;
         for (int k = 0; k < basis_size_angular; ++k) {
           int c_index = c_I_J_idx + n * basis_size_angular + k;
@@ -130,6 +132,7 @@ static __global__ void find_mb_descriptor(
 }
 
 
+template <typename T>
 static __global__ void find_descriptor(
   const int N,
   const int num_types,
@@ -139,27 +142,27 @@ static __global__ void find_descriptor(
   const int L_max4,
   const int L_max5,
   const int feat_nums,
-  const double rc_radial,
-  const double rcinv_radial,
-  const double rc_angular,
-  const double rcinv_angular,
+  const T rc_radial,
+  const T rcinv_radial,
+  const T rc_angular,
+  const T rcinv_angular,
   const int n_max_radial,
   const int basis_size_radial,
   const int n_max_angular,
   const int basis_size_angular,
   const int64_t* g_NL_radial,
-  const double * coeff2,
-  const double * coeff3,
-  double * feats,
+  const T * coeff2,
+  const T * coeff3,
+  T * feats,
   const int64_t* g_type,
-  const double* g_d12_radial)
+  const T* g_d12_radial)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int t1 = g_type[n1];
     // double q[MAX_DIM] = {static_cast<double>(0.0)};
     // get radial descriptors
-    double q[MAX_DIM] = {0.0};
+    T q[MAX_DIM] = {0.0};
     int neigh_start_idx = n1 * neigh_num;
     int r12_start_idx =  n1 * neigh_num * 3;
     int feat_start_idx = n1 * feat_nums; 
@@ -170,16 +173,16 @@ static __global__ void find_descriptor(
       int t2 = g_type[n2];
       int c_I_J_idx = c2_start_idx + t2 * n_max_radial * basis_size_radial;
       int rij_idx = r12_start_idx + i1*3;
-      double r12[3] = {g_d12_radial[rij_idx], g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2]};
-      double d12    = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
-      double fc12;
+      T r12[3] = {g_d12_radial[rij_idx], g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2]};
+      T d12    = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+      T fc12;
       find_fc(rc_radial, rcinv_radial, d12, fc12);
       
-      double fn12[MAX_NUM_N];
+      T fn12[MAX_NUM_N];
 
       find_fn(basis_size_radial, rcinv_radial, d12, fc12, fn12);
       for (int n = 0; n < n_max_radial; ++n) {
-        double gn12 = 0.0;
+        T gn12 = 0.0;
         for (int k = 0; k < basis_size_radial; ++k) {
           int c_index = c_I_J_idx + n * basis_size_radial + k;
           gn12 += fn12[k] * coeff2[c_index];
@@ -192,20 +195,20 @@ static __global__ void find_descriptor(
     // get angular descriptors
     int c3_start_idx = t1 * num_types * n_max_angular * basis_size_angular;
     for (int n = 0; n < n_max_angular; ++n) {
-      double s[NUM_OF_ABC] = {0.0};
+      T s[NUM_OF_ABC] = {0.0};
       for (int i1 = 0; i1 < neigh_num; ++i1) {
         int n2 = g_NL_radial[neigh_start_idx + i1];
         if (n2 < 0) continue;
         int t2 = g_type[n2];
         int rij_idx = r12_start_idx + i1*3;
-        double r12[3] = {g_d12_radial[rij_idx], g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2]};
-        double d12    = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+        T r12[3] = {g_d12_radial[rij_idx], g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2]};
+        T d12    = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
         if (d12 > rc_angular) continue;
-        double fc12;
+        T fc12;
         find_fc(rc_angular, rcinv_angular, d12, fc12);
-        double fn12[MAX_NUM_N];
+        T fn12[MAX_NUM_N];
         find_fn(basis_size_angular, rcinv_angular, d12, fc12, fn12);
-        double gn12 = 0.0;
+        T gn12 = 0.0;
         int c_I_J_idx = c3_start_idx + t2 * n_max_angular * basis_size_angular;
         for (int k = 0; k < basis_size_angular; ++k) {
           int c_index = c_I_J_idx + n * basis_size_angular + k;
@@ -474,6 +477,7 @@ static __global__ void find_descriptor(
 // }
 
 // 线程块对应中心原子，每个线程处理相应的近邻，多了atomicadd操作，但是整体速度有提升，并行度更高了
+template <typename T>
 static __global__ void find_angular_gard(
   const int N,
   const int num_types,
@@ -484,20 +488,20 @@ static __global__ void find_angular_gard(
   const int L_max5,
   const int feat_2b_nums,
   const int feat_3b_nums,
-  const double rc_angular,
-  const double rcinv_angular,
+  const T rc_angular,
+  const T rcinv_angular,
   const int n_max_angular,
   const int basis_size_angular,
   const int64_t* g_NL_radial,
-  const double* g_d12_radial,
-  const double * coeff3,
+  const T* g_d12_radial,
+  const T * coeff3,
   const int64_t* g_type,
-  const double * grad_output,
-  const double* g_sum_fxyz,
-  double* dsnlm_dc,
-  double* dfeat_c3,
-  double* dfeat_drij,
-  double* grad_d12_angular
+  const T * grad_output,
+  const T* g_sum_fxyz,
+  T* dsnlm_dc,
+  T* dfeat_c3,
+  T* dfeat_drij,
+  T* grad_d12_angular
   )
 {
   // 共享内存：每个线程块（一个中心原子）共享Fp和sum_fxyz
@@ -505,8 +509,8 @@ static __global__ void find_angular_gard(
   const int sum_fxyz_size = n_max_angular * NUM_OF_ABC;
   // 共享内存布局
   extern __shared__ char shared_mem_raw[];
-  double* s_Fp = (double*)shared_mem_raw;
-  double* s_sum_fxyz = s_Fp + Fp_size;
+  T* s_Fp = (T*)shared_mem_raw;
+  T* s_sum_fxyz = s_Fp + Fp_size;
 
   int tid = threadIdx.x; // 线程ID
   int n1 = blockIdx.x;  // 每个block处理一个中心原子
@@ -569,23 +573,23 @@ static __global__ void find_angular_gard(
   // 计算各个起始索引
   int r12_start_idx = n1 * neigh_num * 4;
   int rij_idx = r12_start_idx + i1 * 4;
-  double d12 = g_d12_radial[rij_idx];
+  T d12 = g_d12_radial[rij_idx];
   int dc_start_idx = n1 * num_types * n_max_angular * basis_size_angular;
   if (d12 > rc_angular) return;
   
-  double r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
-  double f12[4] = {0.0};
+  T r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
+  T f12[4] = {0.0};
   
   // 计算径向函数
-  double fc12, fcp12;
+  T fc12, fcp12;
   find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
   
-  double fn12[MAX_NUM_N];
-  double fnp12[MAX_NUM_N];
+  T fn12[MAX_NUM_N];
+  T fnp12[MAX_NUM_N];
   find_fn_and_fnp(basis_size_angular, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
   
   // 计算球谐函数相关项
-  double s[NUM_OF_ABC] = {0.0};
+  T s[NUM_OF_ABC] = {0.0};
   accumulate_blm_rij(d12, r12[0], r12[1], r12[2], s);
   
   int c3_start_idx = t1 * num_types * n_max_angular * basis_size_angular;
@@ -594,8 +598,8 @@ static __global__ void find_angular_gard(
   
   // 遍历所有n
   for (int n = 0; n < n_max_angular; ++n) {
-    double gn12 = 0.0;
-    double gnp12 = 0.0;
+    T gn12 = 0.0;
+    T gnp12 = 0.0;
     
     // 计算gn12和gnp12
     for (int k = 0; k < basis_size_angular; ++k) {
@@ -604,8 +608,8 @@ static __global__ void find_angular_gard(
       gnp12 += fnp12[k] * coeff3[c_index];
     }
     
-    double f12d[MAX_LMAX * 4] = {0.0};
-    double dfeat_c3_base[MAX_NUM_N] = {0.0}; //临时存储cfeat_c3 对应nbase下的梯度
+    T f12d[MAX_LMAX * 4] = {0.0};
+    T dfeat_c3_base[MAX_NUM_N] = {0.0}; //临时存储cfeat_c3 对应nbase下的梯度
     // 根据L_max选择不同的计算函数
     if (L_max5 > 0) {
       accumulate_f12_with_5body(
@@ -684,7 +688,7 @@ static __global__ void find_angular_gard(
       // 使用原子操作确保线程安全（多个相同类型的近邻会更新同一位置）
       for (int kk = 0; kk < basis_size_angular; kk++) {
         int dsnlm_id = dsnlm_dc_idx + kk * NUM_OF_ABC;
-        double fn_val = fn12[kk];
+        T fn_val = fn12[kk];
         
         // 使用原子加法
         atomicAdd(&dsnlm_dc[dsnlm_id + 0], s[0] * fn_val);

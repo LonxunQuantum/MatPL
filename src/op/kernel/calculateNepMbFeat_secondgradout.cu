@@ -6,10 +6,11 @@
 #include <iostream>
 #include <cuda_runtime.h>
 
+template <typename T>
 __global__ void compute_gradsecond_mbgradout(
-    const double *grad_second, // Shape: [batch_size, atom_nums, maxneighs, 4]
-    const double *dfeat_drij,    // Shape: [batch_size, atom_nums, maxneighs, feat_mb_num, 4]
-    double *gradsecond_gradout, // Shape: [batch_size, atom_nums, feat_mb_num]
+    const T *grad_second,
+    const T *dfeat_drij,
+    T *gradsecond_gradout,
     int atom_nums,
     int maxneighs,
     int feat_mb_num)
@@ -18,7 +19,7 @@ __global__ void compute_gradsecond_mbgradout(
     int feat_idx = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (atom_idx < atom_nums && feat_idx < feat_mb_num) {
-        float sum = 0.0f;
+        T sum = T(0.0);
         for (int neigh_idx = 0; neigh_idx < maxneighs; ++neigh_idx) {
             for (int dim = 0; dim < 4; ++dim) {
                 int dfeat_index = ((atom_idx * maxneighs + neigh_idx) * feat_mb_num + feat_idx) * 4 + dim;
@@ -30,10 +31,11 @@ __global__ void compute_gradsecond_mbgradout(
     }
 }
 
+template <typename T>
 void launch_calculate_nepmbfeat_secondgradout(
-    const double * grad_second,
-    const double * dfeat_b,
-    double * gradsecond_gradout,
+    const T * grad_second,
+    const T * dfeat_b,
+    T * gradsecond_gradout,
     const int atom_nums, 
     const int maxneighs, 
     const int feat_mb_nums, 
@@ -54,17 +56,18 @@ void launch_calculate_nepmbfeat_secondgradout(
     CUDA_CHECK_KERNEL
 }
 
+template <typename T>
 void launch_calculate_nepmbfeat_secondgradout_c3_bk(
-    const double * grad_second,
-    const double * d12,
+    const T * grad_second,
+    const T * d12,
     const int64_t * NL,
-    const double * de_dfeat,
-    const double * dsnlm_dc,
-    const double * sum_fxyz,
+    const T * de_dfeat,
+    const T * dsnlm_dc,
+    const T * sum_fxyz,
     const int64_t * atom_map,
-    const double * coeff3,
-    double * gradsecond_c3,
-    const double rcut_angular,
+    const T * coeff3,
+    T * gradsecond_c3,
+    const T rcut_angular,
     const int atom_nums, 
     const int maxneighs, 
     const int n_max_3b, 
@@ -78,18 +81,18 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     const int device
 ){
     cudaSetDevice(device);
-    // // 每个线程块的线程数 (这里选择 8 * 16 * 2 = 256，保证不会超过 1024)
-    double rcinv_angular = 1.0 / rcut_angular;
+    // 
+    T rcinv_angular = 1.0 / rcut_angular;
     int atom_types_sq = atom_types * atom_types;
     int total_elements = atom_nums * maxneighs;
     int threads_per_block = 256;
     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     const int N = atom_nums;
-    GPU_Vector<double> dfeat_c3; //(N * maxneighs * atom_types * n_max_3b * n_base_3b, 0.0);
+    GPU_Vector<T> dfeat_c3; //(N * maxneighs * atom_types * n_max_3b * n_base_3b, 0.0);
     GPU_Vector<int> unique_types;     // atom_map 中元素的不重复子表，顺序为它在atom_map中的顺序 例如 对于[0,1,29,4,39,1,1,1,1,1,4,29,...]这个atom_map,这里为[0,1,29,4,39], num_unique=5
     GPU_Vector<int> num_unique;
     GPU_Vector<int> unique_types_map; // 不重复子表在周期表中位置，例如这里为[0,1,-1,-1,3,-1,...,2,-1,...,4,-1,-1,...]，即它的下标[0,1,4,29,39]值分别为[0,1,3,2,4]，周期表其他位置填充-1
-    GPU_Vector<double> tmp_dfeat_c3(N * atom_types * n_max_3b * n_base_3b, 0.0);
+    GPU_Vector<T> tmp_dfeat_c3(N * atom_types * n_max_3b * n_base_3b, 0.0);
     
     int cpu_num_value = 0;
     
@@ -159,7 +162,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     //         int jd=id + j * n_max_3b * cpu_num_value * n_base_3b;
     //         for(int k=0; k < cpu_num_value;k++) {
     //             for(int h=0;h < n_max_3b; h++){
-    //                 // int kd=hd + k*n_base_3b;
+    //                 
     //                 int kd = jd + h * cpu_num_value * n_base_3b + k * n_base_3b;
     //                 printf("dfeat_c3[n%d m%d t%d mx%d]=",i,j,k,h);
     //                 for(int p=0;p<n_base_3b;p++){
@@ -210,7 +213,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     total_elements = N * n_max_3b * n_base_3b;
     threads_per_block = 256;
     num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    aggregate_features<<<num_blocks, threads_per_block>>>(
+    aggregate_features<T><<<num_blocks, threads_per_block>>>(
     tmp_dfeat_c3.data(), 
     atom_map, 
     gradsecond_c3, 
@@ -222,17 +225,18 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     cudaDeviceSynchronize();
 }
 
+template <typename T>
 void launch_calculate_nepmbfeat_secondgradout_c3(
-    const double * grad_second,
-    const double * d12,
+    const T * grad_second,
+    const T * d12,
     const int64_t * NL,
-    const double * de_dfeat,
-    const double * dsnlm_dc,
-    const double * sum_fxyz,
+    const T * de_dfeat,
+    const T * dsnlm_dc,
+    const T * sum_fxyz,
     const int64_t * atom_map,
-    const double * coeff3,
-    double * gradsecond_c3,
-    const double rcut_angular,
+    const T * coeff3,
+    T * gradsecond_c3,
+    const T rcut_angular,
     const int atom_nums, 
     const int maxneighs, 
     const int n_max_3b, 
@@ -246,7 +250,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     const int device
 ){
     cudaSetDevice(device);
-    double rcinv_angular = 1.0 / rcut_angular;
+    T rcinv_angular = 1.0 / rcut_angular;
     int atom_types_sq = atom_types * atom_types;
     // 计算共享内存大小
     const int uniq_map_size = 100;
@@ -257,8 +261,8 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     size_t shared_mem_size = 
         uniq_map_size * sizeof(int) + 
         uniq_type_size * sizeof(int) + 
-        Fp_size * sizeof(double) + 
-        sum_fxyz_size * sizeof(double);
+        Fp_size * sizeof(T) + 
+        sum_fxyz_size * sizeof(T);
     // 对齐到256字节边界
     shared_mem_size = (shared_mem_size + 255) & ~255;
     // 检查共享内存是否超过限制
@@ -280,7 +284,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     
     int cpu_num_value = 0;
 
-    GPU_Vector<double> tmp_dfeat_c3(atom_nums * atom_types * n_max_3b * n_base_3b, 0.0);
+    GPU_Vector<T> tmp_dfeat_c3(atom_nums * atom_types * n_max_3b * n_base_3b, 0.0);
     GPU_Vector<int> unique_types(100, -1);     // atom_map 中元素的不重复子表，顺序为它在atom_map中的顺序 例如 对于[0,1,29,4,39,1,1,1,1,1,4,29,...]这个atom_map,这里为[0,1,29,4,39], num_unique=5
     GPU_Vector<int> num_unique(1, 0);
     GPU_Vector<int> unique_types_map(100, -1); // 不重复子表在周期表中位置，例如这里为[0,1,-1,-1,3,-1,...,2,-1,...,4,-1,-1,...]，即它的下标[0,1,4,29,39]值分别为[0,1,3,2,4]，周期表其他位置填充-1
@@ -293,9 +297,9 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     cpu_num_value = cpu_num_unique[0];
     // printf("  cpu_num_value: %d\n", cpu_num_value);
 
-    GPU_Vector<double> dfeat_c3(atom_nums * maxneighs * n_max_3b * cpu_num_value * n_base_3b, 0.0);; //(N * maxneighs * atom_types * n_max_3b * n_base_3b, 0.0);
+    GPU_Vector<T> dfeat_c3(atom_nums * maxneighs * n_max_3b * cpu_num_value * n_base_3b, 0.0);; //(N * maxneighs * atom_types * n_max_3b * n_base_3b, 0.0);
 
-    find_angular_gardc_neigh<<<num_blocks, threads_per_block, shared_mem_size>>>(
+    find_angular_gardc_neigh<T><<<num_blocks, threads_per_block, shared_mem_size>>>(
         atom_nums * maxneighs,  // 总元素数
         grad_second,
         d12, 
@@ -336,7 +340,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     //         int jd=id + j * n_max_3b * cpu_num_value * n_base_3b;
     //         for(int k=0; k < cpu_num_value;k++) {
     //             for(int h=0;h < n_max_3b; h++){
-    //                 // int kd=hd + k*n_base_3b;
+    //                 
     //                 int kd = jd + h * cpu_num_value * n_base_3b + k * n_base_3b;
     //                 printf("dfeat_c3[n%d m%d t%d mx%d]=",i,j,k,h);
     //                 for(int p=0;p<n_base_3b;p++){
@@ -350,7 +354,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     // }
     // printf("=====res %.17lf =====\n", tmptest);
 
-    aggregate_dfeat_c3<<<(atom_nums - 1) / 64 + 1, 64>>>(
+    aggregate_dfeat_c3<T><<<(atom_nums - 1) / 64 + 1, 64>>>(
         NL,
         atom_map,
         dfeat_c3.data(),
@@ -369,7 +373,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     int total_elements = atom_nums * n_max_3b * n_base_3b;
     threads_per_block = 256;
     num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    aggregate_features<<<num_blocks, threads_per_block>>>(
+    aggregate_features<T><<<num_blocks, threads_per_block>>>(
     tmp_dfeat_c3.data(), 
     atom_map, 
     gradsecond_c3, 
@@ -380,3 +384,30 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     CUDA_CHECK_KERNEL
     cudaDeviceSynchronize();
 }
+// Explicit instantiations
+template void launch_calculate_nepmbfeat_secondgradout<double>(
+    const double*, const double*, double*, const int, const int, const int, const int);
+template void launch_calculate_nepmbfeat_secondgradout<float>(
+    const float*, const float*, float*, const int, const int, const int, const int);
+
+template void launch_calculate_nepmbfeat_secondgradout_c3_bk<double>(
+    const double*, const double*, const int64_t*, const double*, const double*,
+    const double*, const int64_t*, const double*, double*,
+    const double, const int, const int, const int, const int, const int,
+    const int, const int, const int, const int, const int, const int);
+template void launch_calculate_nepmbfeat_secondgradout_c3_bk<float>(
+    const float*, const float*, const int64_t*, const float*, const float*,
+    const float*, const int64_t*, const float*, float*,
+    const float, const int, const int, const int, const int, const int,
+    const int, const int, const int, const int, const int, const int);
+
+template void launch_calculate_nepmbfeat_secondgradout_c3<double>(
+    const double*, const double*, const int64_t*, const double*, const double*,
+    const double*, const int64_t*, const double*, double*,
+    const double, const int, const int, const int, const int, const int,
+    const int, const int, const int, const int, const int, const int);
+template void launch_calculate_nepmbfeat_secondgradout_c3<float>(
+    const float*, const float*, const int64_t*, const float*, const float*,
+    const float*, const int64_t*, const float*, float*,
+    const float, const int, const int, const int, const int, const int,
+    const int, const int, const int, const int, const int, const int);
