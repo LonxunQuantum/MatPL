@@ -1,15 +1,7 @@
 #include <torch/extension.h>
 #include "../include/calculate_nepfeat.h"
 
-// Phase A: tighten data_ptr casts and assert fp64 dtype.
-// Same rationale as calculate_nepfeat.cpp — silently reinterpreting
-// fp32 as fp64 was UB. Phase B will replace these with template
-// dispatch; here we only harden the fp64 path.
-
-#define MATPL_REQUIRE_DOUBLE(t, name)                                            \
-    TORCH_CHECK((t).scalar_type() == torch::kDouble,                             \
-                name " currently only supports float64 inputs; got ",            \
-                (t).scalar_type())
+// Phase B: AT_DISPATCH_FLOATING_TYPES for force ops.
 
 void torch_launch_calculate_nepforce(
     const torch::Tensor &nblist,
@@ -20,18 +12,17 @@ void torch_launch_calculate_nepforce(
     torch::Tensor &force
 )
 {
-    MATPL_REQUIRE_DOUBLE(dE, "calculate_nepforce");
-    MATPL_REQUIRE_DOUBLE(Ri_d, "calculate_nepforce");
-    MATPL_REQUIRE_DOUBLE(force, "calculate_nepforce");
     int device_id = force.device().index();
-    launch_calculate_nepforce(
-        nblist.data_ptr<int64_t>(),
-        dE.data_ptr<double>(),
-        Ri_d.data_ptr<double>(),
-        natoms, neigh_num,
-        force.data_ptr<double>(),
-        device_id
-    );
+    AT_DISPATCH_FLOATING_TYPES(dE.scalar_type(), "calculate_nepforce", [&] {
+        launch_calculate_nepforce<scalar_t>(
+            nblist.data_ptr<int64_t>(),
+            dE.data_ptr<scalar_t>(),
+            Ri_d.data_ptr<scalar_t>(),
+            natoms, neigh_num,
+            force.data_ptr<scalar_t>(),
+            device_id
+        );
+    });
 }
 
 void torch_launch_calculate_nepforce_grad(
@@ -43,17 +34,15 @@ void torch_launch_calculate_nepforce_grad(
     torch::Tensor &grad
 )
 {
-    MATPL_REQUIRE_DOUBLE(Ri_d, "calculate_nepforce_grad");
-    MATPL_REQUIRE_DOUBLE(net_grad, "calculate_nepforce_grad");
     int device_id = nblist.device().index();
-    launch_calculate_nepforce_grad(
-        nblist.data_ptr<int64_t>(),
-        Ri_d.data_ptr<double>(),
-        net_grad.data_ptr<double>(),
-        natoms, neigh_num,
-        grad.data_ptr<double>(),
-        device_id
-    );
+    AT_DISPATCH_FLOATING_TYPES(Ri_d.scalar_type(), "calculate_nepforce_grad", [&] {
+        launch_calculate_nepforce_grad<scalar_t>(
+            nblist.data_ptr<int64_t>(),
+            Ri_d.data_ptr<scalar_t>(),
+            net_grad.data_ptr<scalar_t>(),
+            natoms, neigh_num,
+            grad.data_ptr<scalar_t>(),
+            device_id
+        );
+    });
 }
-
-#undef MATPL_REQUIRE_DOUBLE
