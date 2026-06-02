@@ -25,6 +25,7 @@ http://doc.lonxun.com/MatPL/models/nep/
 #include "../utilities/common.cuh"
 #include "../utilities/gpu_vector.cuh"
 #include "box.cuh"
+#include "pppm.cuh"
 #include <tuple>
 #include <utility> // for std::move
 
@@ -160,6 +161,7 @@ public:
   ANN annmb;
   ZBL zbl;
   Charge_Para charge_para;
+  PPPM_Data pppm_data;
   Box box;
   ExpandedBox ebox;
   NEP_Data nep_data;
@@ -180,7 +182,8 @@ public:
     int N, //atom nums
     int* itype_cpu, //atoms' type,the len is [n_all]
     double* box_cpu, 
-    double* position_cpu // postion of atoms x, [n_all * 3]
+    double* position_cpu, // postion of atoms x, [n_all * 3]
+    const char* kspace_method = "ewald"
     );
   double rc; // maximum cutoff distance
   bool is_gpumd_nep = false;

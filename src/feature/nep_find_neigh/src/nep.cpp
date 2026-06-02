@@ -38,6 +38,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "nep.h"
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -1444,6 +1445,416 @@ void find_force_charge_reciprocal_space(
   }
 }
 
+double get_area(const int d, const double* cpu_h);
+double get_volume(const double* cpu_h);
+void get_inverse(double* cpu_h);
+
+int get_best_pppm_K_cpu(const int m)
+{
+  int n = 16;
+  while (n < m) {
+    n *= 2;
+  }
+  return n;
+}
+
+const double PPPM_SINC_COEFF[6] = {
+  1.0, -1.6666667e-1, 8.3333333e-3, -1.9841270e-4, 2.7557319e-6, -2.5052108e-8};
+const double PPPM_G_COEFF[5] = {
+  1.0000000e+00, -1.6666667e+00, 7.7777778e-01, -8.9947090e-02, 7.0546737e-04};
+const double PPPM_W_COEFF[5][5] = {
+  {2.6041667e-03, -2.0833333e-02, 6.2500000e-02, -8.3333333e-02, 4.1666667e-02},
+  {1.9791667e-01, -4.5833333e-01, 2.5000000e-01, 1.6666667e-01, -1.6666667e-01},
+  {5.9895833e-01, 0.0000000e+00, -6.2500000e-01, 0.0000000e+00, 2.5000000e-01},
+  {1.9791667e-01, 4.5833333e-01, 2.5000000e-01, -1.6666667e-01, -1.6666667e-01},
+  {2.6041667e-03, 2.0833333e-02, 6.2500000e-02, 8.3333333e-02, 4.1666667e-02}};
+
+struct PPPM_Para_CPU {
+  int K0K1K2 = 0;
+  int K0K1 = 0;
+  int K[3] = {0, 0, 0};
+  int K_half[3] = {0, 0, 0};
+  double alpha = 0.0;
+  double alpha_factor = 0.0;
+  double two_pi_over_V = 0.0;
+  double b[3][3];
+  double two_pi_over_K[3];
+};
+
+double pppm_sinc_cpu(const double x)
+{
+  double y = 0.0;
+  if (x * x <= 1.0) {
+    double term = 1.0;
+    for (int i = 0; i < 6; ++i) {
+      y += PPPM_SINC_COEFF[i] * term;
+      term *= x * x;
+    }
+  } else {
+    y = sin(x) / x;
+  }
+  return y;
+}
+
+int pppm_mesh_index_cpu(const int K, const int n)
+{
+  int y = n;
+  if (n >= K) {
+    y = n - K;
+  } else if (n < 0) {
+    y = n + K;
+  }
+  return y;
+}
+
+void pppm_find_para_cpu(
+  const int N,
+  const double alpha,
+  const double alpha_factor,
+  const std::vector<double>& box,
+  PPPM_Para_CPU& para,
+  double h[18])
+{
+  for (int d = 0; d < 9; ++d) {
+    h[d] = box[d];
+  }
+  get_inverse(h);
+  const double two_pi = 2.0 * PI;
+  const double mesh_spacing = 1.0;
+  const double volume = get_volume(box.data());
+  para.alpha = alpha;
+  para.alpha_factor = alpha_factor;
+  para.two_pi_over_V = two_pi / volume;
+  for (int d = 0; d < 3; ++d) {
+    const double box_thickness = volume / get_area(d, box.data());
+    para.K[d] = get_best_pppm_K_cpu(int(box_thickness / mesh_spacing));
+    para.K_half[d] = para.K[d] / 2;
+    para.two_pi_over_K[d] = two_pi / para.K[d];
+  }
+  para.K0K1 = para.K[0] * para.K[1];
+  para.K0K1K2 = para.K0K1 * para.K[2];
+  for (int d = 0; d < 3; ++d) {
+    para.b[0][d] = two_pi * h[9 + d];
+    para.b[1][d] = two_pi * h[12 + d];
+    para.b[2][d] = two_pi * h[15 + d];
+  }
+  (void)N;
+}
+
+void pppm_find_k_and_G_cpu(
+  const PPPM_Para_CPU& para,
+  std::vector<double>& kx,
+  std::vector<double>& ky,
+  std::vector<double>& kz,
+  std::vector<double>& G)
+{
+  for (int n = 0; n < para.K0K1K2; ++n) {
+    int nk[3];
+    nk[2] = n / para.K0K1;
+    nk[1] = (n - nk[2] * para.K0K1) / para.K[0];
+    nk[0] = n % para.K[0];
+    double denominator[3] = {0.0};
+    for (int d = 0; d < 3; ++d) {
+      if (nk[d] >= para.K_half[d]) {
+        nk[d] -= para.K[d];
+      }
+      double t = sin(0.5 * para.two_pi_over_K[d] * nk[d]);
+      t *= t;
+      t = (((PPPM_G_COEFF[4] * t + PPPM_G_COEFF[3]) * t + PPPM_G_COEFF[2]) * t
+           + PPPM_G_COEFF[1]) * t + PPPM_G_COEFF[0];
+      denominator[d] = t * t;
+    }
+    const double kx_value = nk[0] * para.b[0][0] + nk[1] * para.b[1][0] + nk[2] * para.b[2][0];
+    const double ky_value = nk[0] * para.b[0][1] + nk[1] * para.b[1][1] + nk[2] * para.b[2][1];
+    const double kz_value = nk[0] * para.b[0][2] + nk[1] * para.b[1][2] + nk[2] * para.b[2][2];
+    kx[n] = kx_value;
+    ky[n] = ky_value;
+    kz[n] = kz_value;
+    const double ksq = kx_value * kx_value + ky_value * ky_value + kz_value * kz_value;
+    double numerator = pppm_sinc_cpu(0.5 * para.two_pi_over_K[0] * nk[0]);
+    numerator *= pppm_sinc_cpu(0.5 * para.two_pi_over_K[1] * nk[1]);
+    numerator *= pppm_sinc_cpu(0.5 * para.two_pi_over_K[2] * nk[2]);
+    numerator = numerator * numerator * numerator * numerator * numerator;
+    numerator *= numerator;
+    if (ksq == 0.0) {
+      G[n] = 0.0;
+    } else {
+      double G_opt = numerator * para.two_pi_over_V / ksq * exp(-ksq * para.alpha_factor);
+      G_opt /= denominator[0] * denominator[1] * denominator[2];
+      G[n] = G_opt;
+    }
+  }
+}
+
+void pppm_find_weights_cpu(const double sx, const double sy, const double sz, int& ix, int& iy, int& iz, double Wx[5], double Wy[5], double Wz[5])
+{
+  ix = int(sx + 0.5);
+  iy = int(sy + 0.5);
+  iz = int(sz + 0.5);
+  const double dx = sx - ix;
+  const double dy = sy - iy;
+  const double dz = sz - iz;
+  for (int d = 0; d < 5; ++d) {
+    Wx[d] = (((PPPM_W_COEFF[d][4] * dx + PPPM_W_COEFF[d][3]) * dx + PPPM_W_COEFF[d][2]) * dx
+             + PPPM_W_COEFF[d][1]) * dx + PPPM_W_COEFF[d][0];
+    Wy[d] = (((PPPM_W_COEFF[d][4] * dy + PPPM_W_COEFF[d][3]) * dy + PPPM_W_COEFF[d][2]) * dy
+             + PPPM_W_COEFF[d][1]) * dy + PPPM_W_COEFF[d][0];
+    Wz[d] = (((PPPM_W_COEFF[d][4] * dz + PPPM_W_COEFF[d][3]) * dz + PPPM_W_COEFF[d][2]) * dz
+             + PPPM_W_COEFF[d][1]) * dz + PPPM_W_COEFF[d][0];
+  }
+}
+
+void pppm_forward_dft_cpu(
+  const PPPM_Para_CPU& para,
+  const std::vector<std::complex<double>>& in,
+  std::vector<std::complex<double>>& out)
+{
+  std::vector<std::complex<double>> tmp_x(para.K0K1K2);
+  std::vector<std::complex<double>> tmp_y(para.K0K1K2);
+  for (int iz = 0; iz < para.K[2]; ++iz) {
+    for (int iy = 0; iy < para.K[1]; ++iy) {
+      for (int nk0 = 0; nk0 < para.K[0]; ++nk0) {
+        std::complex<double> sum(0.0, 0.0);
+        for (int ix = 0; ix < para.K[0]; ++ix) {
+          const double phase = para.two_pi_over_K[0] * nk0 * ix;
+          sum += in[ix + para.K[0] * (iy + para.K[1] * iz)]
+               * std::complex<double>(cos(phase), -sin(phase));
+        }
+        tmp_x[nk0 + para.K[0] * (iy + para.K[1] * iz)] = sum;
+      }
+    }
+  }
+  for (int iz = 0; iz < para.K[2]; ++iz) {
+    for (int nk0 = 0; nk0 < para.K[0]; ++nk0) {
+      for (int nk1 = 0; nk1 < para.K[1]; ++nk1) {
+        std::complex<double> sum(0.0, 0.0);
+        for (int iy = 0; iy < para.K[1]; ++iy) {
+          const double phase = para.two_pi_over_K[1] * nk1 * iy;
+          sum += tmp_x[nk0 + para.K[0] * (iy + para.K[1] * iz)]
+               * std::complex<double>(cos(phase), -sin(phase));
+        }
+        tmp_y[nk0 + para.K[0] * (nk1 + para.K[1] * iz)] = sum;
+      }
+    }
+  }
+  for (int nk0 = 0; nk0 < para.K[0]; ++nk0) {
+    for (int nk1 = 0; nk1 < para.K[1]; ++nk1) {
+      for (int nk2 = 0; nk2 < para.K[2]; ++nk2) {
+        std::complex<double> sum(0.0, 0.0);
+        for (int iz = 0; iz < para.K[2]; ++iz) {
+          const double phase = para.two_pi_over_K[2] * nk2 * iz;
+          sum += tmp_y[nk0 + para.K[0] * (nk1 + para.K[1] * iz)]
+               * std::complex<double>(cos(phase), -sin(phase));
+        }
+        out[nk0 + para.K[0] * (nk1 + para.K[1] * nk2)] = sum;
+      }
+    }
+  }
+}
+
+void pppm_inverse_dft_cpu(
+  const PPPM_Para_CPU& para,
+  const std::vector<std::complex<double>>& in,
+  std::vector<std::complex<double>>& out)
+{
+  std::vector<std::complex<double>> tmp_x(para.K0K1K2);
+  std::vector<std::complex<double>> tmp_y(para.K0K1K2);
+  for (int nk2 = 0; nk2 < para.K[2]; ++nk2) {
+    for (int nk1 = 0; nk1 < para.K[1]; ++nk1) {
+      for (int ix = 0; ix < para.K[0]; ++ix) {
+        std::complex<double> sum(0.0, 0.0);
+        for (int nk0 = 0; nk0 < para.K[0]; ++nk0) {
+          const double phase = para.two_pi_over_K[0] * nk0 * ix;
+          sum += in[nk0 + para.K[0] * (nk1 + para.K[1] * nk2)]
+               * std::complex<double>(cos(phase), sin(phase));
+        }
+        tmp_x[ix + para.K[0] * (nk1 + para.K[1] * nk2)] = sum;
+      }
+    }
+  }
+  for (int nk2 = 0; nk2 < para.K[2]; ++nk2) {
+    for (int ix = 0; ix < para.K[0]; ++ix) {
+      for (int iy = 0; iy < para.K[1]; ++iy) {
+        std::complex<double> sum(0.0, 0.0);
+        for (int nk1 = 0; nk1 < para.K[1]; ++nk1) {
+          const double phase = para.two_pi_over_K[1] * nk1 * iy;
+          sum += tmp_x[ix + para.K[0] * (nk1 + para.K[1] * nk2)]
+               * std::complex<double>(cos(phase), sin(phase));
+        }
+        tmp_y[ix + para.K[0] * (iy + para.K[1] * nk2)] = sum;
+      }
+    }
+  }
+  for (int ix = 0; ix < para.K[0]; ++ix) {
+    for (int iy = 0; iy < para.K[1]; ++iy) {
+      for (int iz = 0; iz < para.K[2]; ++iz) {
+        std::complex<double> sum(0.0, 0.0);
+        for (int nk2 = 0; nk2 < para.K[2]; ++nk2) {
+          const double phase = para.two_pi_over_K[2] * nk2 * iz;
+          sum += tmp_y[ix + para.K[0] * (iy + para.K[1] * nk2)]
+               * std::complex<double>(cos(phase), sin(phase));
+        }
+        out[ix + para.K[0] * (iy + para.K[1] * iz)] = sum;
+      }
+    }
+  }
+}
+
+void pppm_find_force_charge_cpu(
+  const int N,
+  const double alpha,
+  const double alpha_factor,
+  const std::vector<double>& box,
+  const std::vector<double>& charge,
+  const std::vector<double>& position,
+  std::vector<double>& D_real,
+  std::vector<double>& force,
+  std::vector<double>& virial,
+  std::vector<double>& total_virial)
+{
+  PPPM_Para_CPU para;
+  double h[18] = {0.0};
+  pppm_find_para_cpu(N, alpha, alpha_factor, box, para, h);
+  std::vector<double> kx(para.K0K1K2, 0.0);
+  std::vector<double> ky(para.K0K1K2, 0.0);
+  std::vector<double> kz(para.K0K1K2, 0.0);
+  std::vector<double> G(para.K0K1K2, 0.0);
+  pppm_find_k_and_G_cpu(para, kx, ky, kz, G);
+
+  std::vector<std::complex<double>> mesh(para.K0K1K2, std::complex<double>(0.0, 0.0));
+  for (int n = 0; n < N; ++n) {
+    const double x = position[n];
+    const double y = position[n + N];
+    const double z = position[n + 2 * N];
+    const double sx = (h[9] * x + h[10] * y + h[11] * z) * para.K[0];
+    const double sy = (h[12] * x + h[13] * y + h[14] * z) * para.K[1];
+    const double sz = (h[15] * x + h[16] * y + h[17] * z) * para.K[2];
+    int ix, iy, iz;
+    double Wx[5], Wy[5], Wz[5];
+    pppm_find_weights_cpu(sx, sy, sz, ix, iy, iz, Wx, Wy, Wz);
+    for (int n0 = -2; n0 <= 2; ++n0) {
+      const int neighbor0 = pppm_mesh_index_cpu(para.K[0], ix + n0);
+      for (int n1 = -2; n1 <= 2; ++n1) {
+        const int neighbor1 = pppm_mesh_index_cpu(para.K[1], iy + n1);
+        for (int n2 = -2; n2 <= 2; ++n2) {
+          const int neighbor2 = pppm_mesh_index_cpu(para.K[2], iz + n2);
+          const int idx = neighbor0 + para.K[0] * (neighbor1 + para.K[1] * neighbor2);
+          const double W = Wx[n0 + 2] * Wy[n1 + 2] * Wz[n2 + 2];
+          mesh[idx] += std::complex<double>(charge[n] * W, 0.0);
+        }
+      }
+    }
+  }
+
+  std::vector<std::complex<double>> mesh_fft(para.K0K1K2);
+  pppm_forward_dft_cpu(para, mesh, mesh_fft);
+
+  std::vector<std::complex<double>> mesh_G(para.K0K1K2);
+  std::vector<std::complex<double>> mesh_x(para.K0K1K2);
+  std::vector<std::complex<double>> mesh_y(para.K0K1K2);
+  std::vector<std::complex<double>> mesh_z(para.K0K1K2);
+  std::vector<std::complex<double>> mesh_virial_fft[6];
+  std::vector<std::complex<double>> mesh_virial[6];
+  for (int d = 0; d < 6; ++d) {
+    mesh_virial_fft[d].assign(para.K0K1K2, std::complex<double>(0.0, 0.0));
+    mesh_virial[d].assign(para.K0K1K2, std::complex<double>(0.0, 0.0));
+  }
+
+  for (int i = 0; i < para.K0K1K2; ++i) {
+    mesh_G[i] = mesh_fft[i] * G[i];
+    mesh_x[i] = std::complex<double>(mesh_fft[i].imag() * kx[i] * G[i], -mesh_fft[i].real() * kx[i] * G[i]);
+    mesh_y[i] = std::complex<double>(mesh_fft[i].imag() * ky[i] * G[i], -mesh_fft[i].real() * ky[i] * G[i]);
+    mesh_z[i] = std::complex<double>(mesh_fft[i].imag() * kz[i] * G[i], -mesh_fft[i].real() * kz[i] * G[i]);
+    const double ksq = kx[i] * kx[i] + ky[i] * ky[i] + kz[i] * kz[i];
+    if (ksq != 0.0) {
+      const double alpha_k_factor = 2.0 * para.alpha_factor + 2.0 / ksq;
+      const std::complex<double> GS = mesh_fft[i] * G[i];
+      double B = 1.0 - alpha_k_factor * kx[i] * kx[i];
+      mesh_virial_fft[0][i] = GS * B;
+      B = 1.0 - alpha_k_factor * ky[i] * ky[i];
+      mesh_virial_fft[1][i] = GS * B;
+      B = 1.0 - alpha_k_factor * kz[i] * kz[i];
+      mesh_virial_fft[2][i] = GS * B;
+      B = -alpha_k_factor * kx[i] * ky[i];
+      mesh_virial_fft[3][i] = GS * B;
+      B = -alpha_k_factor * ky[i] * kz[i];
+      mesh_virial_fft[4][i] = GS * B;
+      B = -alpha_k_factor * kz[i] * kx[i];
+      mesh_virial_fft[5][i] = GS * B;
+    }
+  }
+
+  pppm_inverse_dft_cpu(para, mesh_G, mesh_G);
+  pppm_inverse_dft_cpu(para, mesh_x, mesh_x);
+  pppm_inverse_dft_cpu(para, mesh_y, mesh_y);
+  pppm_inverse_dft_cpu(para, mesh_z, mesh_z);
+  for (int d = 0; d < 6; ++d) {
+    pppm_inverse_dft_cpu(para, mesh_virial_fft[d], mesh_virial[d]);
+  }
+
+  for (int n = 0; n < N; ++n) {
+    const double x = position[n];
+    const double y = position[n + N];
+    const double z = position[n + 2 * N];
+    const double q = K_C_SP * charge[n];
+    const double sx = (h[9] * x + h[10] * y + h[11] * z) * para.K[0];
+    const double sy = (h[12] * x + h[13] * y + h[14] * z) * para.K[1];
+    const double sz = (h[15] * x + h[16] * y + h[17] * z) * para.K[2];
+    int ix, iy, iz;
+    double Wx[5], Wy[5], Wz[5];
+    pppm_find_weights_cpu(sx, sy, sz, ix, iy, iz, Wx, Wy, Wz);
+    double D_sum = 0.0;
+    double E[3] = {0.0};
+    double V[6] = {0.0};
+    for (int n0 = -2; n0 <= 2; ++n0) {
+      const int neighbor0 = pppm_mesh_index_cpu(para.K[0], ix + n0);
+      for (int n1 = -2; n1 <= 2; ++n1) {
+        const int neighbor1 = pppm_mesh_index_cpu(para.K[1], iy + n1);
+        for (int n2 = -2; n2 <= 2; ++n2) {
+          const int neighbor2 = pppm_mesh_index_cpu(para.K[2], iz + n2);
+          const int idx = neighbor0 + para.K[0] * (neighbor1 + para.K[1] * neighbor2);
+          const double W = Wx[n0 + 2] * Wy[n1 + 2] * Wz[n2 + 2];
+          D_sum += W * mesh_G[idx].real();
+          E[0] += W * mesh_x[idx].real();
+          E[1] += W * mesh_y[idx].real();
+          E[2] += W * mesh_z[idx].real();
+          for (int d = 0; d < 6; ++d) {
+            V[d] += W * mesh_virial[d][idx].real();
+          }
+        }
+      }
+    }
+    D_real[n] = 2.0 * K_C_SP * D_sum;
+    force[n] += 2.0 * q * E[0];
+    force[n + N] += 2.0 * q * E[1];
+    force[n + 2 * N] += 2.0 * q * E[2];
+
+    const double virial_xx = q * V[0];
+    const double virial_yy = q * V[1];
+    const double virial_zz = q * V[2];
+    const double virial_xy = q * V[3];
+    const double virial_yz = q * V[4];
+    const double virial_zx = q * V[5];
+    if (!virial.empty()) {
+      virial[n + 0 * N] += virial_xx;
+      virial[n + 1 * N] += virial_xy;
+      virial[n + 2 * N] += virial_zx;
+      virial[n + 3 * N] += virial_xy;
+      virial[n + 4 * N] += virial_yy;
+      virial[n + 5 * N] += virial_yz;
+      virial[n + 6 * N] += virial_zx;
+      virial[n + 7 * N] += virial_yz;
+      virial[n + 8 * N] += virial_zz;
+    }
+    total_virial[0] += virial_xx;
+    total_virial[1] += virial_xy;
+    total_virial[2] += virial_zx;
+    total_virial[4] += virial_yy;
+    total_virial[5] += virial_yz;
+    total_virial[8] += virial_zz;
+  }
+}
+
 void find_force_radial(
   const bool is_dipole,
   NEP_CPU::ParaMB& paramb,
@@ -2618,7 +3029,8 @@ void NEP_CPU::compute(
   std::vector<double>& potential,
   std::vector<double>& force,
   std::vector<double>& virial,
-  std::vector<double>& total_virial)
+  std::vector<double>& total_virial,
+  const std::string& kspace_method)
 {
   if (paramb.model_type != 0) {
     std::cout << "Cannot compute potential using a non-potential NEP model.\n";
@@ -2702,13 +3114,22 @@ void NEP_CPU::compute(
       r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
       charge_derivative.data(), sum_fxyz.data(), bec);
     scale_bec(N, annmb.sqrt_epsilon_inf[0], bec);
-    find_k_and_G(
-      charge_para.num_kpoints_max, charge_para.alpha, charge_para.alpha_factor,
-      box, num_kpoints, kx, ky, kz, G);
-    find_structure_factor(N, num_kpoints[0], charge_shifted, position, kx, ky, kz, S_real, S_imag);
-    find_force_charge_reciprocal_space(
-      N, num_kpoints[0], charge_para.alpha_factor, charge_shifted, position, kx, ky, kz, G,
-      S_real, S_imag, D_real, force, virial, total_virial);
+    if (kspace_method == "pppm") {
+      pppm_find_force_charge_cpu(
+        N, charge_para.alpha, charge_para.alpha_factor, box, charge_shifted, position,
+        D_real, force, virial, total_virial);
+    } else if (kspace_method == "ewald") {
+      find_k_and_G(
+        charge_para.num_kpoints_max, charge_para.alpha, charge_para.alpha_factor,
+        box, num_kpoints, kx, ky, kz, G);
+      find_structure_factor(N, num_kpoints[0], charge_shifted, position, kx, ky, kz, S_real, S_imag);
+      find_force_charge_reciprocal_space(
+        N, num_kpoints[0], charge_para.alpha_factor, charge_shifted, position, kx, ky, kz, G,
+        S_real, S_imag, D_real, force, virial, total_virial);
+    } else {
+      std::cout << "Unsupported CPU NEP kspace method: " << kspace_method << std::endl;
+      exit(1);
+    }
     zero_mean_D_real(N, D_real);
   } else {
     charge.clear();

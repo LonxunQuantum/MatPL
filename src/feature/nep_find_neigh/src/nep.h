@@ -132,7 +132,8 @@ public:
     std::vector<double>& potential,
     std::vector<double>& force,
     std::vector<double>& virial,
-    std::vector<double>&  total_virial);
+    std::vector<double>&  total_virial,
+    const std::string& kspace_method = "ewald");
 
   ParaMB paramb;
   ANN annmb;

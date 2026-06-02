@@ -328,10 +328,10 @@ class Inference(object):
             calc_args = (
                     list(type_maps[0]), 
                     list(np.array(image.lattice).transpose(1, 0).reshape(-1)), 
-                    np.array(image.position).transpose(1, 0).reshape(-1)
+                    np.array(image.position).transpose(1, 0).reshape(-1),
+                    "ewald"
             )
-            ei_predict, force_predict, virial_predict, charge_predict, bec_predict = self.calc.inference(*calc_args)
-
+            ei_predict, force_predict, virial_predict, charge_predict, bec_predict = self.calc.inference(*calc_args) # kspace_method = ["ewald" "pppm"]
             ei_predict   = np.array(ei_predict).reshape(atom_nums)
             force_predict = np.array(force_predict).reshape(3, atom_nums).transpose(1, 0)
             virial_predict = np.array(virial_predict) #virial xx xy xz yx yy yz zx zy zz

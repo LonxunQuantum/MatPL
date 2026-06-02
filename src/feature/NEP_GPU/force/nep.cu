@@ -34,6 +34,8 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 
 #include "nep.cuh"
 #include "nep_functions.cuh"
+#include "ewald.cuh"
+#include "pppm.cuh"
 #include "../utilities/common.cuh"
 #include "../utilities/error.cuh"
 #include "../utilities/nep_utilities.cuh"
@@ -51,6 +53,7 @@ const std::string ELEMENTS[NUM_ELEMENTS] = {
   "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W",  "Re",
   "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
   "Pa", "U",  "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"};
+
 
 int countNonEmptyLines(const char* filename) {
     std::ifstream file(filename);
@@ -445,7 +448,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
 
 NEP::~NEP(void)
 {
-  // nothing
+  pppm_destroy(pppm_data);
 }
 
 
@@ -565,7 +568,8 @@ void NEP::inference(
   int N, //atom nums
   int* itype_cpu, //atoms' type,the len is [n_all]
   double* box_cpu, // [xx, yx, zx, xy, yy, zy, xz, yz, zz]
-  double* position_cpu // postion of atoms x, [n_all * 3]
+  double* position_cpu, // postion of atoms x, [n_all * 3]
+  const char* kspace_method
   ) {
   int BLOCK_SIZE = 64;
   int grid_size = (N- 1) / BLOCK_SIZE + 1;
@@ -589,6 +593,9 @@ void NEP::inference(
   box.cpu_h[6] = box_cpu[6]; 
   box.cpu_h[7] = box_cpu[7]; 
   box.cpu_h[8] = box_cpu[8]; 
+  box.triclinic = (box.cpu_h[1] != 0.0 || box.cpu_h[2] != 0.0 || box.cpu_h[3] != 0.0 ||
+                   box.cpu_h[5] != 0.0 || box.cpu_h[6] != 0.0 || box.cpu_h[7] != 0.0) ? 1 : 0;
+  box.get_inverse();
   
   get_expanded_box(paramb.rc_radial, box, ebox);
   int size_x12 = atom_nums * paramb.MN_radial;
@@ -708,57 +715,49 @@ void NEP::inference(
       nep_data.bec.data());
     CUDA_CHECK_KERNEL
 
-    find_k_and_G_charge2<<<1, 1>>>(
-      charge_para.num_kpoints_max,
-      charge_para.alpha,
-      charge_para.alpha_factor,
-      box,
-      nep_data.num_kpoints.data(),
-      nep_data.kx.data(),
-      nep_data.ky.data(),
-      nep_data.kz.data(),
-      nep_data.G.data());
-    CUDA_CHECK_KERNEL
-
-    int num_kpoints = 0;
-    nep_data.num_kpoints.copy_to_host(&num_kpoints);
-    int k_grid_size = (num_kpoints - 1) / BLOCK_SIZE + 1;
-    find_structure_factor_charge2<<<k_grid_size, BLOCK_SIZE>>>(
-      N,
-      num_kpoints,
-      nep_data.charge.data(),
-      lmp_data.position.data(),
-      lmp_data.position.data() + N,
-      lmp_data.position.data() + N * 2,
-      nep_data.kx.data(),
-      nep_data.ky.data(),
-      nep_data.kz.data(),
-      nep_data.S_real.data(),
-      nep_data.S_imag.data());
-    CUDA_CHECK_KERNEL
-
-    find_force_charge_reciprocal_space_charge2<<<grid_size, BLOCK_SIZE>>>(
-      N,
-      num_kpoints,
-      charge_para.alpha_factor,
-      nep_data.charge.data(),
-      lmp_data.position.data(),
-      lmp_data.position.data() + N,
-      lmp_data.position.data() + N * 2,
-      nep_data.kx.data(),
-      nep_data.ky.data(),
-      nep_data.kz.data(),
-      nep_data.G.data(),
-      nep_data.S_real.data(),
-      nep_data.S_imag.data(),
-      nep_data.D_real.data(),
-      nep_data.force_per_atom.data(),
-      nep_data.force_per_atom.data() + N,
-      nep_data.force_per_atom.data() + N * 2,
-      nep_data.virial_per_atom.data(),
-      nep_data.total_virial.data(),
-      nep_data.potential_per_atom.data());
-    CUDA_CHECK_KERNEL
+    const std::string kspace = (kspace_method == nullptr) ? "ewald" : std::string(kspace_method);
+    if (kspace == "pppm") {
+      pppm_find_force_charge2(
+        pppm_data,
+        N,
+        N1,
+        N,
+        charge_para.alpha,
+        charge_para.alpha_factor,
+        box,
+        nep_data.charge,
+        lmp_data.position,
+        nep_data.D_real,
+        nep_data.force_per_atom,
+        nep_data.virial_per_atom,
+        nep_data.total_virial);
+    } else if (kspace == "ewald") {
+      ewald_find_force_charge2(
+        N,
+        BLOCK_SIZE,
+        grid_size,
+        charge_para.num_kpoints_max,
+        charge_para.alpha,
+        charge_para.alpha_factor,
+        box,
+        nep_data.charge,
+        lmp_data.position,
+        nep_data.num_kpoints,
+        nep_data.kx,
+        nep_data.ky,
+        nep_data.kz,
+        nep_data.G,
+        nep_data.S_real,
+        nep_data.S_imag,
+        nep_data.D_real,
+        nep_data.force_per_atom,
+        nep_data.virial_per_atom,
+        nep_data.total_virial,
+        nep_data.potential_per_atom);
+    } else {
+      std::cout << "kspace_method must be ewald or pppm, got " << kspace << std::endl;
+      exit(1);
+    }
 
     zero_mean_D_real_charge2<<<1, 1024>>>(N, nep_data.D_real.data());
     CUDA_CHECK_KERNEL

@@ -44,4 +44,4 @@ target_include_directories(nep_gpu PRIVATE
 )
 
 # 链接 CUDA 库
-target_link_libraries(nep_gpu PRIVATE ${CUDA_LIBRARIES})
+target_link_libraries(nep_gpu PRIVATE ${CUDA_LIBRARIES} ${CUDA_cufft_LIBRARY})
