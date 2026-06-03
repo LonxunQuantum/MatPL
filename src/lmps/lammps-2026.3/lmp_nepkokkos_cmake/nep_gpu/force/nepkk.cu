@@ -800,6 +800,37 @@ void NEPKK::compute(
     CUDA_CHECK_KERNEL
   }
 
+  size_t smem_bytes = 3 * sizeof(NEP_FLOAT) * BLOCK_SIZE64;  // 力分量 fx,fy,fz
+  if (vflag_either) {
+      smem_bytes += vatom_num * sizeof(NEP_FLOAT) * BLOCK_SIZE64;    // virial: 6 or 9 components
+  }
+  smem_bytes += paramb.n_max_radial_plus1 * sizeof(NEP_FLOAT);// n_max_radial_plus1 一定是小于线程块大小的
+  // backward_force_2b_perneigh 核函数相比于backward_force_2b 在3090上能获得接近一半的时间减少，但是在4090上反而性能下降
+  // 将中心原子的Fp放入共享内存性能几乎没有提升，块内线程处理每个近邻，导致取Fp地址缺乏连续性（在4090由于L2cache 更大，影响更明显）
+  // 这部分优化思路：需要把calc3bfeature这里的粒度拆分，一个块处理一个中心原子，然后写Fp可以按照行优先存储（一个行对应一个中心原子的Fp)\
+  // 此时不再存在写Fp的地址不连续问题,并且后续的backward force 可以获得收益 (wuxingxing.2026.2.28)
+  if (smem_bytes < SHAREMEM_32) {
+    backward_force_2b_perneigh<<<inum, BLOCK_SIZE64, smem_bytes>>>(
+        vflag_either,
+        cvflag_atom,
+        vatom_num,
+        paramb,
+        annmb,
+        nall,
+        inum,
+        nlocal,
+        max_I_neigh,
+        numneigh,
+        firstneigh,
+        ilist,
+        lmp_data.type.data(),
+        lmp_data.position.data(),
+        nep_data.Fp.data(),
+        force_per_atom,
+        virial_per_atom
+    );  
+  } else {
+  // 32 或 64 没什么提升空间-3090
   backward_force_2b<<<(inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64>>>( 
     vflag_either,
     cvflag_atom,
@@ -819,25 +850,47 @@ void NEPKK::compute(
     force_per_atom,
     cv_per_atom
     );
-
-
-  backward_force_3b_dqnl<<<(inum - 1) / BLOCK_SIZE32 + 1, BLOCK_SIZE32>>>(
-    paramb,
-    annmb,
-    inum,
-    nlocal,
-    nep_data.NN_angular.data(),
-    nep_data.NL_angular.data(),
-    ilist,
-    lmp_data.type.data(),
-    lmp_data.position.data(),
-    nep_data.Fp.data(),
-    nep_data.sum_fxyz.data(),
-    nep_data.f12x.data(),
-    nep_data.f12y.data(),
-    nep_data.f12z.data()
+  }
+  int shm_float_count = 3 + paramb.dim_angular + paramb.n_max_angular_plus1 * NUM_OF_ABC;
+  shm_float_count += BLOCK_SIZE32 * MAX_NUM_N * 2;// 168个寄存器使用, block 64 会导致共享内存翻倍，驻留block减少
+  size_t shared_bytes = shm_float_count * sizeof(NEP_FLOAT);
+  if (shared_bytes < SHAREMEM_32) {
+    dim3 grid(inum); // 中心原子数
+    dim3 block(BLOCK_SIZE32);
+    backward_force_3b_per_atom_sharemem<<<grid, block, shared_bytes>>>(
+        paramb,
+        annmb,
+        inum,
+        nlocal,
+        nep_data.NN_angular.data(),
+        nep_data.NL_angular.data(),
+        ilist,
+        lmp_data.type.data(),
+        lmp_data.position.data(),
+        nep_data.Fp.data(),
+        nep_data.sum_fxyz.data(),
+        nep_data.f12x.data(),
+        nep_data.f12y.data(),
+        nep_data.f12z.data()
     );
-    
+  } else {
+    backward_force_3b_dqnl<<<(inum - 1) / BLOCK_SIZE32 + 1, BLOCK_SIZE32>>>(
+      paramb,
+      annmb,
+      inum,
+      nlocal,
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      ilist,
+      lmp_data.type.data(),
+      lmp_data.position.data(),
+      nep_data.Fp.data(),
+      nep_data.sum_fxyz.data(),
+      nep_data.f12x.data(),
+      nep_data.f12y.data(),
+      nep_data.f12z.data()
+      );
+  }
   CUDA_CHECK_KERNEL
   cudaDeviceSynchronize();
 
@@ -932,7 +985,7 @@ void NEPKK::compute(
   }
 
   if (eflag_global && ff_index == 0) { // 根据需要计算总能，potential_per_atom是每个原子的能量，需要求和, 算偏差不需要总能
-    const int threads = 512;  // block 大小
+    const int threads = BLOCK_SIZE256;  // block 大小
      const int blocks = (nlocal + threads - 1) / threads;
      size_t shared_size = threads * sizeof(double);
      GPU_Vector<double> d_partial(blocks, 0.0);

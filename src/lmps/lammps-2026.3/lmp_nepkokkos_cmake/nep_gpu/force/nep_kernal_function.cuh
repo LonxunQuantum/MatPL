@@ -360,6 +360,225 @@ static __global__ void calc_3b_descriptor(
   } // if
 } // function
 
+static __global__ void backward_force_2b_perneigh(
+    int vflag_either,
+    int cvflag_atom,
+    int vatom_num,
+    NEPKK::ParaMB paramb,
+    NEPKK::ANN annmb,
+    const int nall,
+    const int N,               // inum
+    const int nlocal,
+    const int num_neigh,
+    const int* g_NN,
+    const int* g_NL,
+    const int* __restrict__ g_ilist,
+    const int* __restrict__ g_type,
+    const NEP_FLOAT* __restrict__ g_pos,
+    const NEP_FLOAT* __restrict__ g_Fp,
+    double* g_f,
+    double* g_virial)
+{
+    // 动态共享内存指针
+    extern __shared__ NEP_FLOAT shared_all[];
+    NEP_FLOAT* s_g_Fp = shared_all;
+    NEP_FLOAT* shared = shared_all + paramb.n_max_radial_plus1;
+
+    // 为每个数组分配偏移量
+    NEP_FLOAT* s_fx = &shared[0];
+    NEP_FLOAT* s_fy = &shared[blockDim.x];
+    NEP_FLOAT* s_fz = &shared[2 * blockDim.x];
+    
+    NEP_FLOAT* s_sxx = nullptr;
+    NEP_FLOAT* s_syy = nullptr;
+    NEP_FLOAT* s_szz = nullptr;
+    NEP_FLOAT* s_sxy = nullptr;
+    NEP_FLOAT* s_sxz = nullptr;
+    NEP_FLOAT* s_syz = nullptr;
+    NEP_FLOAT* s_syx = nullptr;
+    NEP_FLOAT* s_szx = nullptr;
+    NEP_FLOAT* s_szy = nullptr;
+
+    int offset = 3 * blockDim.x;  // 已占用 3 个 float 数组
+    if (vflag_either) {
+        s_sxx = &shared[offset];
+        s_syy = &shared[offset + blockDim.x];
+        s_szz = &shared[offset + 2 * blockDim.x];
+        s_sxy = &shared[offset + 3 * blockDim.x];
+        s_sxz = &shared[offset + 4 * blockDim.x];
+        s_syz = &shared[offset + 5 * blockDim.x];
+        if (cvflag_atom) {
+            s_syx = &shared[offset + 6 * blockDim.x];
+            s_szx = &shared[offset + 7 * blockDim.x];
+            s_szy = &shared[offset + 8 * blockDim.x];
+        }
+    }
+    int tid = threadIdx.x;
+    int atomi = g_ilist[blockIdx.x];   // 每个 block 处理一个中心原子
+    int t1 = g_type[atomi];
+
+    NEP_FLOAT x1 = g_pos[atomi*3];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
+
+    NEP_FLOAT fxi = FLOAT_LIT(0.0), fyi = FLOAT_LIT(0.0), fzi = FLOAT_LIT(0.0);
+    NEP_FLOAT sxxi = FLOAT_LIT(0.0), syyi = FLOAT_LIT(0.0), szzi = FLOAT_LIT(0.0);
+    NEP_FLOAT sxyi = FLOAT_LIT(0.0), sxzi = FLOAT_LIT(0.0), syzi = FLOAT_LIT(0.0);
+    NEP_FLOAT syxi = FLOAT_LIT(0.0), szxi = FLOAT_LIT(0.0), szyi = FLOAT_LIT(0.0);
+
+    int c_start = paramb.num_types * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
+    int num_neigh_i = g_NN[atomi];
+    if (tid < paramb.n_max_radial_plus1) {// 线程块大小一定是两体feature大的
+      s_g_Fp[tid] = g_Fp[atomi + tid * nlocal];
+    }
+    __syncthreads();
+    // 循环处理所有邻居，步进使用 blockDim.x
+    for (int off = tid; off < num_neigh_i; off += blockDim.x) {
+        int n2_idx = off * num_neigh + atomi;
+        int n2 = g_NL[n2_idx] & NEIGHMASK;
+        int t2 = g_type[n2];
+        int c_idx_I = t1 * c_start + t2 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
+        int c_idx_J = t2 * c_start + t1 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
+
+        NEP_FLOAT r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
+        NEP_FLOAT d12_sq = r12[0]*r12[0] + r12[1]*r12[1] + r12[2]*r12[2];
+        if (d12_sq > paramb.rc_radial_square) continue;
+
+        NEP_FLOAT d12 = sqrt(d12_sq);
+        NEP_FLOAT d12inv = FLOAT_LIT(1.0) / d12;
+        NEP_FLOAT fc12, fcp12;
+        NEP_FLOAT fn12[MAX_NUM_N], fnp12[MAX_NUM_N];
+        find_fc_and_fcp(paramb.rc_radial, paramb.rcinv_radial, d12, fc12, fcp12);
+        find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial,
+                        d12, fc12, fcp12, fn12, fnp12);
+
+        NEP_FLOAT f12[3] = {FLOAT_LIT(0.0)}, f21[3] = {FLOAT_LIT(0.0)};
+
+        for (int n = 0; n < paramb.n_max_radial_plus1; ++n) {
+            NEP_FLOAT gnp12 = FLOAT_LIT(0.0), gnp21 = FLOAT_LIT(0.0);
+            for (int k = 0; k < paramb.basis_size_radial_plus1; ++k) {
+                gnp12 += fnp12[k] * annmb.c[c_idx_I + n * paramb.basis_size_radial_plus1 + k];
+                gnp21 += fnp12[k] * annmb.c[c_idx_J + n * paramb.basis_size_radial_plus1 + k];
+            }
+            NEP_FLOAT tmp12 = s_g_Fp[n] * gnp12 * d12inv; //g_Fp[atomi + n * nlocal]
+            NEP_FLOAT tmp21 = FLOAT_LIT(0.0);
+            if (n2 >= nlocal) {
+                // 邻居是 ghost 原子
+                for (int d = 0; d < 3; ++d)
+                    f12[d] += tmp12 * r12[d];
+            } else {
+                tmp21 = g_Fp[n2 + n * nlocal] * gnp21 * d12inv;
+                for (int d = 0; d < 3; ++d) {
+                    f12[d] += tmp12 * r12[d];
+                    f21[d] -= tmp21 * r12[d];   // -Rji = Rij
+                }
+            }
+        }
+        // 更新邻居原子的力
+        if (n2 >= nlocal) {
+          fxi += f12[0]; 
+          fyi += f12[1]; 
+          fzi += f12[2];
+          atomicAdd(&g_f[n2*3],   double(-f12[0]));
+          atomicAdd(&g_f[n2*3+1], double(-f12[1]));
+          atomicAdd(&g_f[n2*3+2], double(-f12[2]));
+          if (vflag_either) {
+              atomicAdd(&g_virial[n2 * vatom_num + 0], -r12[0] * f12[0]);
+              atomicAdd(&g_virial[n2 * vatom_num + 1], -r12[1] * f12[1]);
+              atomicAdd(&g_virial[n2 * vatom_num + 2], -r12[2] * f12[2]);
+              atomicAdd(&g_virial[n2 * vatom_num + 3], -r12[0] * f12[1]);
+              atomicAdd(&g_virial[n2 * vatom_num + 4], -r12[0] * f12[2]);
+              atomicAdd(&g_virial[n2 * vatom_num + 5], -r12[1] * f12[2]);
+              if (cvflag_atom) {
+                  atomicAdd(&g_virial[n2 * vatom_num + 6], -r12[1] * f12[0]);
+                  atomicAdd(&g_virial[n2 * vatom_num + 7], -r12[2] * f12[0]);
+                  atomicAdd(&g_virial[n2 * vatom_num + 8], -r12[2] * f12[1]);
+              }
+          }
+        } else {
+        // 累加到中心原子的寄存器变量
+        fxi += f12[0] - f21[0];
+        fyi += f12[1] - f21[1];
+        fzi += f12[2] - f21[2];
+        if (vflag_either) {
+            sxxi += r12[0] * f21[0];
+            syyi += r12[1] * f21[1];
+            szzi += r12[2] * f21[2];
+            sxyi += r12[0] * f21[1];
+            sxzi += r12[0] * f21[2];
+            syzi += r12[1] * f21[2];
+            if (cvflag_atom) {
+                syxi += r12[1] * f21[0];
+                szxi += r12[2] * f21[0];
+                szyi += r12[2] * f21[1];
+            }
+        }
+      }
+    }
+
+    // 将每个线程的累加结果写入共享内存
+    s_fx[tid] = fxi;
+    s_fy[tid] = fyi;
+    s_fz[tid] = fzi;
+    if (vflag_either) {
+        s_sxx[tid] = sxxi;
+        s_syy[tid] = syyi;
+        s_szz[tid] = szzi;
+        s_sxy[tid] = sxyi;
+        s_sxz[tid] = sxzi;
+        s_syz[tid] = syzi;
+        if (cvflag_atom) {
+            s_syx[tid] = syxi;
+            s_szx[tid] = szxi;
+            s_szy[tid] = szyi;
+        }
+    }
+    __syncthreads();
+
+    // 树状归约，使用 blockDim.x 动态确定范围
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_fx[tid] += s_fx[tid + s];
+            s_fy[tid] += s_fy[tid + s];
+            s_fz[tid] += s_fz[tid + s];
+            if (vflag_either) {
+                s_sxx[tid] += s_sxx[tid + s];
+                s_syy[tid] += s_syy[tid + s];
+                s_szz[tid] += s_szz[tid + s];
+                s_sxy[tid] += s_sxy[tid + s];
+                s_sxz[tid] += s_sxz[tid + s];
+                s_syz[tid] += s_syz[tid + s];
+                if (cvflag_atom) {
+                    s_syx[tid] += s_syx[tid + s];
+                    s_szx[tid] += s_szx[tid + s];
+                    s_szy[tid] += s_szy[tid + s];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    // 线程 0 将归约结果原子累加到全局
+    if (tid == 0) {
+        atomicAdd(&g_f[atomi*3],   double(s_fx[0]));
+        atomicAdd(&g_f[atomi*3+1], double(s_fy[0]));
+        atomicAdd(&g_f[atomi*3+2], double(s_fz[0]));
+
+        if (vflag_either) {
+            atomicAdd(&g_virial[atomi * vatom_num + 0], s_sxx[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 1], s_syy[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 2], s_szz[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 3], s_sxy[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 4], s_sxz[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 5], s_syz[0]);
+            if (cvflag_atom) {
+                atomicAdd(&g_virial[atomi * vatom_num + 6], s_syx[0]);
+                atomicAdd(&g_virial[atomi * vatom_num + 7], s_szx[0]);
+                atomicAdd(&g_virial[atomi * vatom_num + 8], s_szy[0]);
+            }
+        }
+    }
+}
 
 static __global__ void backward_force_2b(
   int vflag_either,
@@ -513,6 +732,124 @@ static __global__ void backward_force_2b(
     }
   }
 } 
+
+__global__ void backward_force_3b_per_atom_sharemem(
+    NEPKK::ParaMB paramb,
+    NEPKK::ANN annmb,
+    int N,
+    int nlocal,
+    const int* g_NN_angular,
+    const int* g_NL_angular,
+    const int* __restrict__ g_ilist,
+    const int* __restrict__ g_type,
+    const NEP_FLOAT* __restrict__ g_pos,
+    const NEP_FLOAT* __restrict__ g_Fp,
+    const NEP_FLOAT* __restrict__ g_sum_fxyz,
+    NEP_FLOAT* g_f12x,
+    NEP_FLOAT* g_f12y,
+    NEP_FLOAT* g_f12z
+) {
+    extern __shared__ NEP_FLOAT shmem[];
+    int i = blockIdx.x;  // 每个 block 负责一个中心原子
+    if (i >= N) return;
+
+    int atomi = g_ilist[i];
+    int t1    = g_type[atomi];
+
+    NEP_FLOAT* s_x1       = shmem + 0;                           // 1
+    NEP_FLOAT* s_y1       = shmem + 1;                           // 1
+    NEP_FLOAT* s_z1       = shmem + 2;                           // 1
+    NEP_FLOAT* s_Fp       = shmem + 3;                           // dim_angular
+    NEP_FLOAT* s_sum_fxyz = shmem + 3 + paramb.dim_angular;      // n_max_angular_plus1 * NUM_OF_ABC
+  // 每个线程独占的 fn12 和 fnp12 空间
+    const int per_thread_fn_size = MAX_NUM_N * 2;            // fn12 + fnp12 = 20 + 20 = 40
+    NEP_FLOAT* s_fn_base = s_sum_fxyz + (paramb.n_max_angular_plus1 * NUM_OF_ABC);
+    NEP_FLOAT* s_fn  = s_fn_base + threadIdx.x * per_thread_fn_size;
+    NEP_FLOAT* s_fnp = s_fn + MAX_NUM_N;
+
+    // ==============================
+    //  由 warp 0 负责加载中心原子公共数据
+    // ==============================
+    if (threadIdx.x < blockDim.x) {
+        if (threadIdx.x == 0) {
+            s_x1[0] = g_pos[atomi * 3 + 0];
+            s_y1[0] = g_pos[atomi * 3 + 1];
+            s_z1[0] = g_pos[atomi * 3 + 2];
+        }
+
+        // 加载 Fp
+        for (int d = threadIdx.x; d < paramb.dim_angular; d += blockDim.x) {
+            s_Fp[d] = g_Fp[(paramb.n_max_radial_plus1 + d) * nlocal + atomi];
+        }
+        int sum_size = paramb.n_max_angular_plus1 * NUM_OF_ABC;
+        // 加载 sum_fxyz
+        for (int d = threadIdx.x; d < sum_size; d += blockDim.x) {
+            s_sum_fxyz[d] = g_sum_fxyz[d * nlocal + atomi];
+        }
+    }
+    __syncthreads();
+
+    // ==============================
+    //  每个线程处理部分近邻
+    // ==============================
+    int nn = g_NN_angular[atomi];
+
+    for (int i1 = threadIdx.x; i1 < nn; i1 += blockDim.x) {
+        int index = i1 * nlocal + atomi;
+        int n2    = g_NL_angular[index];
+        int t2    = g_type[n2];
+
+        NEP_FLOAT r12[3] = {
+            g_pos[n2 * 3 + 0] - s_x1[0],
+            g_pos[n2 * 3 + 1] - s_y1[0],
+            g_pos[n2 * 3 + 2] - s_z1[0]
+        };
+
+        NEP_FLOAT d12 = sqrt(r12[0]*r12[0] + r12[1]*r12[1] + r12[2]*r12[2]);
+        if (d12 > paramb.rc_angular) continue;  // 可选：加 cutoff 检查
+
+        NEP_FLOAT fc12, fcp12;
+        find_fc_and_fcp(paramb.rc_angular, paramb.rcinv_angular, d12, fc12, fcp12);
+        // 直接使用共享内存中的 fn12 和 fnp12
+        find_fn_and_fnp(
+            paramb.basis_size_angular,
+            paramb.rcinv_angular,
+            d12, fc12, fcp12,
+            s_fn, s_fnp
+        );
+
+        int c_start = paramb.num_types * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
+        int c_idx_I = t1 * c_start + t2 * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
+        NEP_FLOAT f12_local[3] = {FLOAT_LIT(0.0), FLOAT_LIT(0.0), FLOAT_LIT(0.0)};
+        for (int n = 0; n < paramb.n_max_angular_plus1; ++n) {
+            NEP_FLOAT gn12  = FLOAT_LIT(0.0);
+            NEP_FLOAT gnp12 = FLOAT_LIT(0.0);
+
+            for (int k = 0; k < paramb.basis_size_angular_plus1; ++k) {
+                int idx = c_idx_I + n * paramb.basis_size_angular_plus1 + k + paramb.num_c_radial;
+                gn12  += s_fn[k]  * annmb.c[idx];
+                gnp12 += s_fnp[k] * annmb.c[idx];
+            }
+
+            accumulate_f12(
+                paramb.L_max,
+                paramb.num_L,
+                n,
+                paramb.n_max_angular + 1,
+                d12,
+                r12,
+                gn12,
+                gnp12,
+                s_Fp,           // 使用共享内存
+                s_sum_fxyz,     // 使用共享内存
+                f12_local       // 累加到本地
+            );
+        }
+        g_f12x[index] = f12_local[0];
+        g_f12y[index] = f12_local[1];
+        g_f12z[index] = f12_local[2];
+    }
+}
 
 static __global__ void backward_force_3b_dqnl(
   NEPKK::ParaMB paramb,

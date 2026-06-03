@@ -10,12 +10,7 @@ echo "SLURM_SUBMIT_DIR is $SLURM_SUBMIT_DIR"
 echo "Running on nodes: $SLURM_NODELIST"
 
 module purge
-
-module load cuda/11.6-share openmpi/4.1.6
-source /opt/rh/devtoolset-8/enable #gcc
-
-
-export PATH=/data/home/wuxingxing/codespace/suzhou/lmpversions/lammps-23-4-opt/build-cu116:$PATH
+module load lammps4matpl/2026.3
 
 export OMPI_MCA_btl_openib_allow_ib=1
 export OMP_NUM_THREADS=1 

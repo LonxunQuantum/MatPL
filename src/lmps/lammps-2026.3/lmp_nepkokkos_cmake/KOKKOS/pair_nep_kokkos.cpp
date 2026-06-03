@@ -73,11 +73,18 @@ PairNEPKokkos<DeviceType>::~PairNEPKokkos()
   if (copymode) return;
 
   if (allocated) {
-    if(local_maxeatom > 0) memoryKK->destroy_kokkos(k_eatom, eatom);
-    if(local_maxvatom > 0) memoryKK->destroy_kokkos(k_vatom, vatom);
-    if(local_maxcvatom> 0) memoryKK->destroy_kokkos(k_cvatom, cvatom);
+    if (eatom)  memoryKK->destroy_kokkos(k_eatom, eatom);
+    if (vatom)  memoryKK->destroy_kokkos(k_vatom, vatom);
+    if (cvatom) memoryKK->destroy_kokkos(k_cvatom, cvatom);
   }
+  memory->destroy(setflag);
+  memory->destroy(cutsq);
   h_etot_virial_global = decltype(h_etot_virial_global)();
+  if (is_rank_0 && explrError_fp != nullptr) {
+        fclose(explrError_fp);
+        explrError_fp = nullptr;
+  }
+
   // printf("=====rank %d device %d doing ~pairnep end =====\n", rank, device_id);
   // NEP model cleanup if needed
   // nep_gpu_model.cleanup(); // Assuming NEP has a cleanup method
@@ -318,7 +325,6 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   ev_init(eflag, vflag, 0);
   // size_t total, used, free;
   bigint ntimestep = update->ntimestep;
-  const bool neighbor_rebuilt = (neighbor && neighbor->ago == 0);
   bool is_devi_step = (num_ff > 1) && (ntimestep % out_freq == 0);
 
   atomKK->sync(execution_space,X_MASK|F_MASK|TYPE_MASK); //同步原子数据到设备
@@ -337,33 +343,37 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   // printf("======compute before k_eatom.extent(0) %d k_vatom.extent(0) %d k_cvatom.extent(0) %d ======\n",k_eatom.extent(0), k_vatom.extent(0), k_cvatom.extent(0));
   
   cur_atom_max = max(cur_atom_max, atom->nmax);
+  double *virial_per_atom_ptr = nullptr;
+  double *cvirial_per_atom_ptr = nullptr;
+
   if (eflag_atom) {
-  memoryKK->destroy_kokkos(k_eatom,eatom);
-  memoryKK->create_kokkos(k_eatom,eatom,maxeatom,"pair:eatom");
-  d_eatom = k_eatom.view<DeviceType>();
+    memoryKK->destroy_kokkos(k_eatom, eatom);
+    memoryKK->create_kokkos(k_eatom, eatom, maxeatom, "pair:eatom");
+    d_eatom = k_eatom.view<DeviceType>();
   }
 
   if (cvflag_atom) {
     if (local_maxcvatom < cur_atom_max) local_maxcvatom = cur_atom_max;
-    memoryKK->destroy_kokkos(k_cvatom, cvatom);           // 销毁旧的
+    memoryKK->destroy_kokkos(k_cvatom, cvatom);
     memoryKK->create_kokkos(k_cvatom, cvatom, local_maxcvatom, "pair:cvatom");
-    // printf("cvatom grow to %d\n", nmax_cvatom);
-    // for (int i = 0; i < std::min(5, nlocal); ++i) {
-    //   printf(" init local cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
-    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
-    // }
-    // for (int i = nall-6; i < nall; ++i) {
-    //   printf(" init ghost cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
-    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
-    // }
-  }
-
-  if (!cvflag_atom && vflag_either) {
+    d_cvatom = k_cvatom.view<DeviceType>();
+    Kokkos::deep_copy(d_cvatom, 0.0);
+    cvirial_per_atom_ptr = d_cvatom.data();
+  } else if (vflag_atom) {
     if (local_maxvatom < cur_atom_max) local_maxvatom = cur_atom_max;
-      memoryKK->destroy_kokkos(k_vatom, vatom);
-      memoryKK->create_kokkos(k_vatom, vatom, local_maxvatom, "pair:vatom");
-      d_vatom = k_vatom.view<DeviceType>();
-      // printf("vatom grow to %d\n", local_maxvatom);
+    memoryKK->destroy_kokkos(k_vatom, vatom);
+    memoryKK->create_kokkos(k_vatom, vatom, local_maxvatom, "pair:vatom");
+    d_vatom = k_vatom.view<DeviceType>();
+    Kokkos::deep_copy(d_vatom, 0.0);
+    virial_per_atom_ptr = d_vatom.data();
+  } else if (vflag_global) {
+    if (local_maxvatom_work < cur_atom_max) {
+      local_maxvatom_work = cur_atom_max;
+      k_vatom_work = DAT::tdual_virial_array("pair:vatom_work", local_maxvatom_work);
+    }
+    d_vatom_work = k_vatom_work.view<DeviceType>();
+    Kokkos::deep_copy(d_vatom_work, 0.0);
+    virial_per_atom_ptr = d_vatom_work.data();
   }
   
   if (num_ff > 1) {
@@ -399,13 +409,17 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
 
   need_dup = lmp->kokkos->need_dup<DeviceType>();
   if (need_dup) {
-    dup_f     = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(f);
-    dup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_eatom);
-    dup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_vatom);
+    dup_f = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(f);
+    if (eflag_atom)
+      dup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_eatom);
+    if (vflag_atom)
+      dup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_vatom);
   } else {
-    ndup_f     = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(f);
-    ndup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_eatom);
-    ndup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_vatom);
+    ndup_f = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(f);
+    if (eflag_atom)
+      ndup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_eatom);
+    if (vflag_atom)
+      ndup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_vatom);
   }
   copymode = 1;
   // EV_FLOAT ev;
@@ -444,8 +458,8 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
       nullptr,
       f.data(),                                       // 力输出 如果num_ff 大于0，只输出到full_f
       nullptr,                                        // 如果 num_ff 大于0，输出到f 和 full_f
-      d_vatom.data(),                                 // 总维里输出
-      cvflag_atom ? k_cvatom.d_view.data() : nullptr,          // device 侧 9 分量指针
+      virial_per_atom_ptr,                           // 6-component per-atom virial or internal work buffer
+      cvirial_per_atom_ptr,                          // 9-component centroid virial
       h_etot_virial_global.data()
     );
     // printf("=========end start compute force  etot %f ==========\n", h_etot_virial_global[0]);
@@ -482,8 +496,8 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         full_e_ptr,
         f.data(),                                       // 力输出 如果num_ff 大于0，只输出到full_f
         full_f_ptr,                                  // 如果 num_ff 大于0，输出到f 和 full_f
-        d_vatom.data(),                                 // 总维里输出
-        cvflag_atom ? k_cvatom.d_view.data() : nullptr,
+        virial_per_atom_ptr,                           // 6-component per-atom virial or internal work buffer
+        cvirial_per_atom_ptr,                          // 9-component centroid virial
         h_etot_virial_global.data()
         // neighbor_rebuilt
       );
@@ -560,7 +574,6 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         glb_avg_f_err = 0.0;
         glb_avg_ei_err = 0.0;
     }
-
     if (is_rank_0) {
       fprintf(explrError_fp, "%9lld %16.9f %16.9f %16.9f %16.9f %16.9f %16.9f\n",
               update->ntimestep,
@@ -624,7 +637,7 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     k_eatom.template sync<LMPHostType>();
   }
 
-  if (vflag_either) {
+  if (vflag_atom) {
     if (need_dup)
       Kokkos::Experimental::contribute(d_vatom, dup_vatom);
     k_vatom.template modify<DeviceType>();
