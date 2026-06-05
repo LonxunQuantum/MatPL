@@ -1061,39 +1061,53 @@ static __global__ void backward_force_3b_merge(
     }
   }
 }
-__global__ void calculate_total_virial(const double* virial, double* total_virial, int N) {
-    __shared__ double shared_virial[6 * 64]; // 使用共享内存存储部分和
-    int tid = threadIdx.x;
-    int bid = blockIdx.x;
-    int index = bid * blockDim.x + tid;
+template<int NUM_COMP>
+__global__ void calculate_partial_virial(const double* virial, double* partial_virial, int N) {
+    extern __shared__ double shared_virial[];
+    const int tid = threadIdx.x;
+    const int index = blockIdx.x * blockDim.x + tid;
 
-    for (int i = 0; i < 6; ++i) {
-        shared_virial[i * blockDim.x + tid] = 0.0;
+    for (int comp = 0; comp < NUM_COMP; ++comp) {
+        shared_virial[comp * blockDim.x + tid] = (index < N) ? virial[index * NUM_COMP + comp] : 0.0;
     }
     __syncthreads();
 
-    // 累加每个原子的virial值（现在为行优先：virial[index * 6 + comp]）
-    if (index < N) {
-        atomicAdd(&shared_virial[0 * blockDim.x + tid], virial[index * 6 + 0]);
-        atomicAdd(&shared_virial[1 * blockDim.x + tid], virial[index * 6 + 1]);
-        atomicAdd(&shared_virial[2 * blockDim.x + tid], virial[index * 6 + 2]);
-        atomicAdd(&shared_virial[3 * blockDim.x + tid], virial[index * 6 + 3]);
-        atomicAdd(&shared_virial[4 * blockDim.x + tid], virial[index * 6 + 4]);
-        atomicAdd(&shared_virial[5 * blockDim.x + tid], virial[index * 6 + 5]);
-    }
-    __syncthreads();
-
-    // 归约每个块内的部分和
-    if (tid < 6) {
-        for (int i = 1; i < blockDim.x; ++i) {
-            shared_virial[tid * blockDim.x] += shared_virial[tid * blockDim.x + i];
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            for (int comp = 0; comp < NUM_COMP; ++comp) {
+                shared_virial[comp * blockDim.x + tid] += shared_virial[comp * blockDim.x + tid + stride];
+            }
         }
+        __syncthreads();
     }
+
+    if (tid < NUM_COMP) {
+        partial_virial[blockIdx.x * NUM_COMP + tid] = shared_virial[tid * blockDim.x];
+    }
+}
+
+template<int NUM_COMP>
+__global__ void finalize_total_virial(const double* partial_virial, double* total_virial, int num_blocks) {
+    extern __shared__ double shared_sum[];
+    const int tid = threadIdx.x;
+    const int comp = blockIdx.x;
+    double sum = 0.0;
+
+    for (int i = tid; i < num_blocks; i += blockDim.x) {
+        sum += partial_virial[i * NUM_COMP + comp];
+    }
+    shared_sum[tid] = sum;
     __syncthreads();
 
-    // 将每个块的部分和累加到全局内存
-    if (tid < 6) {
-        atomicAdd(&total_virial[tid], shared_virial[tid * blockDim.x]);
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_sum[tid] += shared_sum[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        total_virial[comp] = shared_sum[0];
     }
 }
 
@@ -1495,44 +1509,7 @@ static __global__ void backward_force_ZBL(
   }
 }
 
-__global__ void calculate_total_CVirial(const double* virial, double* total_virial, int N) {
-    __shared__ double shared_virial[9 * 64]; // 使用共享内存存储部分和
-    int tid = threadIdx.x;
-    int bid = blockIdx.x;
-    int index = bid * blockDim.x + tid;
-
-    for (int i = 0; i < 9; ++i) {
-        shared_virial[i * blockDim.x + tid] = 0.0;
-    }
-    __syncthreads();
-
-    // 累加每个原子的virial值（现在为行优先：virial[index * 9 + comp]）
-    if (index < N) {
-        atomicAdd(&shared_virial[0 * blockDim.x + tid], virial[index * 9 + 0]);
-        atomicAdd(&shared_virial[1 * blockDim.x + tid], virial[index * 9 + 1]);
-        atomicAdd(&shared_virial[2 * blockDim.x + tid], virial[index * 9 + 2]);
-        atomicAdd(&shared_virial[3 * blockDim.x + tid], virial[index * 9 + 3]);
-        atomicAdd(&shared_virial[4 * blockDim.x + tid], virial[index * 9 + 4]);
-        atomicAdd(&shared_virial[5 * blockDim.x + tid], virial[index * 9 + 5]);
-        atomicAdd(&shared_virial[6 * blockDim.x + tid], virial[index * 9 + 6]);
-        atomicAdd(&shared_virial[7 * blockDim.x + tid], virial[index * 9 + 7]);
-        atomicAdd(&shared_virial[8 * blockDim.x + tid], virial[index * 9 + 8]);
-    }
-    __syncthreads();
-
-    // 归约每个块内的部分和
-    if (tid < 9) {
-        for (int i = 1; i < blockDim.x; ++i) {
-            shared_virial[tid * blockDim.x] += shared_virial[tid * blockDim.x + i];
-        }
-    }
-    __syncthreads();
-
-    // 将每个块的部分和累加到全局内存
-    if (tid < 9) {
-        atomicAdd(&total_virial[tid], shared_virial[tid * blockDim.x]);
-    }
-}
+// calculate_total_CVirial uses the same two-stage reduction kernels as calculate_total_virial.
 
 __global__ void virial9To6Kernel(
     const double* __restrict__ virial9,  // 输入：N*9 的9分量virial数组（顺序：xx,yy,zz,xy,xz,yz,yx,zx,zy）

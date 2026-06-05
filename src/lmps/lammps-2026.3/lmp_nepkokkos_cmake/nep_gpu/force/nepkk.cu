@@ -567,6 +567,9 @@ void NEPKK::reset_nep_data(int inum, int nlocal, int nall, int vflag_either) {
     max_nall = nall;
     lmp_data.position.resize(max_nall*3);
     lmp_data.type.resize(max_nall);
+    const int virial_reduce_threads = 256;
+    const int virial_reduce_blocks = (max_nall + virial_reduce_threads - 1) / virial_reduce_threads;
+    nep_data.partial_virial.resize(virial_reduce_blocks * 9);
     // nep_data.force_per_atom.resize(max_nall * 3);
     // if (vflag_either) nep_data.virial_per_atom.resize(max_nall * 6);
   }
@@ -942,10 +945,17 @@ void NEPKK::compute(
   }
 
   if (cvflag_atom && vflag_global) {
-    calculate_total_CVirial<<<(nall - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64>>>(
-        cv_per_atom, 
-        nep_data.total_virial.data(), 
-        nall); 
+    const int virial_reduce_threads = 256;
+    const int virial_reduce_blocks = (nall - 1) / virial_reduce_threads + 1;
+    calculate_partial_virial<9><<<virial_reduce_blocks, virial_reduce_threads, 9 * virial_reduce_threads * sizeof(double)>>>(
+        cv_per_atom,
+        nep_data.partial_virial.data(),
+        nall);
+    CUDA_CHECK_KERNEL
+    finalize_total_virial<9><<<9, virial_reduce_threads, virial_reduce_threads * sizeof(double)>>>(
+        nep_data.partial_virial.data(),
+        nep_data.total_virial.data(),
+        virial_reduce_blocks);
     CUDA_CHECK_KERNEL
     cudaDeviceSynchronize();
     nep_data.total_virial.copy_to_host(h_etot_virial_global+1, 9);
@@ -974,10 +984,17 @@ void NEPKK::compute(
   // }
   // calculate virial global 后处理，根据需要计算总的virial，这里virial_per_atom 长度为maxatom * 6
   if (!cvflag_atom && vflag_global) {
-    calculate_total_virial<<<(nall - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64>>>(
-        virial_per_atom, 
-        nep_data.total_virial.data(), 
-        nall); 
+    const int virial_reduce_threads = 256;
+    const int virial_reduce_blocks = (nall - 1) / virial_reduce_threads + 1;
+    calculate_partial_virial<6><<<virial_reduce_blocks, virial_reduce_threads, 6 * virial_reduce_threads * sizeof(double)>>>(
+        virial_per_atom,
+        nep_data.partial_virial.data(),
+        nall);
+    CUDA_CHECK_KERNEL
+    finalize_total_virial<6><<<6, virial_reduce_threads, virial_reduce_threads * sizeof(double)>>>(
+        nep_data.partial_virial.data(),
+        nep_data.total_virial.data(),
+        virial_reduce_blocks);
     CUDA_CHECK_KERNEL
     cudaDeviceSynchronize();
     nep_data.total_virial.copy_to_host(h_etot_virial_global+1, 6);

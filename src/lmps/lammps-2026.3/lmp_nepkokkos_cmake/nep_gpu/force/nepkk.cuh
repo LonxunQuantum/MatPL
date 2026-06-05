@@ -61,6 +61,7 @@ struct NEPKK_Data {
   GPU_Vector<double> force_per_atom;
   GPU_Vector<double> virial_per_atom;
   GPU_Vector<double> total_virial;
+  GPU_Vector<double> partial_virial;
 };
 
 class NEPKK

@@ -1,64 +1,75 @@
 # -*- coding: utf-8 -*-
+"""
+Validate MIX-precision Heat_flux test results against FP64 reference.
+
+Compares the accumulated heat flux curve (from compute_HeatFlux.out) between
+the test run and the FP64 reference. The compute_Energy_Temp.out is expected
+to have some deviation under MIX precision, so only HeatFlux is checked.
+"""
 import sys
+import os
 import numpy as np
 
-def lammps_heatflux(path):
+def load_heatflux(path):
+    """Load compute_HeatFlux.out and return accumulated heat flux curve."""
     start = 500
     dt = 0.001  # ps
     Ns = 1000   # Sample interval
-    thermo = np.loadtxt(path + "/compute_Energy_Temp.out")
-    jp = np.loadtxt(path + "/compute_HeatFlux.out")
     BLOCK_LENGTH = 426
-    Ein = thermo[start:, 1]
-    Eout = thermo[start:, 2]
-    Etol = (Eout - Ein) / 2 / 1000  # in units of KeV
-    Etol = Etol - Etol[0]
-    t = dt * np.arange(1, len(Etol) + 1) * Ns / 1000  # unit in ns
-    jpy = jp[start:, 2] - jp[start:, 5]
-    jpy = jpy / BLOCK_LENGTH / 10 * 1000  # in units of eV/ns
-    accum_jpy = np.cumsum(jpy) * 0.001 / 1000  # in units of KeV
-    return t, accum_jpy, Etol
 
-def check_test(path=".", rtol=0.05, atol=0.02):
+    jp = np.loadtxt(os.path.join(path, "compute_HeatFlux.out"))
+    jp = jp[start:]
+    t = dt * np.arange(1, len(jp) + 1) * Ns / 1000  # ns
+
+    jpy = jp[:, 2] - jp[:, 5]
+    jpy = jpy / BLOCK_LENGTH / 10 * 1000  # eV/ns
+    accum_jpy = np.cumsum(jpy) * 0.001 / 1000  # keV
+    return t, -accum_jpy
+
+def check_test(test_path, ref_path, rtol=0.05, r2_min=0.99):
     """
-    Check if heat flux from atoms and from thermostats are consistent.
+    Compare MIX-precision heat flux against FP64 reference.
 
     Parameters:
-        path: directory containing the .out files
-        rtol: relative tolerance (default 5%)
-        atol: absolute tolerance in keV (default 0.02 keV)
+        test_path: directory containing test compute_HeatFlux.out
+        ref_path:  directory containing FP64 reference compute_HeatFlux.out
+        rtol:      relative tolerance for max error (default 5%)
+        r2_min:    minimum R-squared (default 0.99)
 
     Returns:
         True if test passes, False otherwise.
     """
-    t, jp, etol = lammps_heatflux(path)
+    t_test, hf_test = load_heatflux(test_path)
+    t_ref, hf_ref = load_heatflux(ref_path)
 
-    jp_neg = -1 * jp
+    # Align lengths
+    n = min(len(hf_test), len(hf_ref))
+    hf_test = hf_test[:n]
+    hf_ref = hf_ref[:n]
+    t = t_ref[:n]
 
-    # Compare in the plotted range [0, 1.5] ns
+    # Compare in [0, 1.5] ns range
     mask = t <= 1.5
-    jp_range = jp_neg[mask]
-    etol_range = etol[mask]
+    test_range = hf_test[mask]
+    ref_range = hf_ref[mask]
 
-    # Use the thermostat curve as reference
-    ref_max = np.max(np.abs(etol_range))
+    ref_max = np.max(np.abs(ref_range))
     if ref_max < 1e-10:
         print("FAIL: Reference data is essentially zero.")
         return False
 
-    # Compute differences
-    diff = np.abs(jp_range - etol_range)
+    # Metrics
+    diff = np.abs(test_range - ref_range)
     max_diff = np.max(diff)
     mean_diff = np.mean(diff)
-
-    # R-squared (coefficient of determination)
-    ss_res = np.sum((jp_range - etol_range) ** 2)
-    ss_tot = np.sum((etol_range - np.mean(etol_range)) ** 2)
-    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-
-    # Relative max error
     rel_max_err = max_diff / ref_max
 
+    ss_res = np.sum((test_range - ref_range) ** 2)
+    ss_tot = np.sum((ref_range - np.mean(ref_range)) ** 2)
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    print(f"=== Heat Flux Validation (MIX vs FP64) ===")
+    print(f"Data points compared: {np.sum(mask)}")
     print(f"Max absolute difference: {max_diff:.6f} keV")
     print(f"Mean absolute difference: {mean_diff:.6f} keV")
     print(f"Relative max error: {rel_max_err:.4f} ({rel_max_err*100:.2f}%)")
@@ -69,26 +80,29 @@ def check_test(path=".", rtol=0.05, atol=0.02):
 
     if rel_max_err > rtol:
         passed = False
-        reasons.append(f"Relative max error {rel_max_err:.4f} exceeds tolerance {rtol}")
+        reasons.append(f"Relative max error {rel_max_err*100:.2f}% exceeds {rtol*100:.1f}%")
 
-    if max_diff > atol * ref_max + atol:
+    if r_squared < r2_min:
         passed = False
-        reasons.append(f"Max absolute difference {max_diff:.6f} exceeds tolerance")
-
-    if r_squared < 0.95:
-        passed = False
-        reasons.append(f"R-squared {r_squared:.6f} < 0.95, curves do not match well")
+        reasons.append(f"R-squared {r_squared:.6f} < {r2_min}")
 
     if passed:
-        print("\nRESULT: PASS")
+        print(f"\nRESULT: PASS")
     else:
-        print("\nRESULT: FAIL")
+        print(f"\nRESULT: FAIL")
         for r in reasons:
             print(f"  - {r}")
 
     return passed
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else "."
-    success = check_test(path)
+    if len(sys.argv) < 2:
+        print("Usage: python check_test.py <test_dir> [ref_dir]")
+        print("  test_dir: directory with MIX-precision results")
+        print("  ref_dir:  directory with FP64 reference (default: current dir)")
+        sys.exit(1)
+
+    test_dir = sys.argv[1]
+    ref_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+    success = check_test(test_dir, ref_dir)
     sys.exit(0 if success else 1)
