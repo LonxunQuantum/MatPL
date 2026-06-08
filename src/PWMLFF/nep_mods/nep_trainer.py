@@ -182,6 +182,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                 real_lr = optimizer.param_groups[0]["lr"] * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
 
         learning_rate.update(real_lr)
+        data_mask = Virial_label[:, 0] > -1e6
+        train_virial = args.optimizer_param.train_virial and data_mask.any().item()
         # check_cuda_memory(epoch, -1, f"before forword atomnums {Force_label.shape[0]}", False, args.rank)
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
             NN_radial, NL_radial, Ri_radial,
@@ -190,7 +192,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             charge_label=sample.get("charge"),
             position=sample.get("position"),
             box_original=sample.get("box_original"),
-            volume=sample.get("volume")
+            volume=sample.get("volume"),
+            need_force=True,
+            need_bec=args.optimizer_param.train_bec,
+            need_charge_virial=train_virial,
+            need_charge_energy=True
         )
         # check_cuda_memory(epoch, -1, "end forword", False, args.rank)
         optimizer.zero_grad()
@@ -202,14 +208,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         loss_Egroup_val = None
         loss_Virial_val = None
-        train_virial = False
 
         if args.optimizer_param.train_egroup:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
-        if args.optimizer_param.train_virial:
-            data_mask = Virial_label[:, 0] > -1e6
+        if train_virial:
             _Virial_label = Virial_label[:, [0, 1, 2, 4, 5, 8]][data_mask]
-            train_virial = data_mask.any().item()
             if train_virial:
                 loss_Virial_val = criterion(Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]], _Virial_label)
                 loss_Virial_per_atom_val = criterion(
@@ -563,6 +566,8 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             #             atom_type_map[0], atom_type[0], 0, Egroup_weight, Divider)
 
                 # atom_type_map: we only need the first element, because it is same for each image of MOVEMENT
+            data_mask = Virial_label[:, 0] > -1e6
+            need_charge_virial = args.optimizer_param.train_virial and data_mask.any().item()
             Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
                     NN_radial, NL_radial, Ri_radial,
                         NN_angular, NL_angular, Ri_angular,
@@ -570,7 +575,11 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                             charge_label=sample.get("charge"),
                             position=sample.get("position"),
                             box_original=sample.get("box_original"),
-                            volume=sample.get("volume"))
+                            volume=sample.get("volume"),
+                            need_force=True,
+                            need_bec=args.optimizer_param.train_bec,
+                            need_charge_virial=need_charge_virial,
+                            need_charge_energy=True)
 
             loss_F_val = criterion(Force_predict, Force_label)
             loss_Etot_val = criterion(Etot_predict, Etot_label)
@@ -758,6 +767,8 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         Force_label  = sample["force"]
 
         # measure data loading time
+        data_mask = Virial_label[:, 0] > -1e6
+        need_charge_virial = args.optimizer_param.train_virial and data_mask.any().item()
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
                 NN_radial, NL_radial, Ri_radial,
                     NN_angular, NL_angular, Ri_angular,
@@ -765,7 +776,11 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
                         charge_label=sample.get("charge"),
                         position=sample.get("position"),
                         box_original=sample.get("box_original"),
-                        volume=sample.get("volume"))
+                        volume=sample.get("volume"),
+                        need_force=True,
+                        need_bec=args.optimizer_param.train_bec,
+                        need_charge_virial=need_charge_virial,
+                        need_charge_energy=True)
 
         # mse
         loss_F_val = criterion(Force_predict, Force_label)

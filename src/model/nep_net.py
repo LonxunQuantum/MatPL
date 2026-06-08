@@ -338,7 +338,11 @@ class NEP(nn.Module):
                 charge_label: Optional[torch.Tensor] = None,
                 position: Optional[torch.Tensor] = None,
                 box_original: Optional[torch.Tensor] = None,
-                volume: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+                volume: Optional[torch.Tensor] = None,
+                need_force: Optional[bool] = True,
+                need_bec: Optional[bool] = True,
+                need_charge_virial: Optional[bool] = True,
+                need_charge_energy: Optional[bool] = True) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass of the model.
 
@@ -427,41 +431,58 @@ class NEP(nn.Module):
             self.atomic_charge = charge
             charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
             self.charge_predict = charge_predict
-            self.atomic_bec = self.calculate_bec(
-                charge,
-                self.atomic_charge_shifted,
-                radial_Ri,
-                radial_Ri_d,
-                radial_NL,
-                Ri_angular,
-                Ri_d_angular,
-                NL_angular,
-                device,
-                dtype)
+            if need_bec:
+                self.atomic_bec = self.calculate_bec(
+                    charge,
+                    self.atomic_charge_shifted,
+                    radial_Ri,
+                    radial_Ri_d,
+                    radial_NL,
+                    Ri_angular,
+                    Ri_d_angular,
+                    NL_angular,
+                    device,
+                    dtype)
 
         charge_energy = None
         charge_virial = None
         charge_position = None
-        if self.charge_mode and self.atomic_charge_shifted is not None and position is not None and box_original is not None:
-            charge_position = position.detach().clone().to(dtype=dtype, device=device).requires_grad_(True)
+        charge_box_original = None
+        charge_volume = None
+        if (self.charge_mode and self.atomic_charge_shifted is not None and
+                position is not None and box_original is not None and
+                (need_charge_energy or need_charge_virial)):
             charge_box_original = box_original.to(dtype=dtype, device=device)
             charge_volume = volume.to(dtype=dtype, device=device) if volume is not None else None
-            charge_energy = self.calculate_charge_energy(
-                charge_position,
-                charge_box_original,
-                charge_volume,
-                num_atom,
-                self.atomic_charge_shifted,
-                dtype,
-                device)
-            charge_virial = self.calculate_charge_virial(
-                position.to(dtype=dtype, device=device),
-                charge_box_original,
-                charge_volume,
-                num_atom,
-                self.atomic_charge_shifted,
-                dtype,
-                device)
+            if need_charge_energy:
+                charge_position = position.detach().clone().to(dtype=dtype, device=device).requires_grad_(True)
+                if need_charge_virial:
+                    charge_energy, charge_virial = self.calculate_charge_energy_virial(
+                        charge_position,
+                        charge_box_original,
+                        charge_volume,
+                        num_atom,
+                        self.atomic_charge_shifted,
+                        dtype,
+                        device)
+                else:
+                    charge_energy = self.calculate_charge_energy(
+                        charge_position,
+                        charge_box_original,
+                        charge_volume,
+                        num_atom,
+                        self.atomic_charge_shifted,
+                        dtype,
+                        device)
+            elif need_charge_virial:
+                charge_virial = self.calculate_charge_virial(
+                    position.to(dtype=dtype, device=device),
+                    charge_box_original,
+                    charge_volume,
+                    num_atom,
+                    self.atomic_charge_shifted,
+                    dtype,
+                    device)
         
         Egroup = self.get_egroup(Ei, Egroup_weight, divider) if Egroup_weight is not None else None
         # Ei = torch.squeeze(Ei, 1)
@@ -485,12 +506,15 @@ class NEP(nn.Module):
 
         split_sizes = num_atom.reshape(-1).tolist()
         energy_per_image = Ei.split(split_sizes)
-        Etot = torch.stack([x.sum() for x in energy_per_image]).unsqueeze(-1)
+        nep_Etot = torch.stack([x.sum() for x in energy_per_image]).unsqueeze(-1)
+        Etot_for_energy = nep_Etot
         if charge_energy is not None:
-            Etot = Etot + charge_energy.reshape(-1, 1)
+            Etot_for_energy = Etot_for_energy + charge_energy.reshape(-1, 1)
+        Etot_for_force = Etot_for_energy
+        Etot = Etot_for_energy
         # Etot = torch.sum(Ei, 1).unsqueeze(1)
 
-        if  is_calc_f is False: #False: # is_calc_f is False:   ##is_calc_f is False
+        if is_calc_f is False or need_force is False: #False: # is_calc_f is False:   ##is_calc_f is False
             Force, Virial = None, None
             # print("==single time: tall {} ei {} zbl ei {}".format(t2-t0, t1-t0, t2-t1))
         else:
@@ -498,7 +522,7 @@ class NEP(nn.Module):
             Force, Virial = self.calculate_force_virial(radial_Ri, radial_Ri_d, 
                                                         Ri_angular, Ri_d_angular, 
                                                         ri_zbl, ri_d_zbl,
-                                                        Etot, natoms_sum, 
+                                                        Etot_for_force, natoms_sum,
                                                         radial_NL, 
                                                         NL_angular, 
                                                         neigh_zbl,
@@ -630,6 +654,41 @@ class NEP(nn.Module):
             energies.append(image_energy)
         return torch.stack(energies)
 
+    def calculate_charge_energy_virial(
+        self,
+        position: torch.Tensor,
+        box_original: torch.Tensor,
+        volume: Optional[torch.Tensor],
+        num_atom: torch.Tensor,
+        charge: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        split_sizes = num_atom.reshape(-1).tolist()
+        atom_starts = torch.cumsum(
+            torch.cat([torch.zeros(1, dtype=num_atom.dtype, device=device), num_atom.reshape(-1)[:-1]]),
+            dim=0)
+        energies = []
+        virials = []
+        alpha = torch.as_tensor(self.Pi / self.cutoff_radial, dtype=dtype, device=device)
+        alpha_factor = 0.25 / (alpha * alpha)
+        identity = torch.eye(3, dtype=dtype, device=device)
+        for image_idx, (start_tensor, atom_num) in enumerate(zip(atom_starts, split_sizes)):
+            start = int(start_tensor.item())
+            end = start + atom_num
+            image_energy, image_virial = self.calculate_charge_reciprocal_energy_virial(
+                position[start:end],
+                charge[start:end],
+                box_original[image_idx],
+                volume[image_idx] if volume is not None else None,
+                alpha,
+                alpha_factor,
+                identity,
+                dtype,
+                device)
+            energies.append(image_energy)
+            virials.append(image_virial.reshape(9))
+        return torch.stack(energies), torch.stack(virials)
+
     def calculate_charge_virial(
         self,
         position: torch.Tensor,
@@ -670,6 +729,53 @@ class NEP(nn.Module):
                 create_graph=True)[0]
             virials.append(image_virial.reshape(9))
         return -torch.stack(virials)
+
+    def calculate_charge_reciprocal_energy_virial(
+        self,
+        position: torch.Tensor,
+        charge: torch.Tensor,
+        box: torch.Tensor,
+        volume: Optional[torch.Tensor],
+        alpha: torch.Tensor,
+        alpha_factor: torch.Tensor,
+        identity: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        lattice = box.reshape(3, 3)
+        det = torch.det(lattice)
+        abs_det = torch.abs(det)
+        if volume is not None:
+            abs_det = torch.abs(volume.reshape(-1)[0])
+        reciprocal = 2.0 * self.Pi * torch.linalg.inv(lattice).T
+        b1, b2, b3 = reciprocal[:, 0], reciprocal[:, 1], reciprocal[:, 2]
+        volume_k = (2.0 * self.Pi) ** 3 / abs_det
+        n1_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b2, b3).norm() / volume_k).item())
+        n2_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b3, b1).norm() / volume_k).item())
+        n3_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b1, b2).norm() / volume_k).item())
+        ksq_max = (2.0 * self.Pi) ** 2 * alpha * alpha
+        energy = torch.zeros((), dtype=dtype, device=device)
+        virial = torch.zeros((3, 3), dtype=dtype, device=device)
+        prefactor = 2.0 * torch.abs((2.0 * self.Pi) / det)
+        for n1 in range(0, n1_max + 1):
+            for n2 in range(-n2_max, n2_max + 1):
+                for n3 in range(-n3_max, n3_max + 1):
+                    if n1 * n1 + n2 * n2 + n3 * n3 == 0:
+                        continue
+                    if (n1 == 0 and n2 < 0) or (n1 == 0 and n2 == 0 and n3 < 0):
+                        continue
+                    kvec = n1 * b1 + n2 * b2 + n3 * b3
+                    ksq = torch.dot(kvec, kvec)
+                    if bool((ksq < ksq_max).item()):
+                        kr = position.matmul(kvec)
+                        s_real = torch.sum(charge * torch.cos(kr))
+                        s_imag = -torch.sum(charge * torch.sin(kr))
+                        g = prefactor * torch.exp(-ksq * alpha_factor) / ksq
+                        k_energy = g * (s_real * s_real + s_imag * s_imag)
+                        energy = energy + k_energy
+                        virial = virial + k_energy * (
+                            identity - 2.0 * (alpha_factor + 1.0 / ksq) * torch.outer(kvec, kvec)
+                        )
+        return self.K_C_SP * energy, self.K_C_SP * virial
 
     def calculate_charge_reciprocal_energy(
         self,
