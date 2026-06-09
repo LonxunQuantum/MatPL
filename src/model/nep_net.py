@@ -730,6 +730,35 @@ class NEP(nn.Module):
             virials.append(image_virial.reshape(9))
         return -torch.stack(virials)
 
+    def get_charge_kvecs(
+        self,
+        reciprocal: torch.Tensor,
+        b1: torch.Tensor,
+        b2: torch.Tensor,
+        b3: torch.Tensor,
+        abs_det: torch.Tensor,
+        alpha: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        volume_k = (2.0 * self.Pi) ** 3 / abs_det
+        n1_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b2, b3).norm() / volume_k).item())
+        n2_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b3, b1).norm() / volume_k).item())
+        n3_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b1, b2).norm() / volume_k).item())
+        n1_values = torch.arange(0, n1_max + 1, dtype=torch.int64, device=device)
+        n2_values = torch.arange(-n2_max, n2_max + 1, dtype=torch.int64, device=device)
+        n3_values = torch.arange(-n3_max, n3_max + 1, dtype=torch.int64, device=device)
+        n1_grid, n2_grid, n3_grid = torch.meshgrid(n1_values, n2_values, n3_values, indexing="ij")
+        nonzero = (n1_grid * n1_grid + n2_grid * n2_grid + n3_grid * n3_grid) != 0
+        half_space = ~((n1_grid == 0) & ((n2_grid < 0) | ((n2_grid == 0) & (n3_grid < 0))))
+        k_indices = torch.stack(
+            [n1_grid[nonzero & half_space], n2_grid[nonzero & half_space], n3_grid[nonzero & half_space]],
+            dim=-1,
+        ).to(dtype=dtype)
+        kvecs = k_indices.matmul(reciprocal.T)
+        ksq = torch.sum(kvecs * kvecs, dim=-1)
+        valid = ksq < (2.0 * self.Pi) ** 2 * alpha * alpha
+        return kvecs[valid], ksq[valid]
+
     def calculate_charge_reciprocal_energy_virial(
         self,
         position: torch.Tensor,
@@ -748,33 +777,17 @@ class NEP(nn.Module):
             abs_det = torch.abs(volume.reshape(-1)[0])
         reciprocal = 2.0 * self.Pi * torch.linalg.inv(lattice).T
         b1, b2, b3 = reciprocal[:, 0], reciprocal[:, 1], reciprocal[:, 2]
-        volume_k = (2.0 * self.Pi) ** 3 / abs_det
-        n1_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b2, b3).norm() / volume_k).item())
-        n2_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b3, b1).norm() / volume_k).item())
-        n3_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b1, b2).norm() / volume_k).item())
-        ksq_max = (2.0 * self.Pi) ** 2 * alpha * alpha
-        energy = torch.zeros((), dtype=dtype, device=device)
-        virial = torch.zeros((3, 3), dtype=dtype, device=device)
+        kvecs, ksq = self.get_charge_kvecs(reciprocal, b1, b2, b3, abs_det, alpha, dtype, device)
         prefactor = 2.0 * torch.abs((2.0 * self.Pi) / det)
-        for n1 in range(0, n1_max + 1):
-            for n2 in range(-n2_max, n2_max + 1):
-                for n3 in range(-n3_max, n3_max + 1):
-                    if n1 * n1 + n2 * n2 + n3 * n3 == 0:
-                        continue
-                    if (n1 == 0 and n2 < 0) or (n1 == 0 and n2 == 0 and n3 < 0):
-                        continue
-                    kvec = n1 * b1 + n2 * b2 + n3 * b3
-                    ksq = torch.dot(kvec, kvec)
-                    if bool((ksq < ksq_max).item()):
-                        kr = position.matmul(kvec)
-                        s_real = torch.sum(charge * torch.cos(kr))
-                        s_imag = -torch.sum(charge * torch.sin(kr))
-                        g = prefactor * torch.exp(-ksq * alpha_factor) / ksq
-                        k_energy = g * (s_real * s_real + s_imag * s_imag)
-                        energy = energy + k_energy
-                        virial = virial + k_energy * (
-                            identity - 2.0 * (alpha_factor + 1.0 / ksq) * torch.outer(kvec, kvec)
-                        )
+        kr = position.matmul(kvecs.T)
+        s_real = torch.sum(charge.reshape(-1, 1) * torch.cos(kr), dim=0)
+        s_imag = -torch.sum(charge.reshape(-1, 1) * torch.sin(kr), dim=0)
+        g = prefactor * torch.exp(-ksq * alpha_factor) / ksq
+        k_energy = g * (s_real * s_real + s_imag * s_imag)
+        energy = torch.sum(k_energy)
+        k_outer = kvecs.reshape(-1, 3, 1) * kvecs.reshape(-1, 1, 3)
+        virial_term = identity.reshape(1, 3, 3) - 2.0 * (alpha_factor + 1.0 / ksq).reshape(-1, 1, 1) * k_outer
+        virial = torch.sum(k_energy.reshape(-1, 1, 1) * virial_term, dim=0)
         return self.K_C_SP * energy, self.K_C_SP * virial
 
     def calculate_charge_reciprocal_energy(
@@ -794,28 +807,13 @@ class NEP(nn.Module):
             abs_det = torch.abs(volume.reshape(-1)[0])
         reciprocal = 2.0 * self.Pi * torch.linalg.inv(lattice).T
         b1, b2, b3 = reciprocal[:, 0], reciprocal[:, 1], reciprocal[:, 2]
-        volume_k = (2.0 * self.Pi) ** 3 / abs_det
-        n1_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b2, b3).norm() / volume_k).item())
-        n2_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b3, b1).norm() / volume_k).item())
-        n3_max = int(torch.floor(alpha * 2.0 * self.Pi * torch.linalg.cross(b1, b2).norm() / volume_k).item())
-        ksq_max = (2.0 * self.Pi) ** 2 * alpha * alpha
-        energy = torch.zeros((), dtype=dtype, device=device)
+        kvecs, ksq = self.get_charge_kvecs(reciprocal, b1, b2, b3, abs_det, alpha, dtype, device)
         prefactor = 2.0 * torch.abs((2.0 * self.Pi) / det)
-        for n1 in range(0, n1_max + 1):
-            for n2 in range(-n2_max, n2_max + 1):
-                for n3 in range(-n3_max, n3_max + 1):
-                    if n1 * n1 + n2 * n2 + n3 * n3 == 0:
-                        continue
-                    if (n1 == 0 and n2 < 0) or (n1 == 0 and n2 == 0 and n3 < 0):
-                        continue
-                    kvec = n1 * b1 + n2 * b2 + n3 * b3
-                    ksq = torch.dot(kvec, kvec)
-                    if bool((ksq < ksq_max).item()):
-                        kr = position.matmul(kvec)
-                        s_real = torch.sum(charge * torch.cos(kr))
-                        s_imag = -torch.sum(charge * torch.sin(kr))
-                        g = prefactor * torch.exp(-ksq * alpha_factor) / ksq
-                        energy = energy + g * (s_real * s_real + s_imag * s_imag)
+        kr = position.matmul(kvecs.T)
+        s_real = torch.sum(charge.reshape(-1, 1) * torch.cos(kr), dim=0)
+        s_imag = -torch.sum(charge.reshape(-1, 1) * torch.sin(kr), dim=0)
+        g = prefactor * torch.exp(-ksq * alpha_factor) / ksq
+        energy = torch.sum(g * (s_real * s_real + s_imag * s_imag))
         return self.K_C_SP * energy
 
     def shift_total_charge(
