@@ -155,31 +155,39 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         batch_size = sample["num_atom"].shape[0]
         avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
         nr_batch_sample = sample["num_atom"].shape[0]
+        lr_scale = scale_learning_rate(
+            args.world_size,
+            batch_size,
+            avg_atom_number,
+            args.optimizer_param.scaling_method,
+        )
         # 如果采用预热，则前n个epoch 学习率线性增加
         if args.optimizer_param.warmup is not None and epoch <= args.optimizer_param.warmup: # epoch 从1计数
-            start_lr = args.optimizer_param.stop_lr * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
-            end_lr = args.optimizer_param.learning_rate * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
-            real_lr = warmup_lr(iter=i,
+            base_lr = warmup_lr(iter=i,
                                 iternum=len(train_loader),
                                 cur_epoch=epoch,
                                 warm_epochs=args.optimizer_param.warmup,
-                                start_lr=start_lr,
-                                end_lr=end_lr
+                                start_lr=args.optimizer_param.stop_lr,
+                                end_lr=args.optimizer_param.learning_rate
                                 )
+            real_lr = base_lr * lr_scale
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = real_lr
             is_warmlr = True
         else:
             is_warmlr = False
             if scheduler is None: # 不启用周期性重启
                 global_step = (epoch - 1) * len(train_loader) + i * nr_batch_sample
-                real_lr = adjust_lr(
+                base_lr = adjust_lr(
                     global_step, start_lr,
                     args.optimizer_param.stop_step, args.optimizer_param.decay_step, args.optimizer_param.stop_lr
                 )
-                real_lr = real_lr * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method) # rl * (sqrt(batch*gpu)
+                real_lr = base_lr * lr_scale # base_lr * (sqrt(batch*gpu)
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = real_lr
             else: # 周期性重启
-                real_lr = optimizer.param_groups[0]["lr"] * scale_learning_rate(args.world_size, batch_size, avg_atom_number, args.optimizer_param.scaling_method)
+                base_lr = optimizer.param_groups[0]["lr"]
+                real_lr = base_lr * lr_scale
 
         learning_rate.update(real_lr)
         data_mask = Virial_label[:, 0] > -1e6
@@ -224,7 +232,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
 
         loss = get_loss(
             args,
-            real_lr,
+            base_lr,
             avg_atom_number,
             loss_F_val,
             loss_Etot_val,
@@ -300,7 +308,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         progress.sync_meters()
 
     if args.rank == 0:
-        progress.display_summary(["Training Set:"])
+        progress.display_summary(["Training Set:", f"BaseLR {base_lr:.8e}", f"LR {real_lr:.8e}"])
 
     return (
         losses.avg,

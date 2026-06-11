@@ -3,7 +3,9 @@ import torch
 from src.user.input_param import InputParam
 
 def get_adam_loss_prefactor(start_prefactor, end_prefactor, real_lr, start_lr=0.001):
-    return end_prefactor + (start_prefactor - end_prefactor) * real_lr / start_lr
+    lr_ratio = real_lr / start_lr
+    lr_ratio = min(max(lr_ratio, 0.0), 1.0)
+    return end_prefactor + (start_prefactor - end_prefactor) * lr_ratio
 
 
 def get_loss(
