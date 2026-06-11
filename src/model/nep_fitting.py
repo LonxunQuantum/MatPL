@@ -220,13 +220,18 @@ class QNEPFittingNet(nn.Module):
                 output_weight = output_weight.reshape(hidden_dim, self.output_num)
             energy_weight = output_weight[:, 0:1]
             charge_weight = output_weight[:, 1:2]
+            energy_bias = torch.as_tensor(nep_txt_param[3], dtype=energy_weight.dtype)
+            if energy_bias.ndim > 0:
+                energy_bias = energy_bias.reshape(-1)[0]
+            energy_bias = energy_bias.reshape(1, 1)
         else:
             energy_weight = torch.Tensor(hidden_dim, 1)
             charge_weight = torch.Tensor(hidden_dim, 1)
             normal(energy_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
             normal(charge_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
+            energy_bias = torch.as_tensor(ener_shift, dtype=energy_weight.dtype).reshape(1, 1)
 
-        self.energy_head = LayerModule(energy_weight, None, None)
+        self.energy_head = LayerModule(energy_weight, energy_bias, None)
         self.charge_head = LayerModule(charge_weight, None, None)
 
     def get_param_list(self):
@@ -243,6 +248,8 @@ class QNEPFittingNet(nn.Module):
                     param_list.extend(list(layer.resnet_dt.flatten().cpu().detach().numpy()))
 
         param_list.extend(list(self.energy_head.weight.flatten().cpu().detach().numpy()))
+        if self.energy_head.bias is not None:
+            last_bias_list.extend((-self.energy_head.bias).flatten().cpu().detach().numpy())
         param_list.extend(list(self.charge_head.weight.flatten().cpu().detach().numpy()))
         return param_list, last_bias_list
 
@@ -263,6 +270,8 @@ class QNEPFittingNet(nn.Module):
                 x = hiden
 
         energy = torch.matmul(x, self.energy_head.weight)
+        if self.energy_head.bias is not None:
+            energy = energy + self.energy_head.bias
         charge = torch.matmul(x, self.charge_head.weight)
         return energy, charge
 '''    

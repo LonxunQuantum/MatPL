@@ -96,7 +96,7 @@ class NEP(nn.Module):
                                                     resnet_dt = False,
                                                     activation= "tanh",
                                                     input_dim = self.feature_nums,
-                                                    ener_shift= 0.0,
+                                                    ener_shift= energy_shift[i],
                                                     charge_mode = self.charge_mode,
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
@@ -900,8 +900,6 @@ class NEP(nn.Module):
                 charge[mask] = charge_ntype.reshape(-1)
             else:
                 Ei[mask] = output_ntype.reshape(-1)
-        if self.charge_mode:
-            Ei = Ei + self.common_bias.to(dtype=Ei.dtype, device=Ei.device)
         return Ei, charge
      
     def calculate_force_virial(self, 
