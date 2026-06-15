@@ -40,6 +40,16 @@ def get_charge_loss(charge_predict, sample, criterion, args:InputParam):
     return criterion(charge_predict, charge_label)
 
 
+def get_charge_loss_per_atom(charge_predict, sample, criterion, args:InputParam):
+    if not getattr(args.optimizer_param, "train_charge", False):
+        return None
+    if charge_predict is None or "charge" not in sample:
+        return None
+    charge_label = sample["charge"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
+    num_atom = sample["num_atom"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
+    return criterion(charge_predict / num_atom, charge_label / num_atom)
+
+
 def get_bec_loss(bec_predict, sample, criterion, args:InputParam):
     if not getattr(args.optimizer_param, "train_bec", False):
         return None, None
@@ -213,6 +223,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
+        loss_Charge_per_atom_val = get_charge_loss_per_atom(Charge_predict, sample, criterion, args)
         loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         loss_Egroup_val = None
         loss_Virial_val = None
@@ -269,8 +280,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_L2.update(L2.item(), batch_size)
         if args.optimizer_param.train_egroup:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
-        if loss_Charge_val is not None:
-            loss_Charge.update(loss_Charge_val.item(), batch_size)
+        if loss_Charge_per_atom_val is not None:
+            loss_Charge.update(loss_Charge_per_atom_val.item(), batch_size)
         if loss_BEC_val is not None:
             loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
         loss_Force.update(loss_F_val.item(), batch_size)
@@ -453,6 +464,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
 
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
+        loss_Charge_per_atom_val = get_charge_loss_per_atom(Charge_predict, sample, criterion, args)
         loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
@@ -489,8 +501,8 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         loss_Ei.update(loss_Ei_val.item(), Ei_predict.shape[0])
         if args.optimizer_param.train_egroup is True:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
-        if loss_Charge_val is not None:
-            loss_Charge.update(loss_Charge_val.item(), batch_size)
+        if loss_Charge_per_atom_val is not None:
+            loss_Charge.update(loss_Charge_per_atom_val.item(), batch_size)
         if loss_BEC_val is not None:
             loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
         loss_Force.update(loss_F_val.item(), batch_size)
