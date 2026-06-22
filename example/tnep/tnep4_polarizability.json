@@ -4,7 +4,7 @@
     "train_mode": 2,
     "model": {
         "descriptor": {
-            "version": 5,
+            "version": 4,
             "cutoff": [6.0, 4.0],
             "n_max": [4, 4],
             "basis_size": [12, 12],

@@ -222,7 +222,9 @@ class NepParam(object):
         descriptor_dict = get_parameter("descriptor", model_dict, {})
         # optimizer_dict = get_parameter("optimizer", json_dict, {})
 
-        self.version = 5
+        self.version = get_parameter("version", descriptor_dict, 5)  # 4=nep4, 5=nep5
+        if self.version not in [4, 5]:
+            raise Exception(f"ERROR! 'version' must be 4 (nep4) or 5 (nep5), got {self.version}")
         type_str = self.set_atom_type(type_list)
         self.type = type_str # number of atom types and list of chemical species
         self.type_num = len(type_list)
