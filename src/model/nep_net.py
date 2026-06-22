@@ -40,6 +40,7 @@ class NEP(nn.Module):
         self.set_init_nep_param(input_param)
         self.charge_mode = getattr(input_param.nep_param, "charge_mode", 0) or 0
         self.charge_output_num = 2 if self.charge_mode else 1
+        self.gpumd_nep4 = bool(getattr(input_param.nep_param, "gpumd_nep4", False))
         self.zbl = input_param.nep_param.zbl
         self.zbl_factor = input_param.nep_param.use_typewise_cutoff_zbl
         if self.input_param.precision == "float64":
@@ -100,7 +101,7 @@ class NEP(nn.Module):
                                                     charge_mode = self.charge_mode,
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
-                                                    last_bias= True,
+                                                    last_bias= not self.gpumd_nep4,
                                                     ))
             else:
                 self.fitting_net.append(FittingNet(network_size   = fitting_network_size, #[50, output_num]
@@ -169,15 +170,13 @@ class NEP(nn.Module):
         for i in range(self.ntypes):
             params, last_bias = self.fitting_net[i].get_param_list()
             nn_params.extend(params)
-            if len(last_bias) > 0:
+            if self.charge_mode and not self.gpumd_nep4:
+                nn_params.extend(last_bias)
+            elif len(last_bias) > 0:
                 type_bias.extend(last_bias)
-        # if len(type_bias) > 0:
-        #     nn_params.append(np.mean(type_bias))
-        # else:
-        #     nn_params.append(float(self.common_bias))
         if self.charge_mode:
             nn_params.append(float(self.sqrt_epsilon_inf.cpu().detach().numpy()))
-            nn_params.append(float(-self.common_bias.cpu().detach().numpy()))
+            nn_params.append(float(-self.common_bias.cpu().detach().numpy()) if self.gpumd_nep4 else 0.0)
         else:
             nn_params.extend(type_bias) # for new nep.txt test
         nn_params.extend(list(self.c_param_2.permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
@@ -900,6 +899,8 @@ class NEP(nn.Module):
                 charge[mask] = charge_ntype.reshape(-1)
             else:
                 Ei[mask] = output_ntype.reshape(-1)
+        if self.charge_mode and self.gpumd_nep4:
+            Ei = Ei + self.common_bias
         return Ei, charge
      
     def calculate_force_virial(self, 

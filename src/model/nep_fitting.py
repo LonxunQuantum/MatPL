@@ -220,16 +220,20 @@ class QNEPFittingNet(nn.Module):
                 output_weight = output_weight.reshape(hidden_dim, self.output_num)
             energy_weight = output_weight[:, 0:1]
             charge_weight = output_weight[:, 1:2]
-            energy_bias = torch.as_tensor(nep_txt_param[3], dtype=energy_weight.dtype)
-            if energy_bias.ndim > 0:
-                energy_bias = energy_bias.reshape(-1)[0]
-            energy_bias = energy_bias.reshape(1, 1)
+            energy_bias = None
+            if self.last_bias:
+                energy_bias = torch.as_tensor(nep_txt_param[3], dtype=energy_weight.dtype)
+                if energy_bias.ndim > 0:
+                    energy_bias = energy_bias.reshape(-1)[0]
+                energy_bias = energy_bias.reshape(1, 1)
         else:
             energy_weight = torch.Tensor(hidden_dim, 1)
             charge_weight = torch.Tensor(hidden_dim, 1)
             normal(energy_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
             normal(charge_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
-            energy_bias = torch.as_tensor(ener_shift, dtype=energy_weight.dtype).reshape(1, 1)
+            energy_bias = None
+            if self.last_bias:
+                energy_bias = torch.as_tensor(ener_shift, dtype=energy_weight.dtype).reshape(1, 1)
 
         self.energy_head = LayerModule(energy_weight, energy_bias, None)
         self.charge_head = LayerModule(charge_weight, None, None)

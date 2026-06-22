@@ -73,6 +73,7 @@ class Descriptor(object):
         self.l_max = None
         self.type_weight = None
         self.charge_mode = None
+        self.gpumd_nep4 = False
     '''
     description: 
     the return dict is used to assignment for value Ftype1_para in dfault_param.py
@@ -304,6 +305,8 @@ class Descriptor(object):
             dicts["l_max"] = self.l_max
             if self.charge_mode is not None:
                 dicts["charge_mode"] = self.charge_mode
+            if self.gpumd_nep4:
+                dicts["gpumd_nep4"] = self.gpumd_nep4
             # dicts["type_weight"] = self.type_weight
         else:
             raise Exception("descriptor to dict: the model type not realized:{}".format(self.model_type))

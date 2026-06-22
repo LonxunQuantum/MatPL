@@ -391,7 +391,8 @@ static __global__ void find_descriptor_charge2(
       F,
       Fp,
       charge,
-      charge_derivative);
+      charge_derivative,
+      paramb.version);
 
     g_pe[n1] += F;
     g_charge[n1] = charge;

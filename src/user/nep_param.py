@@ -40,6 +40,7 @@ class NepParam(object):
         self.charge_mode = 0
         self.charge_output_num = 1
         self.sqrt_epsilon_inf = None
+        self.gpumd_nep4 = False
 
     def normalize_charge_mode_from_json(self, charge_mode):
         if charge_mode is None or charge_mode is False:
@@ -79,6 +80,7 @@ class NepParam(object):
         version, type_num, type_list = line_1[0], int(line_1[1]), line_1[2:]
         self.charge_mode = 0
         self.sqrt_epsilon_inf = None
+        self.gpumd_nep4 = False
         if "charge" in version:
             charge_token = version.split("charge")[-1]
             self.charge_mode = self.normalize_charge_mode_from_nep_txt(charge_token)
@@ -153,6 +155,7 @@ class NepParam(object):
             is_gpumd_nep = False if need_line == line_num else True  #元素类型只有1个，可以认为是nep5
         else:
             is_gpumd_nep = False
+        self.gpumd_nep4 = bool(self.charge_mode and "4" in version and is_gpumd_nep)
         
         nep5_bias = []
         for i in range(0, self.type_num):
@@ -274,6 +277,9 @@ class NepParam(object):
         self.prediction = 0 # select between training and prediction (inference)
         self.charge_mode = self.normalize_charge_mode_from_json(get_parameter("charge_mode", descriptor_dict, None))
         self.charge_output_num = 2 if self.charge_mode else 1
+        self.gpumd_nep4 = get_parameter("gpumd_nep4", descriptor_dict, False)
+        if self.gpumd_nep4 and not self.charge_mode:
+            raise Exception("ERROR! gpumd_nep4 can only be used with charge_mode.")
         self.zbl = get_parameter("zbl", descriptor_dict, None)
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
         if self.zbl is None and self.use_typewise_cutoff_zbl is not None:

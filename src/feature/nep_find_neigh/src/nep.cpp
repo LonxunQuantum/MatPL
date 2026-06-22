@@ -189,7 +189,8 @@ void apply_ann_one_layer_charge(
   double& energy,
   double* energy_derivative,
   double& charge,
-  double* charge_derivative)
+  double* charge_derivative,
+  const int model_version)
 {
   for (int n = 0; n < num_neurons1; ++n) {
     double w0_times_q = 0.0;
@@ -209,7 +210,7 @@ void apply_ann_one_layer_charge(
       charge_derivative[d] += charge_weight * derivative;
     }
   }
-  energy -= b1[0];
+  energy -= (model_version == 5 ? w1[num_neurons1 * 2] + b1[0] : b1[0]);
 }
 
 void find_fc(double rc, double rcinv, double d12, double& fc)
@@ -1068,7 +1069,7 @@ void find_descriptor(
       if (paramb.charge_mode == 2) {
         apply_ann_one_layer_charge(
           annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F, Fp,
-          charge_value, charge_derivative);
+          charge_value, charge_derivative, paramb.version);
       } else if (paramb.version == 4) {
         apply_ann_one_layer(
           annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F, Fp,
@@ -2625,6 +2626,16 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
     paramb.charge_mode = 2;
     paramb.version = 4;
     zbl.enabled = true;
+  } else if (tokens[0] == "nep5_charge2") {
+    paramb.model_type = 0;
+    paramb.charge_mode = 2;
+    paramb.version = 5;
+    zbl.enabled = false;
+  } else if (tokens[0] == "nep5_zbl_charge2") {
+    paramb.model_type = 0;
+    paramb.charge_mode = 2;
+    paramb.version = 5;
+    zbl.enabled = true;
   } else if (tokens[0] == "nep4_dipole") {
     paramb.model_type = 1;
     paramb.version = 4;
@@ -2777,6 +2788,9 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
   
   if (paramb.charge_mode == 2) {
     annmb.num_para_ann = (annmb.dim + 3) * annmb.num_neurons1 * paramb.num_types + 2;
+    if (paramb.version == 5) {
+      annmb.num_para_ann += paramb.num_types;
+    }
   } else if (paramb.version == 3) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 + 1;
   } else if (paramb.version == 4) {
@@ -2797,7 +2811,7 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
 
   bool is_gpumd_nep = false;
   if (paramb.charge_mode == 2) {
-    is_gpumd_nep = true;
+    is_gpumd_nep = (paramb.version == 4);
   } else if (paramb.num_types == 1) {
     is_gpumd_nep = false;
   } else if (paramb.version == 4) {
@@ -2948,6 +2962,9 @@ void NEP_CPU::update_potential(double* parameters, ANN& ann)
       pointer += ann.num_neurons1;
       ann.w1[t] = pointer;
       pointer += ann.num_neurons1 * num_outputs;
+      if (paramb.version == 5) {
+        pointer += 1;
+      }
     }
     ann.sqrt_epsilon_inf = pointer;
     pointer += 1;

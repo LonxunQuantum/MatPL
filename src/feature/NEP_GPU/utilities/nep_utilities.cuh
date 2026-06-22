@@ -118,7 +118,8 @@ static __device__ void apply_ann_one_layer_charge(
   float& energy,
   float* energy_derivative,
   float& charge,
-  float* charge_derivative)
+  float* charge_derivative,
+  const int model_version)
 {
   for (int n = 0; n < N_neu; ++n) {
     float w0_times_q = 0.0f;
@@ -135,7 +136,7 @@ static __device__ void apply_ann_one_layer_charge(
       charge_derivative[d] += w1[n + N_neu] * y1;
     }
   }
-  energy -= b1[0];
+  energy -= (model_version == 5 ? w1[N_neu * 2] + b1[0] : b1[0]);
 }
 
 
