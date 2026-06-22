@@ -37,6 +37,22 @@ class NepParam(object):
         self.fix_cij = False
         self.fix_hiddenlayer=False
         self.fix_outlayer=False
+        self.train_mode = 0  # 0=potential, 1=dipole, 2=polarizability
+
+    @property
+    def is_dipole(self):
+        """True if training dipole moment (train_mode=1)."""
+        return self.train_mode == 1
+
+    @property
+    def is_polarizability(self):
+        """True if training polarizability tensor (train_mode=2)."""
+        return self.train_mode == 2
+
+    @property
+    def is_tensorial(self):
+        """True for any tensorial property (dipole or polarizability)."""
+        return self.train_mode in [1, 2]
 
     '''
     description: 
@@ -212,7 +228,9 @@ class NepParam(object):
         self.type_num = len(type_list)
         type_list_weight_default = [1.0 for _ in range(0, self.type_num)]
         self.type_weight = get_parameter("type_weight", descriptor_dict, type_list_weight_default) # force weights for different atom types
-        self.model_type = 0 # select to train potential 0, dipole 1, or polarizability 2
+        self.train_mode = get_parameter("train_mode", descriptor_dict, 0)  # 0=potential, 1=dipole, 2=polarizability
+        if self.train_mode not in [0, 1, 2]:
+            raise Exception(f"ERROR! 'train_mode' must be 0 (potential), 1 (dipole), or 2 (polarizability), got {self.train_mode}")
         self.prediction = 0 # select between training and prediction (inference)
         self.zbl = get_parameter("zbl", descriptor_dict, None)
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)

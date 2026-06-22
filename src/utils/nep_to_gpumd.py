@@ -82,9 +82,21 @@ author: wuxingxing
 def extract_model(nep_path:str):
     model = torch.load(nep_path, map_location=torch.device('cpu'), weights_only=False)
     model_type = model['json_file']['model_type']
-    if model_type.upper() != "NEP":
-        raise Exception("Error! the input model is not NEP model, please check the model!")
+    if model_type.upper() not in ["NEP", "TNEP"]:
+        raise Exception("Error! the input model is not NEP or TNEP model, please check the model!")
     model_atom_type = model['json_file']['atom_type']
+
+    # Determine train_mode for tNEP (default 0 for regular NEP)
+    train_mode = 0
+    # Check various locations where train_mode might be stored in the checkpoint
+    if 'json_file' in model and 'train_mode' in model['json_file']:
+        train_mode = model['json_file']['train_mode']
+    if 'json_file' in model and 'model' in model['json_file']:
+        m = model['json_file']['model']
+        if isinstance(m, dict) and 'descriptor' in m:
+            d = m['descriptor']
+            if isinstance(d, dict) and 'train_mode' in d:
+                train_mode = d['train_mode']
 
     if "max_NN_radial" in model['state_dict'].keys():
         max_NN_radial = model['state_dict']['max_NN_radial']
@@ -110,15 +122,26 @@ def extract_model(nep_path:str):
     atom_names = get_atomic_name_from_number(model_atom_type)
 
     zbl = model['json_file']['model']['descriptor']['zbl'] if 'zbl' in model['json_file']['model']['descriptor'].keys() else None
-    if zbl is None:
-        head_content =  "nep5   {} {}\n".format(len(atom_names), " ".join(map(str, atom_names)))
+
+    # Select header format based on train_mode
+    if train_mode == 1:
+        header_prefix = "nep5_dipole"
+    elif train_mode == 2:
+        header_prefix = "nep5_polarizability"
+    elif zbl is not None:
+        header_prefix = "nep5_zbl"
+    else:
+        header_prefix = "nep5"
+
+    if zbl is None or train_mode > 0:
+        head_content = "{}   {} {}\n".format(header_prefix, len(atom_names), " ".join(map(str, atom_names)))
     else:
         zbl_factor = model['json_file']['model']['descriptor']['use_typewise_cutoff_zbl'] if 'use_typewise_cutoff_zbl' in model['json_file']['model']['descriptor'].keys() else None
-        head_content =  "nep5_zbl   {} {}\n".format(len(atom_names), " ".join(map(str, atom_names)))
+        head_content = "{}   {} {}\n".format(header_prefix, len(atom_names), " ".join(map(str, atom_names)))
         if zbl_factor is None:
-            head_content +=  "zbl   {} {}\n".format(zbl/2, zbl)
+            head_content += "zbl   {} {}\n".format(zbl/2, zbl)
         else:
-            head_content +=  "zbl   {} {} {}\n".format(zbl/2, zbl, zbl_factor)
+            head_content += "zbl   {} {} {}\n".format(zbl/2, zbl, zbl_factor)
 
     head_content += "cutoff {} {} {} {}\n".format(cutoff[0], cutoff[1], max_NN_radial, max_NN_angular)            #cutoff 6.0 6.0
     head_content += "n_max  {}\n".format(" ".join(map(str, n_max)))             #n_max  4 4
@@ -146,6 +169,15 @@ def extract_model(nep_path:str):
         _last_bias = float(-model['state_dict'][f'{module}fitting_net.{i}.layers.1.bias'])
         nn_list.append(_last_bias)
 
+    # For polarizability (train_mode=2), write scalar head params AFTER tensorial head
+    if train_mode == 2:
+        for i in range(0, len(model_atom_type)):
+            nn_list.extend(list(model['state_dict'][f'{module}fitting_net_pol.{i}.layers.0.weight'].transpose(1, 0).flatten().cpu().detach().numpy()))
+            nn_list.extend((-model['state_dict'][f'{module}fitting_net_pol.{i}.layers.0.bias']).flatten().cpu().detach().numpy())
+            nn_list.extend(model['state_dict'][f'{module}fitting_net_pol.{i}.layers.1.weight'].flatten().cpu().detach().numpy())
+            _last_bias_pol = float(-model['state_dict'][f'{module}fitting_net_pol.{i}.layers.1.bias'])
+            nn_list.append(_last_bias_pol)
+
     nn_list.append(0.0) #last common bais
     c_list.extend(list(model['state_dict'][f'{module}c_param_2'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
     if l_max[0] > 0:
@@ -169,7 +201,10 @@ def extract_model(nep_path:str):
     else:
         assert len(c_list) == two_c_num
     nn_params = len(model_atom_type) * (feature_nums * ann + ann + ann)
-    assert len(nn_list) == nn_params+1+len(model_atom_type)
+    if train_mode == 2:
+        nn_params = nn_params * 2  # polarizability: doubled ANN params
+    assert len(nn_list) == nn_params+1+len(model_atom_type), \
+        f"Expected {nn_params+1+len(model_atom_type)} NN params, got {len(nn_list)} (train_mode={train_mode})"
     head_content += "\n".join(map(str, nn_list))
     head_content += "\n"
     head_content += "\n".join(map(str, c_list))

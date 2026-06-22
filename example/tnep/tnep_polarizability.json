@@ -1,0 +1,43 @@
+{
+    "model_type": "TNEP",
+    "atom_type": [8, 1],
+    "train_mode": 2,
+    "model": {
+        "descriptor": {
+            "cutoff": [6.0, 4.0],
+            "n_max": [4, 4],
+            "basis_size": [12, 12],
+            "l_max": [4, 2, 0],
+            "train_mode": 2
+        },
+        "fitting_net": {
+            "network_size": [40]
+        }
+    },
+    "optimizer": {
+        "optimizer": "ADAM",
+        "start_lr": 0.001,
+        "stop_lr": 1e-8,
+        "stop_step": 1000000,
+        "decay_step": 5000,
+        "epochs": 200,
+        "batch_size": 4,
+        "train_energy": false,
+        "train_force": false,
+        "train_polarizability": true,
+        "pre_fac_polarizability": 1.0,
+        "save_step": 10
+    },
+    "train_data": [
+        {
+            "format": "pwmat/movement",
+            "path": "./train_data"
+        }
+    ],
+    "valid_data": [
+        {
+            "format": "pwmat/movement",
+            "path": "./valid_data"
+        }
+    ]
+}

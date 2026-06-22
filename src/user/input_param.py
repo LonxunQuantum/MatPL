@@ -44,7 +44,7 @@ class InputParam(object):
         if self.inference and self.model_type in ["NN", "LINEAR"]:
             self.file_paths.nn_work = os.path.join(self.file_paths.json_dir, "work_test_dir")
 
-        if self.model_type in ["DP", "NN", "NEP", "LINEAR", "CHEBY"]:
+        if self.model_type in ["DP", "NN", "NEP", "LINEAR", "CHEBY", "TNEP"]:
             self.set_model_init_params(json_input)
             self.set_default_multi_gpu_info(json_input)
             # set optimizer
@@ -158,6 +158,9 @@ class InputParam(object):
         elif self.model_type == "Linear".upper():
             pass
         elif self.model_type == "NEP".upper():
+            self.set_nep_params(json_input)
+            self.file_paths.set_nep_native_file_paths()
+        elif self.model_type == "TNEP".upper():
             self.set_nep_params(json_input)
             self.file_paths.set_nep_native_file_paths()
         elif self.model_type == "CHEBY".upper():

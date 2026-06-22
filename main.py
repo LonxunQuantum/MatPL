@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 from src.user.nep_work import nep_train, nep_test, nep_test_ckpt, togpumd
+from src.user.tnep_work import tnep_train, tnep_test
 from src.user.dp_work import dp_train, dp_test
 # from src.user.cheby_work import cheby_train, cheby_test
 from src.user.envs import comm_info, matpl_help
@@ -118,10 +119,12 @@ if __name__ == "__main__":
                     linear_train(json_file, cmd_type)
                 elif model_type == "NEP".upper():
                     nep_train(json_file, cmd_type)
+                elif model_type == "TNEP".upper():
+                    tnep_train(json_file, cmd_type)
                 # elif model_type == "CHEBY".upper():
                 #     cheby_train(json_file, cmd_type)
                 else:
-                    raise Exception("Error! the model_type param in json file does not existent, you could use [DP/NN/LINEAR/NEP]")
+                    raise Exception("Error! the model_type param in json file does not existent, you could use [DP/NN/LINEAR/NEP/TNEP]")
             elif cmd_type == "test".upper():
                 if model_type == "DP".upper():
                     dp_test(json_file, cmd_type)
@@ -135,10 +138,12 @@ if __name__ == "__main__":
                     nep_test(json_file, cmd_type)
                     # nep_test_ckpt(json_file, cmd_type) 用于debug，做ckpt文件的推理，测试pytorch端正确性
                     pass
+                elif model_type == "TNEP".upper():
+                    tnep_test(json_file, cmd_type)
                 # elif model_type == "CHEBY".upper():
                 #     cheby_test(json_file, cmd_type)
                 else:
-                    raise Exception("Error! the model_type param in json file does not existent, you could use [DP/NN/LINEAR/NEP]")
+                    raise Exception("Error! the model_type param in json file does not existent, you could use [DP/NN/LINEAR/NEP/TNEP]")
             
             elif cmd_type == "gen_feat".upper():
                 if model_type == "DP".upper():
