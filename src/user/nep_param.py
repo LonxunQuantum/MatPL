@@ -202,7 +202,11 @@ class NepParam(object):
                 self.sqrt_epsilon_inf = float(lines[start_index])
                 start_index = start_index + 2
         if "5" in version:
-            start_index = start_index + 1 # the 0 of comm bias 
+            if self.charge_mode:
+                self.sqrt_epsilon_inf = float(lines[start_index])
+                start_index = start_index + 2 # sqrt_epsilon_inf + the 0 of common bias
+            else:
+                start_index = start_index + 1 # the 0 of common bias
             if self.charge_output_num == 1:
                 self.bias_lastlayer = np.array(nep5_bias)
             else:
