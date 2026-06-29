@@ -35,6 +35,143 @@ sys.path.append(codepath + '/..')
 sys.path.append(codepath + '/../aux')
 sys.path.append(codepath + '/../..')
 
+def _init_nep_txt_calculator(nep_txt_path, device_type="cpu", gpu_id=0, print_info=0):
+    if device_type == "cuda":
+        torch.cuda.set_device(gpu_id)
+        from src.feature.NEP_GPU.build.nep_gpu import NEP as NEP_GPU
+        calc_obj = NEP_GPU()
+        calc_obj.init_from_file(nep_txt_path, print_info, gpu_id)
+    else:
+        calc_obj = FindNeigh()
+        calc_obj.init_model(nep_txt_path)
+    return calc_obj
+
+
+def _calculate_nep_image_result(idx, image, input_atom_types, calc_obj, kspace_method="ewald"):
+    atom_nums = image.atom_nums
+    atom_types_struc = image.atom_types_image
+    input_atom_types = np.array(input_atom_types)
+    atom_types = image.atom_type
+    img_max_types = len(input_atom_types)
+    try:
+        ntypes = len(atom_types)
+    except TypeError:
+        ntypes = 1
+
+    if hasattr(image, "cartesian") and image.cartesian is False:
+        image._set_cartesian()
+
+    if ntypes > img_max_types:
+        raise Exception("Error! the atom types in structure file is larger than the max atom types in model!")
+    type_maps = np.array(type_map(atom_types_struc, input_atom_types)).reshape(1, -1)
+
+    inference_result = calc_obj.inference(
+        list(type_maps[0]),
+        list(np.array(image.lattice).transpose(1, 0).reshape(-1)),
+        np.array(image.position).transpose(1, 0).reshape(-1),
+        kspace_method
+    )
+    ei_predict, force_predict, virial_predict = inference_result[:3]
+    charge_predict = inference_result[3] if len(inference_result) > 3 else []
+    bec_predict = inference_result[4] if len(inference_result) > 4 else []
+
+    ei_predict = np.array(ei_predict).reshape(atom_nums)
+    etot_predict = np.sum(ei_predict)
+    etot_rmse = np.abs(etot_predict - image.Ep)
+    etot_atom_rmse = etot_rmse / atom_nums
+    ei_rmse = np.sqrt(np.mean((ei_predict - image.atomic_energy) ** 2))
+    force_predict = np.array(force_predict).reshape(3, atom_nums).transpose(1, 0)
+    force_rmse = np.sqrt(np.mean((force_predict - image.force) ** 2))
+    result = {
+        "idx": idx,
+        "etot_rmse": etot_rmse,
+        "etot_atom_rmse": etot_atom_rmse,
+        "ei_rmse": ei_rmse,
+        "force_rmse": force_rmse,
+        "etot_label": image.Ep,
+        "etot_predict": etot_predict,
+        "ei_label": image.atomic_energy,
+        "ei_predict": ei_predict,
+        "force_label": image.force,
+        "force_predict": force_predict
+    }
+    virial_predict = np.array(virial_predict)
+    if image.virial is not None:
+        virial_label = image.virial.flatten()
+        virial_rmse = np.sqrt(np.mean((virial_predict[[0,1,2,4,5,8]] - virial_label[[0,1,2,4,5,8]]) ** 2))
+        virial_atom_rmse = virial_rmse / atom_nums
+    else:
+        virial_rmse = -1e6
+        virial_atom_rmse = -1e6
+        virial_label = np.ones_like(virial_predict) * (-1e6)
+    result["virial_rmse"] = virial_rmse
+    result["virial_atom_rmse"] = virial_atom_rmse
+    result["virial_label"] = virial_label
+    result["virial_predict"] = virial_predict
+
+    charge_predict = np.array(charge_predict)
+    if charge_predict.size:
+        charge_predict = charge_predict.reshape(atom_nums)
+        charge_label = getattr(image, "charge", None)
+        if charge_label is None:
+            charge_label = getattr(image, "total_charge", 0.0)
+        charge_label = np.asarray(charge_label)
+        if charge_label.size == atom_nums:
+            charge_label = charge_label.reshape(atom_nums)
+            charge_rmse = np.sqrt(np.mean((charge_predict - charge_label) ** 2))
+            charge_predict_save = charge_predict
+        else:
+            charge_label = float(charge_label.reshape(-1)[0]) if charge_label.size else 0.0
+            charge_predict_save = np.sum(charge_predict)
+            charge_rmse = np.abs(charge_predict_save - charge_label)
+        result["charge_rmse"] = charge_rmse
+        result["charge_label"] = charge_label
+        result["charge_predict"] = charge_predict_save
+    else:
+        result["charge_rmse"] = -1e6
+        result["charge_label"] = np.array([])
+        result["charge_predict"] = np.array([])
+
+    bec_predict = np.array(bec_predict)
+    if bec_predict.size:
+        bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0)
+        bec_label = getattr(image, "bec", None)
+        if bec_label is not None:
+            bec_label = np.asarray(bec_label).reshape(-1, 9)
+            bec_rmse = np.sqrt(np.mean((bec_predict - bec_label) ** 2))
+        else:
+            bec_rmse = -1e6
+            bec_label = np.ones_like(bec_predict) * (-1e6)
+        result["bec_rmse"] = bec_rmse
+        result["bec_label"] = bec_label
+        result["bec_predict"] = bec_predict
+    else:
+        result["bec_rmse"] = -1e6
+        result["bec_label"] = np.array([])
+        result["bec_predict"] = np.array([])
+
+    return result
+
+
+def _split_indexed_images(indexed_images, worker_count):
+    worker_count = max(1, min(worker_count, len(indexed_images)))
+    chunks = [[] for _ in range(worker_count)]
+    loads = [0 for _ in range(worker_count)]
+    for indexed_image in sorted(indexed_images, key=lambda item: getattr(item[1], "atom_nums", 1), reverse=True):
+        worker_id = min(range(worker_count), key=lambda item: loads[item])
+        chunks[worker_id].append(indexed_image)
+        loads[worker_id] += getattr(indexed_image[1], "atom_nums", 1)
+    return [chunk for chunk in chunks if chunk]
+
+
+def _run_nep_txt_inference_worker(nep_txt_path, indexed_images, input_atom_types, device_type="cpu", gpu_id=0, kspace_method="ewald", print_info=0):
+    calc_obj = _init_nep_txt_calculator(nep_txt_path, device_type=device_type, gpu_id=gpu_id, print_info=print_info)
+    return [
+        _calculate_nep_image_result(idx, image, input_atom_types, calc_obj, kspace_method=kspace_method)
+        for idx, image in indexed_images
+    ]
+
+
 class nep_network:
     def __init__(self, nep_param:InputParam):
         self.input_param = nep_param
@@ -620,132 +757,67 @@ class nep_network:
                 wf.writelines(nep_content)
 
     # mulit cpu, code has error
-    def process_image(self, idx, image):
+    def process_image(self, idx, image, calc_obj=None):
         global calc
-        atom_nums = image.atom_nums
-        atom_types_struc = image.atom_types_image
-        input_atom_types = np.array(self.input_param.atom_type)
-        atom_types = image.atom_type
-        img_max_types = len(self.input_param.atom_type)
-        if isinstance(atom_types.tolist(), list):
-            ntypes = atom_types.shape[0]
-        else:
-            ntypes = 1
-
-        if ntypes > img_max_types:
-            raise Exception("Error! the atom types in structure file is larger than the max atom types in model!")
-        type_maps = np.array(type_map(atom_types_struc, input_atom_types)).reshape(1, -1)
-
-        inference_result = calc.inference(
-            list(type_maps[0]), 
-            list(np.array(image.lattice).transpose(1, 0).reshape(-1)), 
-            np.array(image.position).transpose(1, 0).reshape(-1)
-        )
-        ei_predict, force_predict, virial_predict = inference_result[:3]
-        charge_predict = inference_result[3] if len(inference_result) > 3 else []
-        bec_predict = inference_result[4] if len(inference_result) > 4 else []
-
-        ei_predict = np.array(ei_predict).reshape(atom_nums)
-        etot_predict = np.sum(ei_predict)
-        etot_rmse = np.abs(etot_predict - image.Ep)
-        # etot_rmse = np.sqrt(np.mean((etot_predict - image.Ep)**2)) because the images is 1
-        etot_atom_rmse = etot_rmse / atom_nums
-        ei_rmse = np.sqrt(np.mean((ei_predict - image.atomic_energy) ** 2))
-        force_predict = np.array(force_predict).reshape(3, atom_nums).transpose(1, 0)
-        force_rmse = np.sqrt(np.mean((force_predict - image.force) ** 2))
-        result = {
-            "idx": idx,
-            "etot_rmse": etot_rmse,
-            "etot_atom_rmse": etot_atom_rmse,
-            "ei_rmse": ei_rmse,
-            "force_rmse": force_rmse,
-            "etot_label": image.Ep,
-            "etot_predict": etot_predict,
-            "ei_label": image.atomic_energy,
-            "ei_predict": ei_predict,
-            "force_label": image.force,
-            "force_predict": force_predict
-        }
-        virial_predict = np.array(virial_predict)
-        if image.virial is not None:
-            virial_label = image.virial.flatten()
-            virial_rmse = np.sqrt(np.mean((virial_predict[[0,1,2,4,5,8]] - virial_label[[0,1,2,4,5,8]]) ** 2))
-            virial_atom_rmse = virial_rmse / atom_nums
-        else:
-            virial_rmse = -1e6
-            virial_atom_rmse = -1e6
-            virial_label = np.ones_like(virial_predict) * (-1e6)
-        result["virial_rmse"] = virial_rmse
-        result["virial_atom_rmse"] = virial_atom_rmse
-        result["virial_label"] = virial_label
-        result["virial_predict"] = virial_predict
-
-        charge_predict = np.array(charge_predict)
-        if charge_predict.size:
-            charge_predict = charge_predict.reshape(atom_nums)
-            charge_label = getattr(image, "charge", None)
-            if charge_label is None:
-                charge_label = getattr(image, "total_charge", 0.0)
-            charge_label = np.asarray(charge_label)
-            if charge_label.size == atom_nums:
-                charge_label = charge_label.reshape(atom_nums)
-                charge_rmse = np.sqrt(np.mean((charge_predict - charge_label) ** 2))
-                charge_predict_save = charge_predict
-            else:
-                charge_label = float(charge_label.reshape(-1)[0]) if charge_label.size else 0.0
-                charge_predict_save = np.sum(charge_predict)
-                charge_rmse = np.abs(charge_predict_save - charge_label)
-            result["charge_rmse"] = charge_rmse
-            result["charge_label"] = charge_label
-            result["charge_predict"] = charge_predict_save
-        else:
-            result["charge_rmse"] = -1e6
-            result["charge_label"] = np.array([])
-            result["charge_predict"] = np.array([])
-
-        bec_predict = np.array(bec_predict)
-        if bec_predict.size:
-            bec_predict = bec_predict.reshape(9, atom_nums).transpose(1, 0)
-            bec_label = getattr(image, "bec", None)
-            if bec_label is not None:
-                bec_label = np.asarray(bec_label).reshape(-1, 9)
-                bec_rmse = np.sqrt(np.mean((bec_predict - bec_label) ** 2))
-            else:
-                bec_rmse = -1e6
-                bec_label = np.ones_like(bec_predict) * (-1e6)
-            result["bec_rmse"] = bec_rmse
-            result["bec_label"] = bec_label
-            result["bec_predict"] = bec_predict
-        else:
-            result["bec_rmse"] = -1e6
-            result["bec_label"] = np.array([])
-            result["bec_predict"] = np.array([])
-
-        return result
+        if calc_obj is None:
+            calc_obj = calc
+        return _calculate_nep_image_result(idx, image, self.input_param.atom_type, calc_obj)
 
     def multi_cpus_nep_inference(self, nep_txt_path):
-        cpu_count = multiprocessing.cpu_count()
-        print("The CPUs: {}".format(cpu_count))
-        # cpu_count = 10 if cpu_count > 10 else cpu_count
         time0 = time.time()
         images = NepTestData(self.input_param).image_list
-        # img_max_types = len(self.input_param.atom_type)
-        # Use ProcessPoolExecutor to run the processes in parallel
-        global calc
-        calc = FindNeigh()
-        calc.init_model(nep_txt_path)
+        indexed_images = list(enumerate(images))
         results = []
-        if cpu_count == 1:
-            for idx, image in enumerate(images):
-                result = self.process_image(idx, image)
-                results.append(result)
+        if len(indexed_images) == 0:
+            raise Exception("Error! No images found for NEP test inference.")
+
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            gpu_count = min(torch.cuda.device_count(), len(indexed_images))
+            print("The GPUs: {}".format(gpu_count))
+            chunks = _split_indexed_images(indexed_images, gpu_count)
+            if gpu_count == 1:
+                results = _run_nep_txt_inference_worker(
+                    nep_txt_path,
+                    chunks[0],
+                    self.input_param.atom_type,
+                    device_type="cuda",
+                    gpu_id=0,
+                    print_info=1
+                )
+            else:
+                mp_context = multiprocessing.get_context("spawn")
+                with concurrent.futures.ProcessPoolExecutor(max_workers=gpu_count, mp_context=mp_context) as executor:
+                    futures = [
+                        executor.submit(
+                            _run_nep_txt_inference_worker,
+                            nep_txt_path,
+                            chunk,
+                            self.input_param.atom_type,
+                            "cuda",
+                            gpu_id,
+                            "ewald",
+                            1 if gpu_id == 0 else 0
+                        )
+                        for gpu_id, chunk in enumerate(chunks)
+                    ]
+                    for future in concurrent.futures.as_completed(futures):
+                        results.extend(future.result())
         else:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count) as executor:
-                futures = [
-                    executor.submit(self.process_image, idx, image)
-                    for idx, image in enumerate(images)
-                ]
-                results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            cpu_count = multiprocessing.cpu_count()
+            print("The CPUs: {}".format(cpu_count))
+            global calc
+            calc = FindNeigh()
+            calc.init_model(nep_txt_path)
+            if cpu_count == 1:
+                for idx, image in indexed_images:
+                    results.append(self.process_image(idx, image))
+            else:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count) as executor:
+                    futures = [
+                        executor.submit(self.process_image, idx, image)
+                        for idx, image in indexed_images
+                    ]
+                    results = [future.result() for future in concurrent.futures.as_completed(futures)]
         # Collecting results
         etot_rmse, etot_atom_rmse, ei_rmse, force_rmse = [], [], [], []
         etot_label_list, etot_predict_list = [], []
