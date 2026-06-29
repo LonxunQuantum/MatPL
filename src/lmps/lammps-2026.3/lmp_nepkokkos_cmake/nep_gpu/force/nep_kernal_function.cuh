@@ -47,7 +47,7 @@ static __device__ __inline__ double atomicAdd(double* address, double val)
 
 static __global__ void calc_2b_descriptor_sharemem(
   NEPKK::ParaMB paramb,
-  const float* param_c2,
+  const NEP_FLOAT* param_c2,
   const int N,//inum
   const int nlocal,
   int device,
@@ -58,10 +58,10 @@ static __global__ void calc_2b_descriptor_sharemem(
   int* g_NL_angular,// 顺带构建出小的多体近邻表
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
-  float* g_Fp)
+  const NEP_FLOAT* __restrict__ g_pos,
+  NEP_FLOAT* g_Fp)
 {
-  extern __shared__ float s_c[];
+  extern __shared__ NEP_FLOAT s_c[];
   const int total_elements = paramb.num_types * paramb.num_types * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
   for (int i = threadIdx.x; i < total_elements; i += blockDim.x) {
     s_c[i] = param_c2[i];
@@ -72,10 +72,9 @@ static __global__ void calc_2b_descriptor_sharemem(
     int count_angular = 0;    
     int atomi = g_ilist[n1];
     int t1 = g_type[atomi];
-    // float q[MAX_DIM] = {0.0f};
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
     int c_start = paramb.num_types * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
     // get radial descriptors
     for (int i1 = 0; i1 < g_numneigh[atomi]; ++i1) {
@@ -84,10 +83,10 @@ static __global__ void calc_2b_descriptor_sharemem(
       // if (atomi == 1) printf("calc n1 %d nn %d n2 %d\n", atomi, g_numneigh[atomi], n2);
 
       int c_idx_I = t1 * c_start + t2 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
-      float x12 = g_pos[n2*3  ] - x1;
-      float y12 = g_pos[n2*3+1] - y1;
-      float z12 = g_pos[n2*3+2] - z1;
-      float d12_square = x12 * x12 + y12 * y12 + z12 * z12;
+      NEP_FLOAT x12 = g_pos[n2*3  ] - x1;
+      NEP_FLOAT y12 = g_pos[n2*3+1] - y1;
+      NEP_FLOAT z12 = g_pos[n2*3+2] - z1;
+      NEP_FLOAT d12_square = x12 * x12 + y12 * y12 + z12 * z12;
       // if(n1%10==0) printf("ALL NEIGH n1 %d atomi %d t1 %d jnums %d n2 %d t2 %d r12 %f n1xyz %f %f %f n2xyz %f %f %f\n",\
         n1, atomi, t1, g_numneigh[atomi], n2, t2, sqrt(d12_square), x1, y1, z1, g_pos[n2*3], g_pos[n2*3+1], g_pos[n2*3+2]);
       
@@ -102,15 +101,15 @@ static __global__ void calc_2b_descriptor_sharemem(
       // if(n1%10==0) printf("2B NEIGH n1 %d atomi %d t1 %d jnums %d n2 %d t2 %d r12 %f n1xyz %f %f %f n2xyz %f %f %f\n",\
           n1, atomi, t1, g_numneigh[atomi], n2, t2, sqrt(d12_square), x1, y1, z1, g_pos[n2*3], g_pos[n2*3+1], g_pos[n2*3+2]);
 
-      float d12 = sqrt(d12_square);
+      NEP_FLOAT d12 = sqrt(d12_square);
       // 2b->qn
-      float fc12;
+      NEP_FLOAT fc12;
       find_fc(paramb.rc_radial, paramb.rcinv_radial, d12, fc12);
-      float fn12[MAX_NUM_N];//n_base
+      NEP_FLOAT fn12[MAX_NUM_N];//n_base
 
       find_fn(paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fn12);
       for (int n = 0; n < paramb.n_max_radial_plus1; ++n) {
-        float gn12 = 0.0f;
+        NEP_FLOAT gn12 = FLOAT_LIT(0.0);
         for (int k = 0; k < paramb.basis_size_radial_plus1; ++k) {
           gn12 += fn12[k] * s_c[c_idx_I + n * paramb.basis_size_radial_plus1 + k];
         }
@@ -138,28 +137,27 @@ static __global__ void calc_2b_descriptor(
   int* g_NL_angular,// 顺带构建出小的多体近邻表
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
-  float* g_Fp)
+  const NEP_FLOAT* __restrict__ g_pos,
+  NEP_FLOAT* g_Fp)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int count_angular = 0;
     int atomi = g_ilist[n1];
     int t1 = g_type[atomi];
-    // float q[MAX_DIM] = {0.0f};
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
     int c_start = paramb.num_types * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
     // get radial descriptors
     for (int i1 = 0; i1 < g_numneigh[atomi]; ++i1) {
       int n2 = g_firstneigh[i1 * num_neigh + atomi] & NEIGHMASK; 
       int t2 = g_type[n2];
       int c_idx_I = t1 * c_start + t2 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
-      float x12 = g_pos[n2*3  ] - x1;
-      float y12 = g_pos[n2*3+1] - y1;
-      float z12 = g_pos[n2*3+2] - z1;
-      float d12_square = x12 * x12 + y12 * y12 + z12 * z12;
+      NEP_FLOAT x12 = g_pos[n2*3  ] - x1;
+      NEP_FLOAT y12 = g_pos[n2*3+1] - y1;
+      NEP_FLOAT z12 = g_pos[n2*3+2] - z1;
+      NEP_FLOAT d12_square = x12 * x12 + y12 * y12 + z12 * z12;
       // if(n1%10==0) printf("ALL NEIGH n1 %d atomi %d t1 %d jnums %d n2 %d t2 %d r12 %f n1xyz %f %f %f n2xyz %f %f %f\n",\
         n1, atomi, t1, g_numneigh[atomi], n2, t2, sqrt(d12_square), x1, y1, z1, g_pos[n2*3], g_pos[n2*3+1], g_pos[n2*3+2]);
       
@@ -174,15 +172,15 @@ static __global__ void calc_2b_descriptor(
       // if(n1==1) printf("2B NEIGH n1 %d atomi %d t1 %d jnums %d n2 %d t2 %d r12 %f n1xyz %f %f %f n2xyz %f %f %f\n",\
           n1, atomi, t1, g_numneigh[atomi], n2, t2, sqrt(d12_square), x1, y1, z1, g_pos[n2*3], g_pos[n2*3+1], g_pos[n2*3+2]);
 
-      float d12 = sqrt(d12_square);
+      NEP_FLOAT d12 = sqrt(d12_square);
       // 2b->qn
-      float fc12;
+      NEP_FLOAT fc12;
       find_fc(paramb.rc_radial, paramb.rcinv_radial, d12, fc12);
-      float fn12[MAX_NUM_N];//n_base
+      NEP_FLOAT fn12[MAX_NUM_N];//n_base
 
       find_fn(paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fn12);
       for (int n = 0; n < paramb.n_max_radial_plus1; ++n) {
-        float gn12 = 0.0f;
+        NEP_FLOAT gn12 = FLOAT_LIT(0.0);
         for (int k = 0; k < paramb.basis_size_radial_plus1; ++k) {
           gn12 += fn12[k] * annmb.c[c_idx_I + n * paramb.basis_size_radial_plus1 + k];
           // if (n1==1 and n2 % 5 == 0) printf("2B C n1 %d t1 %d n2 %d t2 %d n %d k %d f12k=%f C=%f\n", n1, t1, n2, t2, n, k, fn12[k], annmb.c[c_idx_I + n * paramb.basis_size_radial_plus1 + k]);
@@ -196,11 +194,10 @@ static __global__ void calc_2b_descriptor(
   }
 }
 
-
 static __global__ void calc_3b_descriptor_sharemem(
   NEPKK::ParaMB paramb,
   NEPKK::ANN annmb,
-  const float* param_c3,
+  const NEP_FLOAT* param_c3,
   const int N,
   const int nlocal,
   int device,
@@ -209,12 +206,12 @@ static __global__ void calc_3b_descriptor_sharemem(
   const int* g_NL_angular,// 顺带构建出小的多体近邻表
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
-  float* g_Fp,
+  const NEP_FLOAT* __restrict__ g_pos,
+  NEP_FLOAT* g_Fp,
   double* g_pe,
-  float* g_sum_fxyz)
+  NEP_FLOAT* g_sum_fxyz)
 {
-  extern __shared__ float s_c[];
+  extern __shared__ NEP_FLOAT s_c[];
   const int total_elements = paramb.num_types * paramb.num_types * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
   for (int i = threadIdx.x; i < total_elements; i += blockDim.x) {
     s_c[i] = param_c3[i];
@@ -224,31 +221,31 @@ static __global__ void calc_3b_descriptor_sharemem(
   if (n1 < N) {
     int atomi = g_ilist[n1];
     int t1 = g_type[atomi];
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
-    float q[MAX_DIM] = {0.0f};
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
+    NEP_FLOAT q[MAX_DIM] = {FLOAT_LIT(0.0)};
     for (int d = 0; d < paramb.n_max_radial_plus1; ++d) {
       q[d] = g_Fp[d * nlocal + atomi];
     }
 
     int c_start = paramb.num_types * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
     for (int n = 0; n < paramb.n_max_angular_plus1; ++n) {
-      float s[NUM_OF_ABC] = {0.0f};
+      NEP_FLOAT s[NUM_OF_ABC] = {FLOAT_LIT(0.0)};
       for (int i1 = 0; i1 < g_NN_angular[atomi]; ++i1) {
         int n2 = g_NL_angular[atomi + nlocal * i1];
         int t2 = g_type[n2];
         int c_idx_I = t1 * c_start + t2 * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
-        float x12 = g_pos[n2*3  ] - x1;
-        float y12 = g_pos[n2*3+1] - y1;
-        float z12 = g_pos[n2*3+2] - z1;
-        float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
-        float fc12;
+        NEP_FLOAT x12 = g_pos[n2*3  ] - x1;
+        NEP_FLOAT y12 = g_pos[n2*3+1] - y1;
+        NEP_FLOAT z12 = g_pos[n2*3+2] - z1;
+        NEP_FLOAT d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
+        NEP_FLOAT fc12;
         find_fc(paramb.rc_angular, paramb.rcinv_angular, d12, fc12);
 
-        float fn12[MAX_NUM_N];
+        NEP_FLOAT fn12[MAX_NUM_N];
         find_fn(paramb.basis_size_angular, paramb.rcinv_angular, d12, fc12, fn12);
-        float gn12 = 0.0f;
+        NEP_FLOAT gn12 = FLOAT_LIT(0.0);
         for (int k = 0; k < paramb.basis_size_angular_plus1; ++k) {
           gn12 += fn12[k] * s_c[c_idx_I + n * paramb.basis_size_angular_plus1 + k];
         }
@@ -265,7 +262,7 @@ static __global__ void calc_3b_descriptor_sharemem(
       q[d] = q[d] * Q_SCALER[d];
     }
 
-    float F = 0.0f, Fp[MAX_DIM] = {0.0f};
+    NEP_FLOAT F = FLOAT_LIT(0.0), Fp[MAX_DIM] = {FLOAT_LIT(0.0)};
 
     if (paramb.version == 4) {
       apply_ann_one_layer(
@@ -295,40 +292,39 @@ static __global__ void calc_3b_descriptor(
   const int* g_NL_angular,// 顺带构建出小的多体近邻表
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
-  float* g_Fp,
+  const NEP_FLOAT* __restrict__ g_pos,
+  NEP_FLOAT* g_Fp,
   double* g_pe,
-  float* g_sum_fxyz)
+  NEP_FLOAT* g_sum_fxyz)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int atomi = g_ilist[n1];
     int t1 = g_type[atomi];
-    // float q[MAX_DIM] = {0.0f};
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
-    float q[MAX_DIM] = {0.0f};
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
+    NEP_FLOAT q[MAX_DIM] = {FLOAT_LIT(0.0)};
     for (int d = 0; d < paramb.n_max_radial_plus1; ++d) {
       q[d] = g_Fp[d * nlocal + atomi];
     }
     int c_start = paramb.num_types * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
     for (int n = 0; n < paramb.n_max_angular_plus1; ++n) {
-      float s[NUM_OF_ABC] = {0.0f};
+      NEP_FLOAT s[NUM_OF_ABC] = {FLOAT_LIT(0.0)};
       for (int i1 = 0; i1 < g_NN_angular[atomi]; ++i1) {
         int n2 = g_NL_angular[atomi + nlocal * i1];
         int t2 = g_type[n2];
         int c_idx_I = t1 * c_start + t2 * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
-        float x12 = g_pos[n2*3  ] - x1;
-        float y12 = g_pos[n2*3+1] - y1;
-        float z12 = g_pos[n2*3+2] - z1;
-        float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
-        float fc12;
+        NEP_FLOAT x12 = g_pos[n2*3  ] - x1;
+        NEP_FLOAT y12 = g_pos[n2*3+1] - y1;
+        NEP_FLOAT z12 = g_pos[n2*3+2] - z1;
+        NEP_FLOAT d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
+        NEP_FLOAT fc12;
         find_fc(paramb.rc_angular, paramb.rcinv_angular, d12, fc12);
 
-        float fn12[MAX_NUM_N];
+        NEP_FLOAT fn12[MAX_NUM_N];
         find_fn(paramb.basis_size_angular, paramb.rcinv_angular, d12, fc12, fn12);
-        float gn12 = 0.0f;
+        NEP_FLOAT gn12 = FLOAT_LIT(0.0);
         for (int k = 0; k < paramb.basis_size_angular_plus1; ++k) {
           gn12 += fn12[k] * annmb.c[c_idx_I + n * paramb.basis_size_angular_plus1 + k + paramb.num_c_radial];
         }
@@ -345,7 +341,7 @@ static __global__ void calc_3b_descriptor(
       q[d] = q[d] * Q_SCALER[d];
     }
 
-    float F = 0.0f, Fp[MAX_DIM] = {0.0f};
+    NEP_FLOAT F = FLOAT_LIT(0.0), Fp[MAX_DIM] = {FLOAT_LIT(0.0)};
 
     if (paramb.version == 4) {
       apply_ann_one_layer(
@@ -366,6 +362,8 @@ static __global__ void calc_3b_descriptor(
 
 static __global__ void backward_force_2b_perneigh(
     int vflag_either,
+    int cvflag_atom,
+    int vatom_num,
     NEPKK::ParaMB paramb,
     NEPKK::ANN annmb,
     const int nall,
@@ -376,27 +374,30 @@ static __global__ void backward_force_2b_perneigh(
     const int* g_NL,
     const int* __restrict__ g_ilist,
     const int* __restrict__ g_type,
-    const float* __restrict__ g_pos,
-    const float* __restrict__ g_Fp,
+    const NEP_FLOAT* __restrict__ g_pos,
+    const NEP_FLOAT* __restrict__ g_Fp,
     double* g_f,
     double* g_virial)
 {
     // 动态共享内存指针
-    extern __shared__ float shared_all[];
-    float* s_g_Fp = shared_all;
-    float* shared = shared_all + paramb.n_max_radial_plus1;
+    extern __shared__ NEP_FLOAT shared_all[];
+    NEP_FLOAT* s_g_Fp = shared_all;
+    NEP_FLOAT* shared = shared_all + paramb.n_max_radial_plus1;
 
     // 为每个数组分配偏移量
-    float* s_fx = &shared[0];
-    float* s_fy = &shared[blockDim.x];
-    float* s_fz = &shared[2 * blockDim.x];
+    NEP_FLOAT* s_fx = &shared[0];
+    NEP_FLOAT* s_fy = &shared[blockDim.x];
+    NEP_FLOAT* s_fz = &shared[2 * blockDim.x];
     
-    float* s_sxx = nullptr;
-    float* s_syy = nullptr;
-    float* s_szz = nullptr;
-    float* s_sxy = nullptr;
-    float* s_sxz = nullptr;
-    float* s_syz = nullptr;
+    NEP_FLOAT* s_sxx = nullptr;
+    NEP_FLOAT* s_syy = nullptr;
+    NEP_FLOAT* s_szz = nullptr;
+    NEP_FLOAT* s_sxy = nullptr;
+    NEP_FLOAT* s_sxz = nullptr;
+    NEP_FLOAT* s_syz = nullptr;
+    NEP_FLOAT* s_syx = nullptr;
+    NEP_FLOAT* s_szx = nullptr;
+    NEP_FLOAT* s_szy = nullptr;
 
     int offset = 3 * blockDim.x;  // 已占用 3 个 float 数组
     if (vflag_either) {
@@ -406,18 +407,24 @@ static __global__ void backward_force_2b_perneigh(
         s_sxy = &shared[offset + 3 * blockDim.x];
         s_sxz = &shared[offset + 4 * blockDim.x];
         s_syz = &shared[offset + 5 * blockDim.x];
+        if (cvflag_atom) {
+            s_syx = &shared[offset + 6 * blockDim.x];
+            s_szx = &shared[offset + 7 * blockDim.x];
+            s_szy = &shared[offset + 8 * blockDim.x];
+        }
     }
     int tid = threadIdx.x;
     int atomi = g_ilist[blockIdx.x];   // 每个 block 处理一个中心原子
     int t1 = g_type[atomi];
 
-    float x1 = g_pos[atomi*3];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT x1 = g_pos[atomi*3];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
 
-    float fxi = 0.0f, fyi = 0.0f, fzi = 0.0f;
-    float sxxi = 0.0f, syyi = 0.0f, szzi = 0.0f;
-    float sxyi = 0.0f, sxzi = 0.0f, syzi = 0.0f;
+    NEP_FLOAT fxi = FLOAT_LIT(0.0), fyi = FLOAT_LIT(0.0), fzi = FLOAT_LIT(0.0);
+    NEP_FLOAT sxxi = FLOAT_LIT(0.0), syyi = FLOAT_LIT(0.0), szzi = FLOAT_LIT(0.0);
+    NEP_FLOAT sxyi = FLOAT_LIT(0.0), sxzi = FLOAT_LIT(0.0), syzi = FLOAT_LIT(0.0);
+    NEP_FLOAT syxi = FLOAT_LIT(0.0), szxi = FLOAT_LIT(0.0), szyi = FLOAT_LIT(0.0);
 
     int c_start = paramb.num_types * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
     int num_neigh_i = g_NN[atomi];
@@ -433,28 +440,28 @@ static __global__ void backward_force_2b_perneigh(
         int c_idx_I = t1 * c_start + t2 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
         int c_idx_J = t2 * c_start + t1 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
 
-        float r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
-        float d12_sq = r12[0]*r12[0] + r12[1]*r12[1] + r12[2]*r12[2];
+        NEP_FLOAT r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
+        NEP_FLOAT d12_sq = r12[0]*r12[0] + r12[1]*r12[1] + r12[2]*r12[2];
         if (d12_sq > paramb.rc_radial_square) continue;
 
-        float d12 = sqrtf(d12_sq);
-        float d12inv = 1.0f / d12;
-        float fc12, fcp12;
-        float fn12[MAX_NUM_N], fnp12[MAX_NUM_N];
+        NEP_FLOAT d12 = sqrt(d12_sq);
+        NEP_FLOAT d12inv = FLOAT_LIT(1.0) / d12;
+        NEP_FLOAT fc12, fcp12;
+        NEP_FLOAT fn12[MAX_NUM_N], fnp12[MAX_NUM_N];
         find_fc_and_fcp(paramb.rc_radial, paramb.rcinv_radial, d12, fc12, fcp12);
         find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial,
                         d12, fc12, fcp12, fn12, fnp12);
 
-        float f12[3] = {0.0f}, f21[3] = {0.0f};
+        NEP_FLOAT f12[3] = {FLOAT_LIT(0.0)}, f21[3] = {FLOAT_LIT(0.0)};
 
         for (int n = 0; n < paramb.n_max_radial_plus1; ++n) {
-            float gnp12 = 0.0f, gnp21 = 0.0f;
+            NEP_FLOAT gnp12 = FLOAT_LIT(0.0), gnp21 = FLOAT_LIT(0.0);
             for (int k = 0; k < paramb.basis_size_radial_plus1; ++k) {
                 gnp12 += fnp12[k] * annmb.c[c_idx_I + n * paramb.basis_size_radial_plus1 + k];
                 gnp21 += fnp12[k] * annmb.c[c_idx_J + n * paramb.basis_size_radial_plus1 + k];
             }
-            float tmp12 = s_g_Fp[n] * gnp12 * d12inv; //g_Fp[atomi + n * nlocal]
-            float tmp21 = 0.0f;
+            NEP_FLOAT tmp12 = s_g_Fp[n] * gnp12 * d12inv; //g_Fp[atomi + n * nlocal]
+            NEP_FLOAT tmp21 = FLOAT_LIT(0.0);
             if (n2 >= nlocal) {
                 // 邻居是 ghost 原子
                 for (int d = 0; d < 3; ++d)
@@ -476,12 +483,17 @@ static __global__ void backward_force_2b_perneigh(
           atomicAdd(&g_f[n2*3+1], double(-f12[1]));
           atomicAdd(&g_f[n2*3+2], double(-f12[2]));
           if (vflag_either) {
-              atomicAdd(&g_virial[n2 + 0 * nall], -r12[0] * f12[0]);
-              atomicAdd(&g_virial[n2 + 1 * nall], -r12[1] * f12[1]);
-              atomicAdd(&g_virial[n2 + 2 * nall], -r12[2] * f12[2]);
-              atomicAdd(&g_virial[n2 + 3 * nall], -r12[0] * f12[1]);
-              atomicAdd(&g_virial[n2 + 4 * nall], -r12[0] * f12[2]);
-              atomicAdd(&g_virial[n2 + 5 * nall], -r12[1] * f12[2]);
+              atomicAdd(&g_virial[n2 * vatom_num + 0], -r12[0] * f12[0]);
+              atomicAdd(&g_virial[n2 * vatom_num + 1], -r12[1] * f12[1]);
+              atomicAdd(&g_virial[n2 * vatom_num + 2], -r12[2] * f12[2]);
+              atomicAdd(&g_virial[n2 * vatom_num + 3], -r12[0] * f12[1]);
+              atomicAdd(&g_virial[n2 * vatom_num + 4], -r12[0] * f12[2]);
+              atomicAdd(&g_virial[n2 * vatom_num + 5], -r12[1] * f12[2]);
+              if (cvflag_atom) {
+                  atomicAdd(&g_virial[n2 * vatom_num + 6], -r12[1] * f12[0]);
+                  atomicAdd(&g_virial[n2 * vatom_num + 7], -r12[2] * f12[0]);
+                  atomicAdd(&g_virial[n2 * vatom_num + 8], -r12[2] * f12[1]);
+              }
           }
         } else {
         // 累加到中心原子的寄存器变量
@@ -495,6 +507,11 @@ static __global__ void backward_force_2b_perneigh(
             sxyi += r12[0] * f21[1];
             sxzi += r12[0] * f21[2];
             syzi += r12[1] * f21[2];
+            if (cvflag_atom) {
+                syxi += r12[1] * f21[0];
+                szxi += r12[2] * f21[0];
+                szyi += r12[2] * f21[1];
+            }
         }
       }
     }
@@ -510,6 +527,11 @@ static __global__ void backward_force_2b_perneigh(
         s_sxy[tid] = sxyi;
         s_sxz[tid] = sxzi;
         s_syz[tid] = syzi;
+        if (cvflag_atom) {
+            s_syx[tid] = syxi;
+            s_szx[tid] = szxi;
+            s_szy[tid] = szyi;
+        }
     }
     __syncthreads();
 
@@ -526,6 +548,11 @@ static __global__ void backward_force_2b_perneigh(
                 s_sxy[tid] += s_sxy[tid + s];
                 s_sxz[tid] += s_sxz[tid + s];
                 s_syz[tid] += s_syz[tid + s];
+                if (cvflag_atom) {
+                    s_syx[tid] += s_syx[tid + s];
+                    s_szx[tid] += s_szx[tid + s];
+                    s_szy[tid] += s_szy[tid + s];
+                }
             }
         }
         __syncthreads();
@@ -538,18 +565,25 @@ static __global__ void backward_force_2b_perneigh(
         atomicAdd(&g_f[atomi*3+2], double(s_fz[0]));
 
         if (vflag_either) {
-            atomicAdd(&g_virial[atomi + 0 * nall], s_sxx[0]);
-            atomicAdd(&g_virial[atomi + 1 * nall], s_syy[0]);
-            atomicAdd(&g_virial[atomi + 2 * nall], s_szz[0]);
-            atomicAdd(&g_virial[atomi + 3 * nall], s_sxy[0]);
-            atomicAdd(&g_virial[atomi + 4 * nall], s_sxz[0]);
-            atomicAdd(&g_virial[atomi + 5 * nall], s_syz[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 0], s_sxx[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 1], s_syy[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 2], s_szz[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 3], s_sxy[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 4], s_sxz[0]);
+            atomicAdd(&g_virial[atomi * vatom_num + 5], s_syz[0]);
+            if (cvflag_atom) {
+                atomicAdd(&g_virial[atomi * vatom_num + 6], s_syx[0]);
+                atomicAdd(&g_virial[atomi * vatom_num + 7], s_szx[0]);
+                atomicAdd(&g_virial[atomi * vatom_num + 8], s_szy[0]);
+            }
         }
     }
 }
 
 static __global__ void backward_force_2b(
   int vflag_either,
+  int cvflag_atom,
+  int vatom_num,
   NEPKK::ParaMB paramb,
   NEPKK::ANN annmb,
   const int nall, //all atoms
@@ -560,8 +594,8 @@ static __global__ void backward_force_2b(
   const int* g_NL,
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
-  const float* __restrict__ g_Fp,
+  const NEP_FLOAT* __restrict__ g_pos,
+  const NEP_FLOAT* __restrict__ g_Fp,
   double* g_f,
   double* g_virial
   // double* g_total_virial
@@ -571,19 +605,21 @@ static __global__ void backward_force_2b(
   if (n1 < N) {
     int atomi = g_ilist[n1];
     int t1 = g_type[atomi];
-    float s_fx = 0.0f;
-    float s_fy = 0.0f;
-    float s_fz = 0.0f;
-    float s_sxx = 0.0f;
-    float s_syy = 0.0f;
-    float s_szz = 0.0f;
-    float s_sxy = 0.0f;
-    float s_sxz = 0.0f;
-    float s_syz = 0.0f;
-
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT s_fx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_fy = FLOAT_LIT(0.0);
+    NEP_FLOAT s_fz = FLOAT_LIT(0.0);
+    NEP_FLOAT s_sxx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_syy = FLOAT_LIT(0.0);
+    NEP_FLOAT s_szz = FLOAT_LIT(0.0);
+    NEP_FLOAT s_sxy = FLOAT_LIT(0.0);
+    NEP_FLOAT s_sxz = FLOAT_LIT(0.0);
+    NEP_FLOAT s_syz = FLOAT_LIT(0.0);
+    NEP_FLOAT s_syx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_szx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_szy = FLOAT_LIT(0.0);
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
     int c_start = paramb.num_types * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
     // int Fp_idx_start = atomi * annmb.dim;
 
@@ -594,29 +630,29 @@ static __global__ void backward_force_2b(
       int c_idx_I = t1 * c_start + t2 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
       int c_idx_J = t2 * c_start + t1 * paramb.n_max_radial_plus1 * paramb.basis_size_radial_plus1;
 
-      float r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
-      float d12_square = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
+      NEP_FLOAT r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
+      NEP_FLOAT d12_square = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
       if (d12_square > paramb.rc_radial_square) continue;
-      float d12 = sqrt(d12_square);
-      float d12inv = 1.0f / d12;
-      float f12[3] = {0.0f};
-      float f21[3] = {0.0f};
+      NEP_FLOAT d12 = sqrt(d12_square);
+      NEP_FLOAT d12inv = FLOAT_LIT(1.0) / d12;
+      NEP_FLOAT f12[3] = {FLOAT_LIT(0.0)};
+      NEP_FLOAT f21[3] = {FLOAT_LIT(0.0)};
       // if (0) printf("2b idx %d atomi %d t1 %d jnums %d n2 %d t2 %d r12 %f\n", n1, atomi, t1, g_NN[atomi], n2, t2, d12);
-      float fc12, fcp12;
-      float fn12[MAX_NUM_N];
-      float fnp12[MAX_NUM_N];
+      NEP_FLOAT fc12, fcp12;
+      NEP_FLOAT fn12[MAX_NUM_N];
+      NEP_FLOAT fnp12[MAX_NUM_N];
       find_fc_and_fcp(paramb.rc_radial, paramb.rcinv_radial, d12, fc12, fcp12);
       find_fn_and_fnp(
         paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
       for (int n = 0; n < paramb.n_max_radial_plus1; ++n) {
-        float gnp12 = 0.0f;
-        float gnp21 = 0.0f;
+        NEP_FLOAT gnp12 = FLOAT_LIT(0.0);
+        NEP_FLOAT gnp21 = FLOAT_LIT(0.0);
         for (int k = 0; k < paramb.basis_size_radial_plus1; ++k) {
           gnp12 += fnp12[k] * annmb.c[c_idx_I + n * paramb.basis_size_radial_plus1 + k];
           gnp21 += fnp12[k] * annmb.c[c_idx_J + n * paramb.basis_size_radial_plus1 + k];// shape of c [N_max+1, N_base+1, I, J]
         }
-        float tmp12 = g_Fp[atomi + n * nlocal] * gnp12 * d12inv; //atomi + n * nlocal (dUi/diqn)*(diqn/drij) Fp 提前放到寄存器速度变慢
-        float tmp21 = 0;
+        NEP_FLOAT tmp12 = g_Fp[atomi + n * nlocal] * gnp12 * d12inv; //atomi + n * nlocal (dUi/diqn)*(diqn/drij) Fp 提前放到寄存器速度变慢
+        NEP_FLOAT tmp21 = FLOAT_LIT(0.0);
         if (n2 >= nlocal) {
           for (int d = 0; d < 3; ++d) {//编译器自动展开
             f12[d] += tmp12 * r12[d];
@@ -639,15 +675,17 @@ static __global__ void backward_force_2b(
         atomicAdd(&g_f[n2*3+2], double(-f12[2]));
         
         if(vflag_either) {
-          atomicAdd(&g_virial[n2 + 0 * nall], -r12[0] * f12[0]);
-          atomicAdd(&g_virial[n2 + 1 * nall], -r12[1] * f12[1]);
-          atomicAdd(&g_virial[n2 + 2 * nall], -r12[2] * f12[2]);
-          atomicAdd(&g_virial[n2 + 3 * nall], -r12[0] * f12[1]);
-          atomicAdd(&g_virial[n2 + 4 * nall], -r12[0] * f12[2]);
-          atomicAdd(&g_virial[n2 + 5 * nall], -r12[1] * f12[2]);
-          // atomicAdd(&g_virial[n2 + 6 * nall], -r12[1] * f12[0]);
-          // atomicAdd(&g_virial[n2 + 7 * nall], -r12[2] * f12[0]);
-          // atomicAdd(&g_virial[n2 + 8 * nall], -r12[2] * f12[1]);
+          atomicAdd(&g_virial[n2 * vatom_num + 0], -r12[0] * f12[0]);
+          atomicAdd(&g_virial[n2 * vatom_num + 1], -r12[1] * f12[1]);
+          atomicAdd(&g_virial[n2 * vatom_num + 2], -r12[2] * f12[2]);
+          atomicAdd(&g_virial[n2 * vatom_num + 3], -r12[0] * f12[1]);
+          atomicAdd(&g_virial[n2 * vatom_num + 4], -r12[0] * f12[2]);
+          atomicAdd(&g_virial[n2 * vatom_num + 5], -r12[1] * f12[2]);
+          if(cvflag_atom) {
+          atomicAdd(&g_virial[n2 * vatom_num + 6], -r12[1] * f12[0]);
+          atomicAdd(&g_virial[n2 * vatom_num + 7], -r12[2] * f12[0]);
+          atomicAdd(&g_virial[n2 * vatom_num + 8], -r12[2] * f12[1]);
+          }
         }
       } else {
         s_fx += f12[0] - f21[0];
@@ -661,10 +699,11 @@ static __global__ void backward_force_2b(
           s_sxy += r12[0] * f21[1];
           s_sxz += r12[0] * f21[2];
           s_syz += r12[1] * f21[2];
-
-          // s_syx += r12[1] * f21[0];
-          // s_szx += r12[2] * f21[0];
-          // s_szy += r12[2] * f21[1];
+          if(cvflag_atom) {
+          s_syx += r12[1] * f21[0];
+          s_szx += r12[2] * f21[0];
+          s_szy += r12[2] * f21[1];
+          }
         }
       }
     }
@@ -679,16 +718,18 @@ static __global__ void backward_force_2b(
     // yx yy yz    6 1 5
     // zx zy zz    7 8 2
     if(vflag_either) {
-      g_virial[atomi + 0 * nall] += s_sxx;
-      g_virial[atomi + 1 * nall] += s_syy;
-      g_virial[atomi + 2 * nall] += s_szz;
-      g_virial[atomi + 3 * nall] += s_sxy;
-      g_virial[atomi + 4 * nall] += s_sxz;
-      g_virial[atomi + 5 * nall] += s_syz;
+      g_virial[atomi * vatom_num + 0] += s_sxx;
+      g_virial[atomi * vatom_num + 1] += s_syy;
+      g_virial[atomi * vatom_num + 2] += s_szz;
+      g_virial[atomi * vatom_num + 3] += s_sxy;
+      g_virial[atomi * vatom_num + 4] += s_sxz;
+      g_virial[atomi * vatom_num + 5] += s_syz;
+      if(cvflag_atom) {
+      g_virial[atomi * vatom_num + 6] += s_syx;
+      g_virial[atomi * vatom_num + 7] += s_szx;
+      g_virial[atomi * vatom_num + 8] += s_szy;
+      }
     }
-    // g_virial[atomi + 6 * nall] += s_syx;
-    // g_virial[atomi + 7 * nall] += s_szx;
-    // g_virial[atomi + 8 * nall] += s_szy;
   }
 } 
 
@@ -701,30 +742,30 @@ __global__ void backward_force_3b_per_atom_sharemem(
     const int* g_NL_angular,
     const int* __restrict__ g_ilist,
     const int* __restrict__ g_type,
-    const float* __restrict__ g_pos,
-    const float* __restrict__ g_Fp,
-    const float* __restrict__ g_sum_fxyz,
-    float* g_f12x,
-    float* g_f12y,
-    float* g_f12z
+    const NEP_FLOAT* __restrict__ g_pos,
+    const NEP_FLOAT* __restrict__ g_Fp,
+    const NEP_FLOAT* __restrict__ g_sum_fxyz,
+    NEP_FLOAT* g_f12x,
+    NEP_FLOAT* g_f12y,
+    NEP_FLOAT* g_f12z
 ) {
-    extern __shared__ float shmem[];
+    extern __shared__ NEP_FLOAT shmem[];
     int i = blockIdx.x;  // 每个 block 负责一个中心原子
     if (i >= N) return;
 
     int atomi = g_ilist[i];
     int t1    = g_type[atomi];
 
-    float* s_x1       = shmem + 0;                           // 1
-    float* s_y1       = shmem + 1;                           // 1
-    float* s_z1       = shmem + 2;                           // 1
-    float* s_Fp       = shmem + 3;                           // dim_angular
-    float* s_sum_fxyz = shmem + 3 + paramb.dim_angular;      // n_max_angular_plus1 * NUM_OF_ABC
+    NEP_FLOAT* s_x1       = shmem + 0;                           // 1
+    NEP_FLOAT* s_y1       = shmem + 1;                           // 1
+    NEP_FLOAT* s_z1       = shmem + 2;                           // 1
+    NEP_FLOAT* s_Fp       = shmem + 3;                           // dim_angular
+    NEP_FLOAT* s_sum_fxyz = shmem + 3 + paramb.dim_angular;      // n_max_angular_plus1 * NUM_OF_ABC
   // 每个线程独占的 fn12 和 fnp12 空间
     const int per_thread_fn_size = MAX_NUM_N * 2;            // fn12 + fnp12 = 20 + 20 = 40
-    float* s_fn_base = s_sum_fxyz + (paramb.n_max_angular_plus1 * NUM_OF_ABC);
-    float* s_fn  = s_fn_base + threadIdx.x * per_thread_fn_size;
-    float* s_fnp = s_fn + MAX_NUM_N;
+    NEP_FLOAT* s_fn_base = s_sum_fxyz + (paramb.n_max_angular_plus1 * NUM_OF_ABC);
+    NEP_FLOAT* s_fn  = s_fn_base + threadIdx.x * per_thread_fn_size;
+    NEP_FLOAT* s_fnp = s_fn + MAX_NUM_N;
 
     // ==============================
     //  由 warp 0 负责加载中心原子公共数据
@@ -738,7 +779,7 @@ __global__ void backward_force_3b_per_atom_sharemem(
 
         // 加载 Fp
         for (int d = threadIdx.x; d < paramb.dim_angular; d += blockDim.x) {
-            s_Fp[d] = g_Fp[(paramb.n_max_radial + 1 + d) * nlocal + atomi];
+            s_Fp[d] = g_Fp[(paramb.n_max_radial_plus1 + d) * nlocal + atomi];
         }
         int sum_size = paramb.n_max_angular_plus1 * NUM_OF_ABC;
         // 加载 sum_fxyz
@@ -758,16 +799,16 @@ __global__ void backward_force_3b_per_atom_sharemem(
         int n2    = g_NL_angular[index];
         int t2    = g_type[n2];
 
-        float r12[3] = {
+        NEP_FLOAT r12[3] = {
             g_pos[n2 * 3 + 0] - s_x1[0],
             g_pos[n2 * 3 + 1] - s_y1[0],
             g_pos[n2 * 3 + 2] - s_z1[0]
         };
 
-        float d12 = sqrtf(r12[0]*r12[0] + r12[1]*r12[1] + r12[2]*r12[2]);
+        NEP_FLOAT d12 = sqrt(r12[0]*r12[0] + r12[1]*r12[1] + r12[2]*r12[2]);
         if (d12 > paramb.rc_angular) continue;  // 可选：加 cutoff 检查
 
-        float fc12, fcp12;
+        NEP_FLOAT fc12, fcp12;
         find_fc_and_fcp(paramb.rc_angular, paramb.rcinv_angular, d12, fc12, fcp12);
         // 直接使用共享内存中的 fn12 和 fnp12
         find_fn_and_fnp(
@@ -779,10 +820,10 @@ __global__ void backward_force_3b_per_atom_sharemem(
 
         int c_start = paramb.num_types * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
         int c_idx_I = t1 * c_start + t2 * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
-        float f12_local[3] = {0.0f, 0.0f, 0.0f};
+        NEP_FLOAT f12_local[3] = {FLOAT_LIT(0.0), FLOAT_LIT(0.0), FLOAT_LIT(0.0)};
         for (int n = 0; n < paramb.n_max_angular_plus1; ++n) {
-            float gn12  = 0.0f;
-            float gnp12 = 0.0f;
+            NEP_FLOAT gn12  = FLOAT_LIT(0.0);
+            NEP_FLOAT gnp12 = FLOAT_LIT(0.0);
 
             for (int k = 0; k < paramb.basis_size_angular_plus1; ++k) {
                 int idx = c_idx_I + n * paramb.basis_size_angular_plus1 + k + paramb.num_c_radial;
@@ -819,20 +860,20 @@ static __global__ void backward_force_3b_dqnl(
   const int* g_NL_angular,
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
-  const float* __restrict__ g_Fp,
-  const float* __restrict__ g_sum_fxyz,
-  float* g_f12x,
-  float* g_f12y,
-  float* g_f12z
+  const NEP_FLOAT* __restrict__ g_pos,
+  const NEP_FLOAT* __restrict__ g_Fp,
+  const NEP_FLOAT* __restrict__ g_sum_fxyz,
+  NEP_FLOAT* g_f12x,
+  NEP_FLOAT* g_f12y,
+  NEP_FLOAT* g_f12z
   )
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int atomi = g_ilist[n1];
 
-    float Fp[MAX_DIM_ANGULAR] = {0.0f};
-    float sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
+    NEP_FLOAT Fp[MAX_DIM_ANGULAR] = {FLOAT_LIT(0.0)};
+    NEP_FLOAT sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
     for (int d = 0; d < paramb.dim_angular; ++d) {
       Fp[d] = g_Fp[(paramb.n_max_radial_plus1 + d) * nlocal + atomi];
     }
@@ -841,29 +882,29 @@ static __global__ void backward_force_3b_dqnl(
     }
 
     int   t1 = g_type[atomi];
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
     int c_start = paramb.num_types * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
     for (int i1 = 0; i1 < g_NN_angular[atomi]; ++i1) {
       int index = i1 * nlocal + atomi;
       int n2 = g_NL_angular[index];
       int t2 = g_type[n2];
       
-      float f12[3] = {0.0f};
+      NEP_FLOAT f12[3] = {FLOAT_LIT(0.0)};
       int c_idx_I = t1 * c_start + t2 * paramb.n_max_angular_plus1 * paramb.basis_size_angular_plus1;
-      float r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
-      float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+      NEP_FLOAT r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
+      NEP_FLOAT d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
       // if (0) printf("3bhalf idx %d atomi %d t1 %d jnums %d n2 %d t2 %d r12 %f fixyz %f %f %f fjxyz %f %f %f\n", n1, atomi, t1, g_NN_angular[atomi], n2, t2, d12, x1, y1, z1, g_pos[n2*3], g_pos[n2*3+1], g_pos[n2*3+2]);
-      float fc12, fcp12;
+      NEP_FLOAT fc12, fcp12;
       find_fc_and_fcp(paramb.rc_angular, paramb.rcinv_angular, d12, fc12, fcp12);
-      float fn12[MAX_NUM_N];
-      float fnp12[MAX_NUM_N];
+      NEP_FLOAT fn12[MAX_NUM_N];
+      NEP_FLOAT fnp12[MAX_NUM_N];
       find_fn_and_fnp(
         paramb.basis_size_angular, paramb.rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
       for (int n = 0; n < paramb.n_max_angular_plus1; ++n) {
-        float gn12 = 0.0f;
-        float gnp12 = 0.0f;
+        NEP_FLOAT gn12 = FLOAT_LIT(0.0);
+        NEP_FLOAT gnp12 = FLOAT_LIT(0.0);
         for (int k = 0; k < paramb.basis_size_angular_plus1; ++k) {
           gn12  += fn12[k]  * annmb.c[c_idx_I + n * paramb.basis_size_angular_plus1 + k + paramb.num_c_radial];
           gnp12 += fnp12[k] * annmb.c[c_idx_I + n * paramb.basis_size_angular_plus1 + k + paramb.num_c_radial];
@@ -888,58 +929,58 @@ static __global__ void backward_force_3b_dqnl(
   }
 }
 
-
 static __global__ void backward_force_3b_merge(
   int vflag_either,
+  int cvflag_atom,
+  int vatom_num,
   const int nall, //all atoms
   const int N,
   const int nlocal,
   const int* g_NN_angular,
   const int* g_NL_angular,
-  const float* __restrict__ g_f12x,
-  const float* __restrict__ g_f12y,
-  const float* __restrict__ g_f12z,
+  const NEP_FLOAT* __restrict__ g_f12x,
+  const NEP_FLOAT* __restrict__ g_f12y,
+  const NEP_FLOAT* __restrict__ g_f12z,
   const int* __restrict__ g_ilist,
-  const float* __restrict__ g_pos,
+  const NEP_FLOAT* __restrict__ g_pos,
   double* g_f,
   double* g_virial)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-  float s_fx = 0.0f;  // force_x
-  float s_fy = 0.0f;  // force_y
-  float s_fz = 0.0f;  // force_z
-  float s_sxx = 0.0f;
-  float s_syy = 0.0f;
-  float s_szz = 0.0f;
-  float s_sxy = 0.0f;
-  float s_sxz = 0.0f;
-  float s_syz = 0.0f;
-
-  // float s_syx = 0.0f;
-  // float s_szx = 0.0f;
-  // float s_szy = 0.0f;
+  NEP_FLOAT s_fx = FLOAT_LIT(0.0);  // force_x
+  NEP_FLOAT s_fy = FLOAT_LIT(0.0);  // force_y
+  NEP_FLOAT s_fz = FLOAT_LIT(0.0);  // force_z
+  NEP_FLOAT s_sxx = FLOAT_LIT(0.0);
+  NEP_FLOAT s_syy = FLOAT_LIT(0.0);
+  NEP_FLOAT s_szz = FLOAT_LIT(0.0);
+  NEP_FLOAT s_sxy = FLOAT_LIT(0.0);
+  NEP_FLOAT s_sxz = FLOAT_LIT(0.0);
+  NEP_FLOAT s_syz = FLOAT_LIT(0.0);
+  NEP_FLOAT s_syx = FLOAT_LIT(0.0);
+  NEP_FLOAT s_szx = FLOAT_LIT(0.0);
+  NEP_FLOAT s_szy = FLOAT_LIT(0.0);
   if (n1 < N) {
     int atomi = g_ilist[n1];
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
 
     for (int i1 = 0; i1 < g_NN_angular[atomi]; ++i1) {
       int index = i1 * nlocal + atomi;
       int n2 = g_NL_angular[index];
-      float x12 = g_pos[n2*3]   - x1;
-      float y12 = g_pos[n2*3+1] - y1;
-      float z12 = g_pos[n2*3+2] - z1;
+      NEP_FLOAT x12 = g_pos[n2*3]   - x1;
+      NEP_FLOAT y12 = g_pos[n2*3+1] - y1;
+      NEP_FLOAT z12 = g_pos[n2*3+2] - z1;
 
-      float r12[3] = {x12, y12, z12};
-      float f12x = g_f12x[index];
-      float f12y = g_f12y[index];
-      float f12z = g_f12z[index];
+      NEP_FLOAT r12[3] = {x12, y12, z12};
+      NEP_FLOAT f12x = g_f12x[index];
+      NEP_FLOAT f12y = g_f12y[index];
+      NEP_FLOAT f12z = g_f12z[index];
 
       if (n2 < nlocal) {
-        float f21x = 0;
-        float f21y = 0;
-        float f21z = 0;
+        NEP_FLOAT f21x = FLOAT_LIT(0.0);
+        NEP_FLOAT f21y = FLOAT_LIT(0.0);
+        NEP_FLOAT f21z = FLOAT_LIT(0.0);
         int offset = 0;
         int neighbor_number_2 = 0;
         neighbor_number_2 = g_NN_angular[n2];
@@ -968,10 +1009,11 @@ static __global__ void backward_force_3b_merge(
           s_sxy += x12 * f21y;
           s_sxz += x12 * f21z;
           s_syz += y12 * f21z;
-
-          // s_syx += y12 * f21x;
-          // s_szx += z12 * f21x;
-          // s_szy += z12 * f21y;
+          if(cvflag_atom) {
+          s_syx += y12 * f21x;
+          s_szx += z12 * f21x;
+          s_szy += z12 * f21y;
+          }
         }
       } else {
         s_fx += f12x;
@@ -981,15 +1023,17 @@ static __global__ void backward_force_3b_merge(
         atomicAdd(&g_f[n2*3+1], double(-f12y));
         atomicAdd(&g_f[n2*3+2], double(-f12z));
         if(vflag_either) {
-          atomicAdd(&g_virial[n2 + 0 * nall], -r12[0] * f12x);
-          atomicAdd(&g_virial[n2 + 1 * nall], -r12[1] * f12y);
-          atomicAdd(&g_virial[n2 + 2 * nall], -r12[2] * f12z);
-          atomicAdd(&g_virial[n2 + 3 * nall], -r12[0] * f12y);
-          atomicAdd(&g_virial[n2 + 4 * nall], -r12[0] * f12z);
-          atomicAdd(&g_virial[n2 + 5 * nall], -r12[1] * f12z);
-          // atomicAdd(&g_virial[n2 + 6 * nall], -r12[1] * f12x);
-          // atomicAdd(&g_virial[n2 + 7 * nall], -r12[2] * f12x);
-          // atomicAdd(&g_virial[n2 + 8 * nall], -r12[2] * f12y);
+          atomicAdd(&g_virial[n2 * vatom_num + 0], -r12[0] * f12x);
+          atomicAdd(&g_virial[n2 * vatom_num + 1], -r12[1] * f12y);
+          atomicAdd(&g_virial[n2 * vatom_num + 2], -r12[2] * f12z);
+          atomicAdd(&g_virial[n2 * vatom_num + 3], -r12[0] * f12y);
+          atomicAdd(&g_virial[n2 * vatom_num + 4], -r12[0] * f12z);
+          atomicAdd(&g_virial[n2 * vatom_num + 5], -r12[1] * f12z);
+          if(cvflag_atom){
+          atomicAdd(&g_virial[n2 * vatom_num + 6], -r12[1] * f12x);
+          atomicAdd(&g_virial[n2 * vatom_num + 7], -r12[2] * f12x);
+          atomicAdd(&g_virial[n2 * vatom_num + 8], -r12[2] * f12y);
+          }
         }
       }
     }
@@ -1003,53 +1047,67 @@ static __global__ void backward_force_3b_merge(
     // yx yy yz    6 1 5
     // zx zy zz    7 8 2
     if(vflag_either) {
-      g_virial[atomi + 0 * nall] += s_sxx;
-      g_virial[atomi + 1 * nall] += s_syy;
-      g_virial[atomi + 2 * nall] += s_szz;
-      g_virial[atomi + 3 * nall] += s_sxy;
-      g_virial[atomi + 4 * nall] += s_sxz;
-      g_virial[atomi + 5 * nall] += s_syz;
-      // g_virial[atomi + 6 * nall] += s_syx;
-      // g_virial[atomi + 7 * nall] += s_szx;
-      // g_virial[atomi + 8 * nall] += s_szy;
+      g_virial[atomi * vatom_num + 0] += s_sxx;
+      g_virial[atomi * vatom_num + 1] += s_syy;
+      g_virial[atomi * vatom_num + 2] += s_szz;
+      g_virial[atomi * vatom_num + 3] += s_sxy;
+      g_virial[atomi * vatom_num + 4] += s_sxz;
+      g_virial[atomi * vatom_num + 5] += s_syz;
+      if(cvflag_atom) {
+      g_virial[atomi * vatom_num + 6] += s_syx;
+      g_virial[atomi * vatom_num + 7] += s_szx;
+      g_virial[atomi * vatom_num + 8] += s_szy;
+      }
     }
   }
 }
+template<int NUM_COMP>
+__global__ void calculate_partial_virial(const double* virial, double* partial_virial, int N) {
+    extern __shared__ double shared_virial[];
+    const int tid = threadIdx.x;
+    const int index = blockIdx.x * blockDim.x + tid;
 
-
-__global__ void calculate_total_virial(const double* virial, double* total_virial, int N) {
-    __shared__ double shared_virial[6 * 64]; // 使用共享内存存储部分和
-    int tid = threadIdx.x;
-    int bid = blockIdx.x;
-    int index = bid * blockDim.x + tid;
-
-    for (int i = 0; i < 6; ++i) {
-        shared_virial[i * blockDim.x + tid] = 0.0;
+    for (int comp = 0; comp < NUM_COMP; ++comp) {
+        shared_virial[comp * blockDim.x + tid] = (index < N) ? virial[index * NUM_COMP + comp] : 0.0;
     }
     __syncthreads();
 
-    // 累加每个原子的virial值
-    if (index < N) {
-        atomicAdd(&shared_virial[0 * blockDim.x + tid], virial[0 * N + index]);
-        atomicAdd(&shared_virial[1 * blockDim.x + tid], virial[1 * N + index]);
-        atomicAdd(&shared_virial[2 * blockDim.x + tid], virial[2 * N + index]);
-        atomicAdd(&shared_virial[3 * blockDim.x + tid], virial[3 * N + index]);
-        atomicAdd(&shared_virial[4 * blockDim.x + tid], virial[4 * N + index]);
-        atomicAdd(&shared_virial[5 * blockDim.x + tid], virial[5 * N + index]);
-    }
-    __syncthreads();
-
-    // 归约每个块内的部分和
-    if (tid < 6) {
-        for (int i = 1; i < blockDim.x; ++i) {
-            shared_virial[tid * blockDim.x] += shared_virial[tid * blockDim.x + i];
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            for (int comp = 0; comp < NUM_COMP; ++comp) {
+                shared_virial[comp * blockDim.x + tid] += shared_virial[comp * blockDim.x + tid + stride];
+            }
         }
+        __syncthreads();
     }
+
+    if (tid < NUM_COMP) {
+        partial_virial[blockIdx.x * NUM_COMP + tid] = shared_virial[tid * blockDim.x];
+    }
+}
+
+template<int NUM_COMP>
+__global__ void finalize_total_virial(const double* partial_virial, double* total_virial, int num_blocks) {
+    extern __shared__ double shared_sum[];
+    const int tid = threadIdx.x;
+    const int comp = blockIdx.x;
+    double sum = 0.0;
+
+    for (int i = tid; i < num_blocks; i += blockDim.x) {
+        sum += partial_virial[i * NUM_COMP + comp];
+    }
+    shared_sum[tid] = sum;
     __syncthreads();
 
-    // 将每个块的部分和累加到全局内存
-    if (tid < 6) {
-        atomicAdd(&total_virial[tid], shared_virial[tid * blockDim.x]);
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_sum[tid] += shared_sum[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        total_virial[comp] = shared_sum[0];
     }
 }
 
@@ -1107,15 +1165,15 @@ __global__ void copyArrayKernel(double* dest, double* src, int size) {
     }
 }
 
-__global__ void doubleTofloat(float* dest, double* src, int size) {
+__global__ void doubleTofloat(NEP_FLOAT* dest, double* src, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        dest[idx] = src[idx];
+        dest[idx] = static_cast<NEP_FLOAT>(src[idx]);
     }
 }
 
 // [Nmax, Nbase, TYPE, TYPE] to [TYPEi, TYPEj, Nmax, Nbase]
-__global__ void convert_c_dim(float* c, float* temp, int NtypeI, int Nmax, int Nbase) {
+__global__ void convert_c_dim(NEP_FLOAT* c, NEP_FLOAT* temp, int NtypeI, int Nmax, int Nbase) {
     int total_elements = (Nmax + 1) * (Nbase + 1) * NtypeI * NtypeI;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elements) {
@@ -1137,15 +1195,16 @@ __global__ void convert_atom_types(
     const int nall, 
     const int inum,
     const int nlocal,//对于部分原子受力，ilist长度为inum <= nlocal，itype长度为 nlocal+ghost
-    const int* __restrict__ g_ilist,
-    const int* __restrict__ g_type,
-    const int* __restrict__ type_map, //力场元素类型和结构类型的关系映射
+    const int* __restrict__ g_ilist, //[0, 1, 2, ..., n] len=inum
+    const int* __restrict__ g_type,  //[1, 1, 1, 2, 2, 1,...] such as HfO2, type order same as lmp.config type1 = O, type2=Hf
+    const int* __restrict__ type_map, //atom type order of nep.txt,such as 'nep4 2 Hf O'  in nep.txt -> type_map = [1, 0]
     int* copy_ilist,
     int* cvt_type_map) 
 { 
     int n1 = blockIdx.x * blockDim.x + threadIdx.x;
     if (n1 >= nall) return;
-    int t1 = type_map[g_type[n1]-1];//问题这里g_type 长度为nall？
+    int t1 = type_map[g_type[n1]-1];
+    // if(n1 < inum) printf("atomi %d g_type[%d]=%d, t1=%d\n", n1, n1, g_type[n1], t1);
     cvt_type_map[n1] = t1;
 }
 
@@ -1175,7 +1234,6 @@ static __global__ void gpu_sort_neighbor_list(const int N, const int* NN, int* N
   }
 }
 
-// 奇偶排序，行存储，适合于lammps近邻的下标部分有序
 __global__ void sort_neighbor_simple_fast_kernel(
     int nlocal,
     int MN_angular,
@@ -1305,56 +1363,65 @@ write_back:
 
 static __global__ void backward_force_ZBL(
   int vflag_either,
-  const NEPKK::ZBL zbl,
+  int cvflag_atom,
+  int vatom_num,
   const int nall, //all atoms
   const int N,
   const int nlocal,
   const int MN_angular,
+  const bool zbl_flexibled,
+  const NEP_FLOAT zbl_rc_inner,
+  const NEP_FLOAT zbl_rc_outer,
+  const bool use_typewise_cutoff_zbl,
+  const NEP_FLOAT typewise_cutoff_zbl_factor,
+  const int zbl_num_types,
   const int* g_NN,
   const int* g_NL,
   const int* __restrict__ g_ilist,
   const int* __restrict__ g_type,
-  const float* __restrict__ g_pos,
+  const NEP_FLOAT* __restrict__ g_pos,
+  const int* __restrict__ g_atomic_numbers,
+  const NEP_FLOAT* __restrict__ g_para,
   double* g_f,
   double* g_virial,
   double* g_pe)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
-    float s_pe = 0.0f;
-    float s_fx = 0.0f;
-    float s_fy = 0.0f;
-    float s_fz = 0.0f;
+    NEP_FLOAT s_pe = FLOAT_LIT(0.0);
+    NEP_FLOAT s_fx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_fy = FLOAT_LIT(0.0);
+    NEP_FLOAT s_fz = FLOAT_LIT(0.0);
 
-    float s_sxx = 0.0f;
-    float s_syy = 0.0f;
-    float s_szz = 0.0f;
+    NEP_FLOAT s_sxx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_syy = FLOAT_LIT(0.0);
+    NEP_FLOAT s_szz = FLOAT_LIT(0.0);
 
-    float s_sxy = 0.0f;
-    float s_sxz = 0.0f;
-    float s_syz = 0.0f;
+    NEP_FLOAT s_sxy = FLOAT_LIT(0.0);
+    NEP_FLOAT s_sxz = FLOAT_LIT(0.0);
+    NEP_FLOAT s_syz = FLOAT_LIT(0.0);
 
-    // float s_syx = 0.0f;
-    // float s_szx = 0.0f;
-    // float s_szy = 0.0f;
+    NEP_FLOAT s_syx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_szx = FLOAT_LIT(0.0);
+    NEP_FLOAT s_szy = FLOAT_LIT(0.0);
     int atomi = g_ilist[n1];
-    float x1 = g_pos[atomi*3  ];
-    float y1 = g_pos[atomi*3+1];
-    float z1 = g_pos[atomi*3+2];
+    NEP_FLOAT x1 = g_pos[atomi*3  ];
+    NEP_FLOAT y1 = g_pos[atomi*3+1];
+    NEP_FLOAT z1 = g_pos[atomi*3+2];
     int type1 = g_type[atomi];
-    float zi = zbl.atomic_numbers[type1];
-    float pow_zi = pow(zi, 0.23f);
+    int zi = g_atomic_numbers[type1];
+    NEP_FLOAT pow_zi = pow(zi, FLOAT_LIT(0.23));
     for (int i1 = 0; i1 < g_NN[atomi]; ++i1) {
       int n2 = g_NL[atomi + nlocal * i1];
       int type2 = g_type[n2];
-      float r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
-      float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
-      float d12inv = 1.0f / d12;
-      float f, fp;
-      float zj = zbl.atomic_numbers[type2];
-      float a_inv = (pow_zi + pow(zj, 0.23f)) * 2.134563f;
-      float zizj = K_C_SP * zi * zj;
-      if (zbl.flexibled) {
+      NEP_FLOAT r12[3] = {g_pos[n2*3] - x1, g_pos[n2*3+1] - y1, g_pos[n2*3+2] - z1};
+      NEP_FLOAT d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+      NEP_FLOAT d12inv = FLOAT_LIT(1.0) / d12;
+      NEP_FLOAT f, fp;
+      int zj = g_atomic_numbers[type2];
+      NEP_FLOAT a_inv = (pow_zi + pow(zj, FLOAT_LIT(0.23))) * FLOAT_LIT(2.134563);
+      NEP_FLOAT zizj = K_C_SP * zi * zj;
+      if (zbl_flexibled) {
         int t1, t2;
         if (type1 < type2) {
           t1 = type1;
@@ -1363,18 +1430,23 @@ static __global__ void backward_force_ZBL(
           t1 = type2;
           t2 = type1;
         }
-        int zbl_index = t1 * zbl.num_types - (t1 * (t1 - 1)) / 2 + (t2 - t1);
-        float ZBL_para[10];
+        int zbl_index = t1 * zbl_num_types - (t1 * (t1 - 1)) / 2 + (t2 - t1);
+        NEP_FLOAT ZBL_para[10];
         for (int i = 0; i < 10; ++i) {
-          ZBL_para[i] = zbl.para[10 * zbl_index + i];
+          ZBL_para[i] = g_para[10 * zbl_index + i];
         }
         find_f_and_fp_zbl(ZBL_para, zizj, a_inv, d12, d12inv, f, fp);
       } else {
-        find_f_and_fp_zbl(zizj, a_inv, zbl.rc_inner, zbl.rc_outer, d12, d12inv, f, fp);
+        NEP_FLOAT rc_outer = zbl_rc_outer;
+        if (use_typewise_cutoff_zbl) {
+          // zi and zj start from 1, so need to minus 1 here
+          rc_outer = min((COVALENT_RADIUS[zi - 1] + COVALENT_RADIUS[zj - 1]) * typewise_cutoff_zbl_factor, rc_outer);
+        }
+        find_f_and_fp_zbl(zizj, a_inv, zbl_rc_inner, rc_outer, d12, d12inv, f, fp); // if use typewise_cutoff_zbl_factor, the rc_inner=0.0 when read the nep.txt
       }
-      float f2 = fp * d12inv * 0.5f;
-      float f12[3] = {r12[0] * f2, r12[1] * f2, r12[2] * f2};
-      float f21[3] = {-r12[0] * f2, -r12[1] * f2, -r12[2] * f2};
+      NEP_FLOAT f2 = fp * d12inv * FLOAT_LIT(0.5);
+      NEP_FLOAT f12[3] = {r12[0] * f2, r12[1] * f2, r12[2] * f2};
+      NEP_FLOAT f21[3] = {-r12[0] * f2, -r12[1] * f2, -r12[2] * f2};
       // if (0) printf("zbl n1 %d n2 %d d12 %f e_c_half %f\n", n1, n2, d12, f);
       if (n2 >= nlocal) {
         s_fx += f12[0];
@@ -1384,15 +1456,17 @@ static __global__ void backward_force_ZBL(
         atomicAdd(&g_f[n2*3+1], double(f21[1]));
         atomicAdd(&g_f[n2*3+2], double(f21[2]));
         if (vflag_either) {
-          atomicAdd(&g_virial[n2 + 0 * nall], -r12[0] * f12[0]);
-          atomicAdd(&g_virial[n2 + 1 * nall], -r12[1] * f12[1]);
-          atomicAdd(&g_virial[n2 + 2 * nall], -r12[2] * f12[2]);
-          atomicAdd(&g_virial[n2 + 3 * nall], -r12[0] * f12[1]);
-          atomicAdd(&g_virial[n2 + 4 * nall], -r12[0] * f12[2]);
-          atomicAdd(&g_virial[n2 + 5 * nall], -r12[1] * f12[2]);
-          // atomicAdd(&g_virial[n2 + 6 * nall], -r12[1] * f12[0]);
-          // atomicAdd(&g_virial[n2 + 7 * nall], -r12[2] * f12[0]);
-          // atomicAdd(&g_virial[n2 + 8 * nall], -r12[2] * f12[1]);
+          atomicAdd(&g_virial[n2 * vatom_num + 0], -r12[0] * f12[0]);
+          atomicAdd(&g_virial[n2 * vatom_num + 1], -r12[1] * f12[1]);
+          atomicAdd(&g_virial[n2 * vatom_num + 2], -r12[2] * f12[2]);
+          atomicAdd(&g_virial[n2 * vatom_num + 3], -r12[0] * f12[1]);
+          atomicAdd(&g_virial[n2 * vatom_num + 4], -r12[0] * f12[2]);
+          atomicAdd(&g_virial[n2 * vatom_num + 5], -r12[1] * f12[2]);
+          if(cvflag_atom){
+          atomicAdd(&g_virial[n2 * vatom_num + 6], -r12[1] * f12[0]);
+          atomicAdd(&g_virial[n2 * vatom_num + 7], -r12[2] * f12[0]);
+          atomicAdd(&g_virial[n2 * vatom_num + 8], -r12[2] * f12[1]);
+          }
         }
       } else {
         s_fx += f12[0] - f21[0];
@@ -1406,10 +1480,11 @@ static __global__ void backward_force_ZBL(
           s_sxy += r12[0] * f21[1];
           s_sxz += r12[0] * f21[2];
           s_syz += r12[1] * f21[2];
-
-          // s_syx += r12[1] * f21[0];
-          // s_szx += r12[2] * f21[0];
-          // s_szy += r12[2] * f21[1];
+          if(cvflag_atom){
+          s_syx += r12[1] * f21[0];
+          s_szx += r12[2] * f21[0];
+          s_szy += r12[2] * f21[1];
+          }
         }
       }
       s_pe += f * 0.5f;
@@ -1418,16 +1493,42 @@ static __global__ void backward_force_ZBL(
     g_f[atomi*3+1] += s_fy;
     g_f[atomi*3+2] += s_fz;
     if (vflag_either) {
-      g_virial[atomi + 0 * nall] += s_sxx;
-      g_virial[atomi + 1 * nall] += s_syy;
-      g_virial[atomi + 2 * nall] += s_szz;
-      g_virial[atomi + 3 * nall] += s_sxy;
-      g_virial[atomi + 4 * nall] += s_sxz;
-      g_virial[atomi + 5 * nall] += s_syz;
-      // g_virial[atomi + 6 * nall] += s_syx;
-      // g_virial[atomi + 7 * nall] += s_szx;
-      // g_virial[atomi + 8 * nall] += s_szy;
+      g_virial[atomi * vatom_num + 0] += s_sxx;
+      g_virial[atomi * vatom_num + 1] += s_syy;
+      g_virial[atomi * vatom_num + 2] += s_szz;
+      g_virial[atomi * vatom_num + 3] += s_sxy;
+      g_virial[atomi * vatom_num + 4] += s_sxz;
+      g_virial[atomi * vatom_num + 5] += s_syz;
+      if(cvflag_atom){
+      g_virial[atomi * vatom_num + 6] += s_syx;
+      g_virial[atomi * vatom_num + 7] += s_szx;
+      g_virial[atomi * vatom_num + 8] += s_szy;
+      }
     }
     g_pe[atomi] += s_pe;
   }
+}
+
+// calculate_total_CVirial uses the same two-stage reduction kernels as calculate_total_virial.
+
+__global__ void virial9To6Kernel(
+    const double* __restrict__ virial9,  // 输入：N*9 的9分量virial数组（顺序：xx,yy,zz,xy,xz,yz,yx,zx,zy）
+    double* __restrict__ virial6,        // 输出：N*6 的6分量virial数组（顺序：xx,yy,zz,xy,xz,yz）
+    size_t N)
+{
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    size_t base9 = i * 9;
+    size_t base6 = i * 6;
+    // =============== 精确映射===============
+    // 9分量顺序： [0]=xx, [1]=yy, [2]=zz, [3]=xy, [4]=xz, [5]=yz, [6]=yx, [7]=zx, [8]=zy
+    // 6分量顺序： [0]=xx, [1]=yy, [2]=zz, [3]=xy, [4]=xz, [5]=yz
+    // =======================================
+    virial6[base6 + 0] = virial9[base9 + 0];  // xx
+    virial6[base6 + 1] = virial9[base9 + 1];  // yy
+    virial6[base6 + 2] = virial9[base9 + 2];  // zz
+    virial6[base6 + 3] = virial9[base9 + 3];  // xy
+    virial6[base6 + 4] = virial9[base9 + 4];  // xz
+    virial6[base6 + 5] = virial9[base9 + 5];  // yz
 }

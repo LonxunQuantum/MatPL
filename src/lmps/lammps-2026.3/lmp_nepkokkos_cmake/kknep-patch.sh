@@ -48,11 +48,13 @@ if grep -q "$NEW_PROJECT_LINE" "$CMAKE_FILE"; then
 elif grep -q "$PROJECT_LINE" "$CMAKE_FILE"; then
     sed -i "s|${PROJECT_LINE}|${NEW_PROJECT_LINE}|g" "$CMAKE_FILE"
     echo "  - Project configuration updated to include CUDA"
+elif grep -q "LANGUAGES CXX C" "$CMAKE_FILE"; then
+    sed -i "s|LANGUAGES CXX C|LANGUAGES CXX C CUDA|g" "$CMAKE_FILE"
+    echo "  - Project configuration updated to include CUDA"
 else
     echo "Error: Unsupported LAMMPS version detected"
     echo "Current LAMMPS version is not supported."
-    echo "Supported versions: 2023 and 2024 released versions of LAMMPS"
-    echo "Unsupported versions: 2025 released versions, develop or stable branch code"
+    echo "Supported versions: 2023, 2024 and 2025 released versions of LAMMPS"
     echo "Please check and try again with a supported version."
     exit 1
 fi
@@ -115,6 +117,15 @@ if(PKG_NEP_KK)
     ${LAMMPS_SOURCE_DIR}/nep_gpu/force
     ${LAMMPS_SOURCE_DIR}/nep_gpu/utilities
   )
+endif()
+
+#####################################################################
+# package of NEP with double precision
+#####################################################################
+option(PREC_NEPINFER "Use double precision" OFF)
+if(PREC_NEPINFER AND PKG_NEP_KK)
+    message(STATUS "PREC_NEPINFER is ON: Using double precision for NEP model.")
+    add_compile_definitions(PREC_NEPINFER)
 endif()
 
 ######################################################################
@@ -275,6 +286,10 @@ echo "-DPKG_MATPLDP=yes \\"
 echo ""
 echo "For the D3 interface, please add the following option in cmake. Note that D3 requires CUDA support and cannot be used in combination with matpl/nep/kk."
 echo "-DPKG_MATPLD3=yes \\"
+echo ""
+
+echo "NEP adopts single-precision inference by default. For double-precision inference, please add the following option in cmake."
+echo "-DPREC_NEPINFER=ON \\"
 echo ""
 
 ######### 手动复制文件 #########

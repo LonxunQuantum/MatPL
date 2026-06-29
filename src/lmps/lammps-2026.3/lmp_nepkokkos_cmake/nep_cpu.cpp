@@ -67,6 +67,23 @@ const double C3B[NUM_OF_ABC] = {
 const double C4B[5] = {
   -0.007499480826664, -0.134990654879954, 0.067495327439977, 0.404971964639861, -0.809943929279723};
 const double C5B[3] = {0.026596810706114, 0.053193621412227, 0.026596810706114};
+
+const double COVALENT_RADIUS[94] = {
+  0.426667, 0.613333, 1.6,     1.25333, 1.02667, 1.0,     0.946667, 0.84,
+  0.853333, 0.893333, 1.86667, 1.66667, 1.50667, 1.38667, 1.46667, 1.36,
+  1.32,     1.28,     2.34667, 2.05333, 1.77333, 1.62667, 1.61333, 1.46667,
+  1.42667,  1.38667,  1.33333, 1.32,    1.34667, 1.45333, 1.49333, 1.45333,
+  1.53333,  1.46667,  1.52,    1.56,    2.52,     2.22667, 1.96,     1.85333,
+  1.76,     1.65333,  1.53333, 1.50667, 1.50667, 1.44,    1.53333,  1.64,
+  1.70667,  1.68,     1.68,     1.64,     1.76,    1.74667, 2.78667, 2.34667,
+  2.16,     1.96,     2.10667,  2.09333,  2.08,     2.06667, 2.01333, 2.02667,
+  2.01333,  2.0,      1.98667,  1.98667, 1.97333,  2.04,    1.94667, 1.82667,
+  1.74667,  1.64,     1.57333,  1.54667, 1.48,     1.49333, 1.50667, 1.76,
+  1.73333,  1.73333,  1.81333,  1.74667, 1.84,    1.89333, 2.68,     2.41333,
+  2.22667,  2.10667,  2.02667,  2.04,     2.05333, 2.06667
+};
+
+
 const double K_C_SP = 14.399645; // 1/(4*PI*epsilon_0)
 const double PI = 3.141592653589793;
 const double PI_HALF = 1.570796326794897;
@@ -1210,6 +1227,7 @@ void find_force_angular_for_lammps(
 }
 
 void find_force_ZBL_for_lammps(
+  NEP3_CPU::ParaMB& paramb,
   const NEP3_CPU::ZBL& zbl,
   int N,
   int* g_ilist,
@@ -1228,7 +1246,7 @@ void find_force_ZBL_for_lammps(
   for (int ii = 0; ii < N; ++ii) {
     int n1 = g_ilist[ii];
     int type1 = map_atom_type_idx[g_type[n1] - 1];
-    double zi = zbl.atomic_numbers[type1]; // from LAMMPS to NEP convention
+    int zi = zbl.atomic_numbers[type1]; // from LAMMPS to NEP convention
     double pow_zi = pow(zi, 0.23);
     for (int i1 = 0; i1 < g_NN[n1]; ++i1) {
       int n2 = g_NL[n1][i1];
@@ -1236,15 +1254,15 @@ void find_force_ZBL_for_lammps(
         g_pos[n2][0] - g_pos[n1][0], g_pos[n2][1] - g_pos[n1][1], g_pos[n2][2] - g_pos[n1][2]};
 
       double d12sq = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
-      double max_rc_outer = 2.5;
-      if (d12sq >= max_rc_outer * max_rc_outer) {
-        continue;
-      }
+      // float max_rc_outer = 2.5;  This restriction has been removed in the latest version of GPUMD.
+      // if (d12sq >= max_rc_outer * max_rc_outer) {
+      //   continue;
+      // }
       double d12 = sqrt(d12sq);
       double d12inv = 1.0 / d12;
       double f, fp;
       int type2 = map_atom_type_idx[g_type[n2] - 1];
-      double zj = zbl.atomic_numbers[type2]; // from LAMMPS to NEP convention
+      int zj = zbl.atomic_numbers[type2]; // from LAMMPS to NEP convention
       double a_inv = (pow_zi + pow(zj, 0.23)) * 2.134563;
       double zizj = K_C_SP * zi * zj;
       if (zbl.flexibled) {
@@ -1263,7 +1281,16 @@ void find_force_ZBL_for_lammps(
         }
         find_f_and_fp_zbl(ZBL_para, zizj, a_inv, d12, d12inv, f, fp);
       } else {
-        find_f_and_fp_zbl(zizj, a_inv, zbl.rc_inner, zbl.rc_outer, d12, d12inv, f, fp);
+        double rc_inner = zbl.rc_inner;
+        double rc_outer = zbl.rc_outer;
+        if (paramb.use_typewise_cutoff_zbl) {
+          // zi and zj start from 1, so need to minus 1 here
+          rc_outer = std::min(
+            (COVALENT_RADIUS[zi - 1] + COVALENT_RADIUS[zj - 1]) * paramb.typewise_cutoff_zbl_factor,
+            rc_outer);
+          rc_inner = 0.0;
+        }
+        find_f_and_fp_zbl(zizj, a_inv, rc_inner, rc_outer, d12, d12inv, f, fp);
       }
       double f2 = fp * d12inv * 0.5;
       double f12[3] = {r12[0] * f2, r12[1] * f2, r12[2] * f2};
@@ -1453,18 +1480,23 @@ void NEP3_CPU::read_neptxt(const std::string& potential_filename, const bool is_
     zbl.atomic_numbers[n] = atomic_number;
   }
 
-  // zbl 0.7 1.4
+  // zbl
   if (zbl.enabled) {
     tokens = get_tokens(input);
-    if (tokens.size() != 3) {
+    if (tokens.size() != 3 && tokens.size() != 4) {
       print_tokens(tokens);
-      std::cout << "This line should be zbl rc_inner rc_outer." << std::endl;
+      std::cout << "This line should be zbl rc_inner rc_outer [zbl_factor]." << std::endl;
       exit(1);
     }
     zbl.rc_inner = get_double_from_token(tokens[1], __FILE__, __LINE__);
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
     if (zbl.rc_inner == 0 && zbl.rc_outer == 0) {
       zbl.flexibled = true;
+    } else {
+      if (tokens.size() == 4) {
+        paramb.typewise_cutoff_zbl_factor = get_double_from_token(tokens[3], __FILE__, __LINE__);
+        paramb.use_typewise_cutoff_zbl = true;
+      }
     }
   }
 
@@ -1662,8 +1694,13 @@ void NEP3_CPU::read_neptxt(const std::string& potential_filename, const bool is_
       } else {
         std::cout << "    has universal ZBL with inner cutoff " << zbl.rc_inner
                   << " A and outer cutoff " << zbl.rc_outer << " A.\n";
+        if (paramb.use_typewise_cutoff_zbl) {
+          std::cout << "    ZBL typewise cutoff is enabled with factor "
+                    << paramb.typewise_cutoff_zbl_factor << ".\n";
+        }
       }
     }
+
     std::cout << "    radial cutoff = " << paramb.rc_radial << " A.\n";
     std::cout << "    angular cutoff = " << paramb.rc_angular << " A.\n";
     std::cout << "    n_max_radial = " << paramb.n_max_radial << ".\n";
@@ -1767,6 +1804,6 @@ void NEP3_CPU::compute_for_lammps(
     force, total_virial, virial, model_index);
   if (zbl.enabled) {
     find_force_ZBL_for_lammps(
-      zbl, N, ilist, NN, NL, type, map_atom_type_idx,  pos, force, total_virial, virial, total_potential, potential, model_index);
+      paramb, zbl, N, ilist, NN, NL, type, map_atom_type_idx,  pos, force, total_virial, virial, total_potential, potential, model_index);
   }
 }

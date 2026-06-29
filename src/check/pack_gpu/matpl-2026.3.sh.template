@@ -3,7 +3,10 @@
 # Default to single-core compilation
 JOB_COUNT=1
 UNPACK_ONLY=false
-COMPILE_FORTRAN=false  # 新增：是否编译 Fortran 版本
+COMPILE_FORTRAN=false
+GPU_ARCH=${GPU_ARCH:-AMPERE86}
+DPREC=${DPREC:-}
+DPREC_ENABLED=false
 
 # OpenMPI 兼容性标志（默认为 true，环境检查后更新）
 OPENMPI_COMPATIBLE=true
@@ -14,8 +17,13 @@ show_help() {
   echo ""
   echo "Options:"
   echo "  -j N     Set the number of CPU cores for compilation (default: 1)"
-  echo "  -m nn    Compile LAMMPS Fortran version (for Linear and NN models)"
+  echo "  -m nn    Compile MatPL Linear/NN support with build.sh"
+  echo "  -a ARCH  Set Kokkos CUDA architecture for lammps-2026.3 (default: AMPERE86)"
+  echo "           ARCH is the Kokkos CUDA architecture suffix, for example AMPERE80, AMPERE86, ADA89, or HOPPER90. For more information on the architecture, please refer to https://docs.lammps.org/Build_extras.html#kokkos."
+  echo "  -d       Enable DPREC_NEPINFER and build lammps-2026.3 in build-64"
   echo "  -u       Unpack the archive only, skip compilation"
+  echo "  --gpu-arch ARCH  Same as -a ARCH"
+  echo "  --dprec          Same as -d"
   echo "  -h, --help  Display this help message"
   exit 0
 }
@@ -23,12 +31,12 @@ show_help() {
 # Environment check functions
 check_ifort_mkl() {
     echo "=== Checking ifort compiler and MKL library ==="
-    
+
     if command -v ifort &> /dev/null; then
         ifort_version=$(ifort --version | grep "ifort" | awk '{print $3}' | cut -d'.' -f1-2)
         major_version=$(echo $ifort_version | cut -d'.' -f1)
         minor_version=$(echo $ifort_version | cut -d'.' -f2)
-        
+
         if [ "$major_version" -gt 19 ] || ([ "$major_version" -eq 19 ] && [ "$minor_version" -ge 1 ]); then
             echo "✓ ifort version: $ifort_version (>= 19.1)"
             return 0
@@ -43,7 +51,6 @@ check_ifort_mkl() {
 }
 
 check_mkl() {
-    # 检查 MKL 库是否存在
     if [ -d "/opt/intel/mkl" ] || [ -d "$MKLROOT" ] || [ ! -z "$MKLROOT" ]; then
         echo "✓ MKL library is installed"
         return 0
@@ -163,17 +170,19 @@ perform_environment_check() {
   CUDA_COMPATIBLE=true
   OPENMPI_COMPATIBLE=true  # 默认为 true，根据检查结果更新
 
-  # 检查 ifort 和 MKL
-  check_ifort_mkl
-  ifort_result=$?
-  check_mkl
-  mkl_result=$?
-  if [ $ifort_result -eq 0 ] && [ $mkl_result -eq 0 ]; then
-    FORTRAN_COMPATIBLE=true
-  else
-    FORTRAN_COMPATIBLE=false
+  # 检查 ifort 和 MKL（仅在 -m nn 时需要）
+  if [ "$COMPILE_FORTRAN" = true ]; then
+    check_ifort_mkl
+    ifort_result=$?
+    check_mkl
+    mkl_result=$?
+    if [ $ifort_result -eq 0 ] && [ $mkl_result -eq 0 ]; then
+      FORTRAN_COMPATIBLE=true
+    else
+      FORTRAN_COMPATIBLE=false
+    fi
+    echo ""
   fi
-  echo ""
 
   # 检查 GCC
   check_gcc_version
@@ -214,11 +223,10 @@ perform_environment_check() {
   echo " Environment Summary"
   echo "========================================"
 
-  # 如果用户要求编译 Fortran 版本但环境不满足，则直接报错退出
   if [ "$COMPILE_FORTRAN" = true ] && [ "$FORTRAN_COMPATIBLE" = false ]; then
-    echo "✗ Error: You requested Fortran compilation (-m nn) but the environment check failed for ifort/MKL."
+    echo "✗ Error: You requested MatPL Linear/NN compilation (-m nn) but the environment check failed for ifort/MKL."
     echo " Please install ifort (>= 19.1) and MKL before proceeding."
-    echo " Or run without -m nn option to skip Fortran compilation."
+    echo " Or run without -m nn option to skip Linear/NN compilation."
     ENV_PASS=false
   fi
 
@@ -238,12 +246,6 @@ perform_environment_check() {
     echo "✗ Environment check failed. Please review the above errors."
   fi
 
-  if [ "$FORTRAN_COMPATIBLE" = false ] && [ "$COMPILE_FORTRAN" = false ]; then
-    echo ""
-    echo "⚠ Warning: ifort compiler or MKL library is missing or does not meet version requirements."
-    echo " This will affect the compilation of Linear and NN models, but does not affect the use of DP and NEP models."
-  fi
-
   echo "========================================"
 
   # 如果环境检查失败（CUDA或GCC导致），退出脚本
@@ -254,45 +256,85 @@ perform_environment_check() {
 }
 
 # Parse command line arguments
-while getopts "j:n:m:uh" opt; do
-  case $opt in
-    j)
-      JOB_COUNT=$OPTARG
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -j)
+      if [ -z "$2" ]; then
+        echo "Option -j requires an argument." >&2
+        show_help
+      fi
+      JOB_COUNT=$2
       echo "Using $JOB_COUNT CPU cores for compilation"
+      shift 2
       ;;
-    m)
-      if [ "$OPTARG" = "nn" ]; then
+    -j*)
+      JOB_COUNT=${1#-j}
+      echo "Using $JOB_COUNT CPU cores for compilation"
+      shift
+      ;;
+    -m)
+      if [ "$2" = "nn" ]; then
         COMPILE_FORTRAN=true
-        echo "Will compile LAMMPS Fortran version (for Linear and NN models)"
+        echo "Will compile MatPL Linear/NN support"
+        shift 2
       else
         echo "Error: -m option only accepts 'nn' as argument"
         show_help
       fi
       ;;
-    u)
+    -mnn)
+      COMPILE_FORTRAN=true
+      echo "Will compile MatPL Linear/NN support"
+      shift
+      ;;
+    -a|--gpu-arch)
+      if [ -z "$2" ]; then
+        echo "Option $1 requires an argument." >&2
+        show_help
+      fi
+      GPU_ARCH=$2
+      shift 2
+      ;;
+    --gpu-arch=*)
+      GPU_ARCH=${1#--gpu-arch=}
+      shift
+      ;;
+    -d|--dprec)
+      DPREC=ON
+      shift
+      ;;
+    -u)
       UNPACK_ONLY=true
       echo "Unpack-only mode enabled"
+      shift
       ;;
-    h)
+    -h|--help)
       show_help
       ;;
-    \?)
-      echo "Invalid option: -$OPTARG" >&2
-      show_help
-      ;;
-    :)
-      echo "Option -$OPTARG requires an argument." >&2
+    *)
+      echo "Invalid option: $1" >&2
       show_help
       ;;
   esac
 done
 
-# Handle --help option
-for arg in "$@"; do
-  if [ "$arg" == "--help" ]; then
+case "${DPREC,,}" in
+  1|true|yes|on)
+    DPREC_ENABLED=true
+    ;;
+  ""|0|false|no|off)
+    DPREC_ENABLED=false
+    ;;
+  *)
+    echo "Invalid DPREC value: $DPREC. Use ON/OFF, true/false, or 1/0." >&2
     show_help
-  fi
-done
+    ;;
+esac
+
+echo "Using Kokkos CUDA architecture: $GPU_ARCH"
+if [ "$DPREC_ENABLED" = true ]; then
+  echo "DPREC_NEPINFER enabled; lammps-2026.3 will be built in build-64"
+fi
 
 # 执行环境检查（跳过解压模式）
 if [ "$UNPACK_ONLY" = false ]; then
@@ -310,7 +352,7 @@ FINAL_DIR=$BASE_DIR/MatPL-2026.3
 ENV_DIR=$FINAL_DIR/matpl-2026.3
 MATPL=$FINAL_DIR/MatPL-2026.3               #./MatPL-2026.3/MatPL-2026.3
 LAMMPS_STABLE=$FINAL_DIR/lammps-23-4        #./MatPL-2026.3/lammps-23-4
-LAMMPS_FORTRAN=$FINAL_DIR/lammps-fortran    #./MatPL-2026.3/lammps-fortran 
+LAMMPS_FORTRAN=$FINAL_DIR/lammps-fortran    #./MatPL-2026.3/lammps-fortran
 LAMMPS_NEPKK=$FINAL_DIR/lammps-2026.3    #./MatPL-2026.3/lammps-2026.3 
 
 # Create final directory
@@ -329,7 +371,6 @@ tar -xzf matpl-2026.3.tar.gz -C $ENV_DIR > /dev/null 2>&1
 # Move MatPL and lammps_2024.5 directories to FINAL_DIR
 mv $TEMP_DIR/MatPL-2026.3 $FINAL_DIR
 
-# 只有在需要编译 Fortran 版本时才复制 lammps-fortran 目录
 if [ "$COMPILE_FORTRAN" = true ]; then
     cp -r $TEMP_DIR/lammps-23-4 $LAMMPS_FORTRAN
 fi
@@ -346,7 +387,6 @@ echo "Copy LAMMPS code done."
 cd $MATPL/src/lmps/lammps-2026.3/lmp_nepkokkos_cmake
 bash kknep-patch.sh $LAMMPS_NEPKK
 
-# 只有在需要编译 Fortran 版本时才复制 Fortran 相关文件
 if [ "$COMPILE_FORTRAN" = true ]; then
     cp -r $MATPL/src/lmps/lammps-fortran/MATPL  $LAMMPS_FORTRAN/src/
     cp -r $MATPL/src/lmps/lammps-fortran/Makefile.mpi  $LAMMPS_FORTRAN/src/MAKE
@@ -393,8 +433,14 @@ echo "The compilation of the MatPL-2026.3 machine learning force field training 
 LAMMPS_NEPKK_COMPILED=false
 if [ "$OPENMPI_COMPATIBLE" = true ]; then
     cd $LAMMPS_NEPKK
-    mkdir build
-    cd build
+    LAMMPS_BUILD_DIR=build
+    DPREC_CMAKE_OPTION=
+    if [ "$DPREC_ENABLED" = true ]; then
+        LAMMPS_BUILD_DIR=build-64
+        DPREC_CMAKE_OPTION="-DPREC_NEPINFER=ON"
+    fi
+    mkdir "$LAMMPS_BUILD_DIR"
+    cd "$LAMMPS_BUILD_DIR"
 
     cmake -C ../cmake/presets/basic.cmake \
        -DPKG_MESONT=no \
@@ -405,15 +451,16 @@ if [ "$OPENMPI_COMPATIBLE" = true ]; then
        -DKokkos_ENABLE_OPENMP=yes \
        -DKokkos_ENABLE_CUDA_LAMBDA=yes \
        -DFFT_KOKKOS=CUFFT \
-       -DKokkos_ARCH_AMPERE86=ON \
+       -DKokkos_ARCH_${GPU_ARCH}=ON \
+       $DPREC_CMAKE_OPTION \
        -DTEST_TIME=ON \
        ../cmake
 
     cmake --build . -j$JOB_COUNT
 
-    cat <<EOF > "$LAMMPS_NEPKK/env.sh"
+cat <<EOF > "$LAMMPS_NEPKK/env.sh"
 # Environment for MatPL-2026.3 lammps path
-export PATH=$LAMMPS_NEPKK/build:\$PATH
+export PATH=$LAMMPS_NEPKK/$LAMMPS_BUILD_DIR:\$PATH
 EOF
 
     echo "The compilation of the lammps-2026.3 has been completed."
@@ -422,55 +469,6 @@ else
     echo "⚠ OpenMPI not found or version < 4.0, skipping lammps-2026.3 compilation."
     # 创建一个空的 env.sh 避免后续 cat 出错（可选）
     echo "# LAMMPS-2026.3 was not compiled due to missing OpenMPI" > "$LAMMPS_NEPKK/env.sh"
-fi
-
-# 只在 COMPILE_FORTRAN 为 true 且 FORTRAN_COMPATIBLE 为 true 时编译 lammps-fortran
-if [ "$COMPILE_FORTRAN" = true ] && [ "$FORTRAN_COMPATIBLE" = true ]; then
-    # Compile lammps-fortran
-    cd $LAMMPS_FORTRAN/src/MATPL/fortran_code
-    make clean
-    if [ $JOB_COUNT -gt 1 ]; then
-        make -j$JOB_COUNT
-    else
-        make
-    fi
-
-    echo "The compilation of the lammps-fortran MATPL library has been completed. Start compiling LAMMPS ..."
-
-    # Continue compiling LAMMPS module
-    cd $LAMMPS_FORTRAN/src
-    make yes-KSPACE
-    make yes-MANYBODY
-    make yes-REAXFF
-    make yes-MOLECULE
-    make yes-QEQ
-    make yes-REPLICA
-    make yes-RIGID
-    make yes-MEAM
-    make yes-MC
-    make yes-MATPL
-    make yes-SHOCK
-
-    if [ $JOB_COUNT -gt 1 ]; then
-        make mpi -j$JOB_COUNT mode=shared
-    else
-        make mpi mode=shared
-    fi
-
-    echo "The compilation of the lammps-fortran has been completed."
-    
-    # 只在编译成功后创建 matpl-fortran-env.sh
-    echo "source $ENV_DIR/bin/activate" > $FINAL_DIR/matpl-fortran-env.sh
-    cat $MATPL/env.sh $LAMMPS_FORTRAN/env.sh >> $FINAL_DIR/matpl-fortran-env.sh
-    echo "Created matpl-fortran-env.sh for lammps-fortran"
-elif [ "$COMPILE_FORTRAN" = true ] && [ "$FORTRAN_COMPATIBLE" = false ]; then
-    # 这个分支实际上不应该被执行，因为环境检查时已经退出
-    echo "Error: Fortran compilation requested but environment check failed earlier."
-    exit 1
-elif [ "$COMPILE_FORTRAN" = false ]; then
-    echo "Skipping lammps-fortran compilation: -m nn option was not specified."
-    echo "Note: Without Fortran compilation, Linear and NN models cannot be used in LAMMPS MD simulations."
-    echo "      Only DP and NEP models are available for LAMMPS MD simulations."
 fi
 
 # 生成 matpl-env.sh（包含 MatPL 和 lammps-2026.3 的环境）
@@ -496,24 +494,16 @@ if [ -f "$FINAL_DIR/matpl-env.sh" ]; then
         echo "⚠ LAMMPS-2026.3 compilation skipped (OpenMPI missing or < 4.0)."
     fi
 
-    if [ "$COMPILE_FORTRAN" = true ] && [ "$FORTRAN_COMPATIBLE" = true ] && [ -f "$FINAL_DIR/matpl-fortran-env.sh" ]; then
-        echo "✓ Created matpl-fortran-env.sh for lammps-fortran"
-        echo ""
-        echo "Installation completed successfully!"
-        echo "Both lammps-2026.3 and fortran versions of LAMMPS are available."
-    elif [ "$COMPILE_FORTRAN" = false ]; then
-        echo ""
-        echo "Installation completed (Fortran version skipped):"
-        if [ "$LAMMPS_NEPKK_COMPILED" = true ]; then
-            echo "  ✓ LAMMPS with lammps-2026.3 support installed"
-        else
-            echo "  ⚠ LAMMPS with lammps-2026.3 support was not compiled due to missing OpenMPI"
-        fi
-        echo "  - LAMMPS with fortran support was not requested (-m nn not specified)"
-        echo ""
-        echo "NEP and DP models are fully functional."
-        echo "Note: Linear and NN models cannot be used in LAMMPS MD simulations."
-        echo "      To enable Linear/NN models, re-run with -m nn option."
+    echo ""
+    echo "Installation completed:"
+    if [ "$LAMMPS_NEPKK_COMPILED" = true ]; then
+        echo "  ✓ LAMMPS with lammps-2026.3 support installed"
+    else
+        echo "  ⚠ LAMMPS with lammps-2026.3 support was not compiled due to missing OpenMPI"
+    fi
+    if [ "$COMPILE_FORTRAN" = true ]; then
+        echo "  ✓ MatPL Linear/NN support compiled with -m nn"
+        echo "  - lammps-fortran interface compilation was skipped"
     fi
 else
     echo "✗ Installation encountered errors. Please check the installation logs!"

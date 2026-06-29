@@ -73,6 +73,7 @@ class PairNEPKokkos : public PairNEP {
   int num_ff;
   bool is_rank_0;
   int nprocs_total;
+  int cur_atom_max = 0;
   int global_nall = 0;
   int global_nlocal = 0;
   bool reverse_force = false;
@@ -97,13 +98,24 @@ class PairNEPKokkos : public PairNEP {
   
   DAT::tdual_efloat_1d k_eatom;
   DAT::tdual_virial_array k_vatom;
+  DAT::tdual_virial_array k_vatom_work;
 //   DAT::tdual_ffloat_2d k_cutsq;
   typename AT::t_efloat_1d d_eatom;
   typename AT::t_virial_array d_vatom; //device [nall][6]
+  typename AT::t_virial_array d_vatom_work; // internal global virial work buffer
   
   typename AT::t_int_1d_randomread d_ilist;
   typename AT::t_int_1d_randomread d_numneigh;
   typename AT::t_neighbors_2d d_neighbors;
+
+  int local_maxeatom = 0;
+  int local_maxvatom = 0;
+  int local_maxvatom_work = 0;
+  int local_maxcvatom = 0;
+  // 手动定义 9 分量 DualView（因为 kokkos_type.h 中没有 tdual_virial9_array）
+  typedef Kokkos::DualView<double*[9], Kokkos::LayoutRight, LMPDeviceType> tdual_virial9_array;
+  tdual_virial9_array k_cvatom;                    // DualView（host + device）
+  Kokkos::View<double*[9], Kokkos::LayoutRight, DeviceType> d_cvatom;    // active execution-space view
   
   int need_dup;
   int neighflag, newton_pair;

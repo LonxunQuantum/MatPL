@@ -387,7 +387,7 @@ class NEP(nn.Module):
         else:# cuda ops
             if self.train_2b:
                 feat_2b = torch.zeros(natoms_sum, self.two_feat_num, dtype=dtype, device=device, requires_grad=True)
-                feat_2b = CalcOps.calculateNepFeat(self.c_param_2, 
+                feat_2b = CalcOps.calculateNepFeat(self.c_param_2.contiguous(),
                                                 Ri, 
                                                 NL_radial, 
                                                 atom_type_map,
@@ -398,7 +398,7 @@ class NEP(nn.Module):
                                                 )[0]
             if self.l_max_3b > 0:
                 feat_3b = torch.zeros(natoms_sum, self.multi_feat_num, dtype=dtype, device=device, requires_grad=True)
-                feat_3b = CalcOps.calculateNepMbFeat(self.c_param_3, 
+                feat_3b = CalcOps.calculateNepMbFeat(self.c_param_3.contiguous(),
                                                         Ri_angular, 
                                                         NL_angular, 
                                                         atom_type_map, 

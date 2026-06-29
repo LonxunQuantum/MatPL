@@ -1,0 +1,98 @@
+###lammps script for calculating thermo conductivity of graphene using dp potential (hityingph@163.com 2022/9/1)
+### Basic setup ###
+
+variable 	simname index graphene
+variable        t equal 300
+log 		log.${simname}.txt
+units           metal
+boundary	p p p
+timestep 	0.001 #1fs
+atom_style      atomic
+
+package kokkos neigh half comm device
+newton on
+
+### Structure ###
+read_data       ${simname}.data  
+region		fixed    	block INF INF INF 42.6  INF INF
+group		gfixed    	region fixed
+region		tlow      	block INF INF 42.6 255.6  INF INF
+region		thigh	   	block INF INF 4515.6 INF  INF INF
+group		gthigh	   	region thigh	   		
+group		gtlow	   	region tlow
+group		innt      	subtract all gfixed 
+group		innernt   	subtract all gfixed gthigh gtlow
+
+region		block1		block INF INF 255.6 681.6 INF INF 
+region		block2		block INF INF 681.6 1107.6 INF INF
+region		block3		block INF INF 1107.6 1533.6 INF INF
+region		block4		block INF INF 1533.6 1959.6 INF INF
+region		block5		block INF INF 1959.6 2385.6 INF INF
+region		block6		block INF INF 2385.6 2811.6 INF INF
+region		block7		block INF INF 2811.6 3237.6 INF INF
+region		block8		block INF INF 3237.6 3663.6 INF INF
+region		block9		block INF INF 3663.6 4089.6 INF INF
+region		block10		block INF INF 4089.6 4515.6 INF INF
+group           gblock1     region block1
+group           gblock2     region block2
+group           gblock3     region block3
+group           gblock4     region block4
+group           gblock5     region block5
+group           gblock6     region block6
+group           gblock7     region block7
+group           gblock8     region block8
+group           gblock9     region block9
+group           gblock10    region block10
+
+
+### Potentials ###
+mass           	1  12.01
+pair_style 		matpl/nep/kk nep.txt
+pair_coeff 		* *  c
+
+
+### Output Setting ###
+compute         hot_temp  	 gthigh  	temp 
+compute         cold_temp 	 gtlow 		temp 
+compute		innt_temp	 innt		temp 
+compute         innernt_temp innernt 	temp  
+compute         block1_temp  gblock1  	temp 
+compute         block2_temp  gblock2  	temp 
+compute         block3_temp  gblock3  	temp 
+compute         block4_temp  gblock4  	temp 
+compute         block5_temp  gblock5  	temp 
+compute         block6_temp  gblock6  	temp 
+compute         block7_temp  gblock7  	temp 
+compute         block8_temp  gblock8  	temp 
+compute         block9_temp  gblock9  	temp 
+compute         block10_temp  gblock10  temp 
+
+compute 	ke innernt ke/atom
+compute 	pe innernt pe/atom
+compute 	stress innernt centroid/stress/atom NULL virial
+compute 	flux innernt heat/flux ke pe stress
+
+
+###equilibration run###
+thermo          1000
+thermo_style 	custom step etotal pxx pyy pzz 
+dump            1 all atom 10000 ${simname}_relaxation.lammpstrj
+velocity	gfixed  set 0.0	0.0 0.0	
+fix		1 gfixed setforce 0.0 0.0 0.0
+velocity 	innt create 300 1024 rot yes dist gaussian
+fix 		2 innt nvt/kk temp 300 300 0.1
+run		100000
+unfix       	2
+undump          1
+
+### thermal conductivity calculation ###
+reset_timestep 	0
+dump            2 all atom 10000 ${simname}_product.lammpstrj
+fix     	3 innt nve/kk
+fix         	hot1 gthigh langevin/kk 350 350 0.1 59804 tally yes
+fix         	cold1 gtlow  langevin/kk 250 250 0.1 287859 tally yes
+fix 		4 all ave/time 10 100 1000 f_hot1 f_cold1 c_block1_temp c_block2_temp c_block3_temp c_block4_temp c_block5_temp c_block6_temp c_block7_temp c_block8_temp c_block9_temp c_block10_temp file compute_Energy_Temp.out    
+fix 		5 all ave/time 10 100 1000 c_flux[1] c_flux[2] c_flux[3] c_flux[4] c_flux[5] c_flux[6] file compute_HeatFlux.out           
+thermo_style 	custom step etotal c_innernt_temp c_hot_temp c_cold_temp f_hot1 f_cold1  
+run		4000000
+

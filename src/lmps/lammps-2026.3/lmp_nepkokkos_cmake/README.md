@@ -44,6 +44,23 @@ cmake -C ../cmake/presets/basic.cmake \
 cmake --build . -j N #Number of cores for parallel compilation
 ```
 
+```bash
+# If you also need to compile the DP interface, please import the PyTorch path, import the MKL library, and enable the C++ STD17 standard for compilation.
+
+export Torch_DIR=\$(python -c \import torch; print(torch.utils.cmake_prefix_path)\)/Torch
+
+# Then, add the following option in cmake:
+-DTorch_DIR=\${Torch_DIR}
+-DCMAKE_CXX_STANDARD=17
+-DPKG_MATPLDP=yes
+
+# For the D3 interface, please add the following option in cmake. Note that D3 requires CUDA support and cannot be used in combination with matpl/nep/kk.
+-DPKG_MATPLD3=yes
+
+# NEP adopts single-precision inference by default. For double-precision inference, please add the following option in cmake.
+-DPREC_NEPINFER=ON
+```
+
 # how to use
 Reference case ./examples
 

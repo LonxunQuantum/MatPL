@@ -19,6 +19,26 @@ Only the constant definitions related to NEP and ZBL are retained, compared to t
 */
 #pragma once
 
+#ifndef NEP_FLOAT_DEFINED
+#define NEP_FLOAT_DEFINED
+
+// 默认使用 float，当定义了 PREC_NEPINFER 时使用 double
+#ifdef PREC_NEPINFER
+    typedef double NEP_FLOAT;
+    constexpr NEP_FLOAT PI = 3.141592653589793;
+    constexpr NEP_FLOAT NEG_HALF_PI = -1.5707963267948966;  // -π/2
+    constexpr NEP_FLOAT K_C_SP = 14.399645;                 // 1/(4*PI*epsilon_0)
+    #define FLOAT_LIT(x) x
+#else
+    typedef float NEP_FLOAT;
+    constexpr NEP_FLOAT PI = 3.1415927f;
+    constexpr NEP_FLOAT NEG_HALF_PI = -1.5707963f;          // -π/2
+    constexpr NEP_FLOAT K_C_SP = 14.399645f;
+    #define FLOAT_LIT(x) x##f
+#endif
+
+#endif // NEP_FLOAT_DEFINED
+
 #define NEIGHMASK 0x1FFFFFFF
 constexpr int NUM_ELEMENTS = 103;
-constexpr float K_C_SP = 14.399645f;                            // 1/(4*PI*epsilon_0)
+

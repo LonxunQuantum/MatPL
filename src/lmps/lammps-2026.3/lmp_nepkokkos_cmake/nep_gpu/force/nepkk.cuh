@@ -36,43 +36,48 @@ In the read_neptxt function for parsing NEP.txt is adapted from the GPUMD source
 #include <utility> // for std::move
 // #include <Kokkos_Core.hpp>
 
+
 struct LMP_Data  {
   GPU_Vector<int> type;
   GPU_Vector<int> ilist;
-  GPU_Vector<float> position; // 将double坐标转换为float，读取会更快
+  GPU_Vector<NEP_FLOAT> position; // 将double坐标转换为float，读取会更快
 };
+
 struct NEPKK_Data {
-  GPU_Vector<float> f12x; // 3-body or manybody partial forces
-  GPU_Vector<float> f12y; // 3-body or manybody partial forces
-  GPU_Vector<float> f12z; // 3-body or manybody partial forces
-  GPU_Vector<float> Fp;
-  GPU_Vector<float> sum_fxyz;
+  GPU_Vector<NEP_FLOAT> f12x; // 3-body or manybody partial forces
+  GPU_Vector<NEP_FLOAT> f12y; // 3-body or manybody partial forces
+  GPU_Vector<NEP_FLOAT> f12z; // 3-body or manybody partial forces
+  GPU_Vector<NEP_FLOAT> Fp;
+  GPU_Vector<NEP_FLOAT> sum_fxyz;
   GPU_Vector<int> NN_radial;    // radial neighbor list
   GPU_Vector<int> NL_radial;    // radial neighbor list
   GPU_Vector<int> NN_angular;   // angular neighbor list
   GPU_Vector<int> NL_angular;   // angular neighbor list
-  GPU_Vector<float> parameters; // parameters to be optimized
-  GPU_Vector<float> param_c2;
-  GPU_Vector<float> param_c3;
+  GPU_Vector<NEP_FLOAT> parameters; // parameters to be optimized
+  GPU_Vector<NEP_FLOAT> param_c2;
+  GPU_Vector<NEP_FLOAT> param_c3;
   GPU_Vector<double> potential_per_atom;
   GPU_Vector<double> potential_all;
   GPU_Vector<double> force_per_atom;
   GPU_Vector<double> virial_per_atom;
   GPU_Vector<double> total_virial;
+  GPU_Vector<double> partial_virial;
 };
 
 class NEPKK
 {
 public:
   struct ParaMB {
-    int version = 2; // NEP version, 2 for NEP2 and 3 for NEPKK
+    bool use_typewise_cutoff_zbl = false;
+    NEP_FLOAT typewise_cutoff_zbl_factor = FLOAT_LIT(0.0);
+    int version = 4; // NEP version
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability, 3=temperature-dependent free energy
-    float rc_radial = 0.0f;     // radial cutoff
-    float rc_angular = 0.0f;    // angular cutoff
-    float rc_radial_square = 0.0f; // rc_radial * rc_radial
-    float rc_angular_square = 0.0f;// rc_angular * rc_angular
-    float rcinv_radial = 0.0f;  // inverse of the radial cutoff
-    float rcinv_angular = 0.0f; // inverse of the angular cutoff
+    NEP_FLOAT rc_radial = FLOAT_LIT(0.0);     // radial cutoff
+    NEP_FLOAT rc_angular = FLOAT_LIT(0.0);    // angular cutoff
+    NEP_FLOAT rc_radial_square = FLOAT_LIT(0.0); // rc_radial * rc_radial
+    NEP_FLOAT rc_angular_square = FLOAT_LIT(0.0); // rc_angular * rc_angular
+    NEP_FLOAT rcinv_radial = FLOAT_LIT(0.0);  // inverse of the radial cutoff
+    NEP_FLOAT rcinv_angular = FLOAT_LIT(0.0); // inverse of the angular cutoff
     int MN_radial = 200;
     int MN_angular = 100;
     int n_max_radial = 0;  // n_radial = 0, 1, 2, ..., n_max_radial
@@ -89,7 +94,7 @@ public:
     int num_types_sq = 0;       // for nep3
     int num_c_radial = 0;       // for nep3
     int num_types = 0;
-    float q_scaler[140];
+    NEP_FLOAT q_scaler[140];
   };
 
   struct ANN {
@@ -99,27 +104,29 @@ public:
     int num_para_ann = 0;
     int num_c2 = 0;
     int num_c3 = 0;
-    const float* w0[NUM_ELEMENTS]; // weight from the input layer to the hidden layer
-    const float* b0[NUM_ELEMENTS]; // bias for the hidden layer
-    const float* w1[NUM_ELEMENTS]; // weight from the hidden layer to the output layer
-    const float* b1;             // bias for the output layer
-    float* c;
+    const NEP_FLOAT* w0[NUM_ELEMENTS]; // weight from the input layer to the hidden layer
+    const NEP_FLOAT* b0[NUM_ELEMENTS]; // bias for the hidden layer
+    const NEP_FLOAT* w1[NUM_ELEMENTS]; // weight from the hidden layer to the output layer
+    const NEP_FLOAT* b1;             // bias for the output layer
+    NEP_FLOAT* c;
   };
 
   struct ZBL {
     bool enabled = false;
     bool flexibled = false;
-    float rc_inner = 1.0f;
-    float rc_outer = 2.0f;
-    float para[550];
-    float atomic_numbers[NUM_ELEMENTS];
+    NEP_FLOAT rc_inner = FLOAT_LIT(1.0);
+    NEP_FLOAT rc_outer = FLOAT_LIT(2.0);
+    std::vector<NEP_FLOAT> cpu_para;
+    std::vector<int> cpu_atomic_numbers; // typewise zbl, as index, should be int
+    GPU_Vector<NEP_FLOAT> para;
+    GPU_Vector<int> atomic_numbers; // typewise zbl, as index, should be int
     int num_types;
   };
 
   NEPKK();
   void read_neptxt(const char* file_potential, const bool is_rank_0, const int rank_id, const int device_id, const int ff_id);
   void set_atom_type_map(int type_nums, const int* type_list);
-  void convert_C(float* c, int NtypeI, int Nmax, int Nbase);// 调整C的维度
+  void convert_C(NEP_FLOAT* c, int NtypeI, int Nmax, int Nbase);// 调整C的维度
   ~NEPKK(void);
 
   bool USE_SHAREMEM_C2 = false;
@@ -130,14 +137,14 @@ public:
   ZBL zbl;
   NEPKK_Data nep_data;
   LMP_Data lmp_data;
-  std::vector<int> element_atomic_number_list;
-  GPU_Vector<int> atom_type_map;
+  std::vector<int> cpu_element_atomic_number_list;
+  GPU_Vector<int> atom_type_map; // 用于结构和力场中的元素顺序不一致时做映射
 
   int max_inum = 0;
   int max_nlocal = 0;
   int max_nall = 0;
   int allocate_once = 0;
-  void update_potential(float* parameters, ANN& ann);
+  void update_potential(NEP_FLOAT* parameters, ANN& ann);
   void reset_nep_data(int inum, int n_local, int n_all, int vflag_either);
   void free_nep_data();
   void checkMemoryUsage(int sgin=0);
@@ -150,12 +157,13 @@ public:
     int vflag_either,       // = bool(vfalg_atom or vflag_global)
     int vflag_global,       // virial_global flag
     int vflag_atom,         // virial peratom flag
+    int cvflag_atom,        // virial-9 peratom flag
     int nall,               // nlocal + nghost
     int inum, 
     int nlocal,
     int max_neighbors,          // row nums of firstneigh
     int num_neighbors,          // col nums of firstneigh -> j = firstneigh[i + num_neighs * jj] & NEIGHMASK
-    int* itype,                 //atoms' type,the len is [n_all]
+    int* itype,                 // atoms' type,the len is [n_all]
     int* ilist,                 // atom i list
     int* numneigh,              // the neighbor nums of each i, [inum]
     int* firstneigh,            // the neighbor list of each i, [inum * NM]
@@ -165,6 +173,7 @@ public:
     double* force_per_atom_lmp,      // the output of force
     double* force_per_atom_copy,
     double* virial_per_atom,
+    double* cvirial_per_atom,
     double* h_etot_virial_global // len=7: etot + 6 virials
     );
 
@@ -174,4 +183,5 @@ public:
   int device;
   int rank;
   int ff_index;
-  };
+  double* cv_per_atom;
+};
