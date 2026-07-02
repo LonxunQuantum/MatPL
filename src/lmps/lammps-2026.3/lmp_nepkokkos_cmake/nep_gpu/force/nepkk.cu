@@ -33,12 +33,16 @@ wuxingxing@pwmat.com and MatPL development team. 2026. Beijing Lonxun Quantum Co
 */
 
 #include "nepkk.cuh"
+#include "ewald_nepkk.cuh"
+#include "pppm_nepkk.cuh"
 #include "nep_kernal_function.cuh"
+#include "nep_type_slim.h"
 #include "../utilities/common.cuh"
 #include "../utilities/error.cuh"
 #include "../utilities/nep_utilities.cuh"
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <cub/cub.cuh>
@@ -73,6 +77,7 @@ int countNonEmptyLines(const char* filename) {
 
 NEPKK::NEPKK()
 {
+  std::fill(paramb.nep_to_sim, paramb.nep_to_sim + NUM_ELEMENTS, static_cast<int8_t>(-1));
 }
 
 void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const int rank_id, const int device_id, const int ff_id)
@@ -100,6 +105,14 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
   } else if (tokens[0] == "nep4_zbl") {
     paramb.version = 4;
     zbl.enabled = true;
+  } else if (tokens[0] == "nep4_charge2") {
+    paramb.version = 4;
+    paramb.charge_mode = 2;
+    zbl.enabled = false;
+  } else if (tokens[0] == "nep4_zbl_charge2") {
+    paramb.version = 4;
+    paramb.charge_mode = 2;
+    zbl.enabled = true;
   } else if (tokens[0] == "nep5") {
     paramb.model_type = 0;
     paramb.version = 5;
@@ -107,6 +120,16 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
   } else if (tokens[0] == "nep5_zbl") {
     paramb.model_type = 0;
     paramb.version = 5;
+    zbl.enabled = true;
+  } else if (tokens[0] == "nep5_charge2") {
+    paramb.model_type = 0;
+    paramb.version = 5;
+    paramb.charge_mode = 2;
+    zbl.enabled = false;
+  } else if (tokens[0] == "nep5_zbl_charge2") {
+    paramb.model_type = 0;
+    paramb.version = 5;
+    paramb.charge_mode = 2;
     zbl.enabled = true;
   }
   paramb.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
@@ -186,6 +209,10 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
   }
   paramb.rc_radial_square = paramb.rc_radial * paramb.rc_radial;
   paramb.rc_angular_square = paramb.rc_angular * paramb.rc_angular;
+  if (paramb.charge_mode == 2) {
+    paramb.charge_alpha = NEP_FLOAT(PI) / paramb.rc_radial;
+    paramb.charge_alpha_factor = FLOAT_LIT(0.25) / (paramb.charge_alpha * paramb.charge_alpha);
+  }
   
   if (tokens.size() == 5) {
     int MN_radial = get_int_from_token(tokens[3], __FILE__, __LINE__);
@@ -308,7 +335,12 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
   annmb.num_c2   = paramb.num_types_sq * (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1);
   annmb.num_c3   = paramb.num_types_sq * (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1);
   
-  if (paramb.version == 4) {
+  if (paramb.charge_mode == 2) {
+    annmb.num_para_ann = (annmb.dim + 3) * annmb.num_neurons1 * paramb.num_types + 2;
+    if (paramb.version == 5) {
+      annmb.num_para_ann += paramb.num_types;
+    }
+  } else if (paramb.version == 4) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 * paramb.num_types;
   } else { // 5
     annmb.num_para_ann = ((annmb.dim + 2) * annmb.num_neurons1 + 1) * paramb.num_types + 1;
@@ -324,7 +356,9 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
     neplinenums  -= 1; // zbl a b
   }
 
-  if (paramb.num_types == 1) {
+  if (paramb.charge_mode == 2) {
+    is_gpumd_nep = (paramb.version == 4);
+  } else if (paramb.num_types == 1) {
     is_gpumd_nep = false;
   } else if (paramb.version == 4) {
     if (neplinenums  == (tmp + 1)) {
@@ -338,7 +372,9 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
     }
   }
 
-  if (paramb.version == 4) {
+  if (paramb.charge_mode == 2) {
+    annmb.num_para = annmb.num_para_ann;
+  } else if (paramb.version == 4) {
     annmb.num_para = annmb.num_para_ann + paramb.num_types;
   } else {
     annmb.num_para = annmb.num_para_ann;
@@ -361,7 +397,7 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
   // NN and descriptor parameters
   std::vector<NEP_FLOAT> parameters(annmb.num_para);
   for (int n = 0; n < annmb.num_para; ++n) {
-    if (is_gpumd_nep == true && (n >= annmb.num_para_ann + 1) && (n < annmb.num_para_ann + paramb.num_types)) {
+    if (paramb.charge_mode == 0 && is_gpumd_nep == true && (n >= annmb.num_para_ann + 1) && (n < annmb.num_para_ann + paramb.num_types)) {
       parameters[n] = parameters[annmb.num_para_ann];
       if (rank_0) {
         printf("    copy the last bias parameters[%d]=%f to parameters[%d]=%f \n", 
@@ -405,14 +441,13 @@ void NEPKK::read_neptxt(const char* file_potential, const bool is_rank_0, const 
     }
   }
 
-  USE_SHAREMEM_C2 = SHAREMEM_32 > annmb.num_c2 * sizeof(NEP_FLOAT);
-  USE_SHAREMEM_C3 = SHAREMEM_32 > annmb.num_c3 * sizeof(NEP_FLOAT);
-  if (rank_0) printf("========= USE_SHAREMEM_C2 %d USE_SHAREMEM_C3 %d PRECISION %d ==========\n", USE_SHAREMEM_C2, USE_SHAREMEM_C3, sizeof(NEP_FLOAT));
+  USE_SHAREMEM_C2 = false;
+  USE_SHAREMEM_C3 = false;
 }
 
 NEPKK::~NEPKK(void)
 {
-  // nothing
+  nepkk_pppm_destroy(pppm_data);
 }
 
 void NEPKK::checkMemoryUsage(int sgin) {
@@ -473,6 +508,7 @@ int NEPKK::calculateMaxAtoms(int MN_radial, int MN_angular, int lmp_num_neigh, i
     memory_per_atom += SIZE_DOUBLE;  // nep_potential_per_atom
     
     memory_per_atom += ANNNB_DIM * SIZE_FLOAT;  // nep_Fp
+    memory_per_atom += annmb.num_neurons1 * SIZE_FLOAT;  // nep_ann_alpha
     memory_per_atom += (4 + 1) * NUM_OF_ABC * SIZE_FLOAT;  // nep_sum_fxyz
     
     // 考虑max_nall = 1.2 * max_nlocal
@@ -538,6 +574,15 @@ void NEPKK::reset_nep_data(int inum, int nlocal, int nall, int vflag_either) {
   if (allocate_once==0) {
     nep_data.potential_all.resize(1);
     nep_data.total_virial.resize(9);
+    if (paramb.charge_mode == 2) {
+      nep_data.num_kpoints.resize(1);
+      nep_data.kx.resize(paramb.num_kpoints_max);
+      nep_data.ky.resize(paramb.num_kpoints_max);
+      nep_data.kz.resize(paramb.num_kpoints_max);
+      nep_data.G.resize(paramb.num_kpoints_max);
+      nep_data.S_real.resize(paramb.num_kpoints_max);
+      nep_data.S_imag.resize(paramb.num_kpoints_max);
+    }
     allocate_once = 1;
   }
 
@@ -555,7 +600,15 @@ void NEPKK::reset_nep_data(int inum, int nlocal, int nall, int vflag_either) {
     nep_data.potential_per_atom.resize(max_nlocal);
     
     nep_data.Fp.resize(max_nlocal * annmb.dim);//复用，存储特征值，之后存储能量对特征值导数 dUi/dfeature
+    nep_data.ann_alpha.resize(
+      static_cast<size_t>(max_nlocal) * annmb.num_neurons1 *
+      (paramb.charge_mode == 2 ? 2 : 1));
     nep_data.sum_fxyz.resize(max_nlocal * (paramb.n_max_angular + 1) * NUM_OF_ABC); //保存三体feature Snlm^i，用于反向求导
+    if (paramb.charge_mode == 2) {
+      nep_data.charge.resize(max_nlocal);
+      nep_data.charge_derivative.resize(max_nlocal * annmb.dim);
+      nep_data.D_real.resize(max_nlocal);
+    }
 
     // nep_data.NN_radial.resize(max_nlocal, 0);
     // nep_data.NL_radial.resize(max_nlocal * paramb.MN_radial, 0);
@@ -570,6 +623,9 @@ void NEPKK::reset_nep_data(int inum, int nlocal, int nall, int vflag_either) {
     const int virial_reduce_threads = 256;
     const int virial_reduce_blocks = (max_nall + virial_reduce_threads - 1) / virial_reduce_threads;
     nep_data.partial_virial.resize(virial_reduce_blocks * 9);
+    if (paramb.charge_mode == 2) {
+      nep_data.bec.resize(max_nall * 9);
+    }
     // nep_data.force_per_atom.resize(max_nall * 3);
     // if (vflag_either) nep_data.virial_per_atom.resize(max_nall * 6);
   }
@@ -586,6 +642,12 @@ void NEPKK::reset_nep_data(int inum, int nlocal, int nall, int vflag_either) {
   // nep_data.f12z.fill(0);
   nep_data.Fp.fill(0); //需要临时存放特征值
   nep_data.sum_fxyz.fill(0); // 直接保存，需要置零
+  if (paramb.charge_mode == 2) {
+    nep_data.charge.fill(FLOAT_LIT(0.0));
+    nep_data.charge_derivative.fill(FLOAT_LIT(0.0));
+    nep_data.D_real.fill(FLOAT_LIT(0.0));
+    nep_data.bec.fill(FLOAT_LIT(0.0));
+  }
 
   nep_data.potential_per_atom.fill(0.0);
   // nep_data.force_per_atom.fill(0.0); 
@@ -599,6 +661,28 @@ void NEPKK::reset_nep_data(int inum, int nlocal, int nall, int vflag_either) {
 void NEPKK::update_potential(NEP_FLOAT* parameters, ANN& ann)
 {
   NEP_FLOAT* pointer = parameters;
+  if (paramb.charge_mode == 2) {
+    const int num_outputs = 2;
+    for (int t = 0; t < paramb.num_types; ++t) {
+      ann.w0[t] = pointer;
+      pointer += ann.num_neurons1 * ann.dim;
+      ann.b0[t] = pointer;
+      pointer += ann.num_neurons1;
+      ann.w1[t] = pointer;
+      pointer += ann.num_neurons1 * num_outputs;
+      if (paramb.version == 5) {
+        pointer += 1;
+      }
+    }
+    ann.sqrt_epsilon_inf = pointer;
+    pointer += 1;
+    ann.b1 = pointer;
+    pointer += 1;
+    ann.c = pointer;
+    convert_C(ann.c, paramb.num_types, paramb.n_max_radial, paramb.basis_size_radial);
+    convert_C(ann.c + ann.num_c2, paramb.num_types, paramb.n_max_angular, paramb.basis_size_angular);
+    return;
+  }
   for (int t = 0; t < paramb.num_types; ++t) {
     if (t > 0 && paramb.version == 3) { // Use the same set of NN parameters for NEP2 and NEPKK_CPU
       pointer -= (ann.dim + 2) * ann.num_neurons1;
@@ -620,6 +704,9 @@ void NEPKK::update_potential(NEP_FLOAT* parameters, ANN& ann)
   ann.c = pointer;
   convert_C(ann.c, paramb.num_types, paramb.n_max_radial, paramb.basis_size_radial);
   convert_C(ann.c+ann.num_c2, paramb.num_types, paramb.n_max_angular, paramb.basis_size_angular);
+  if (type_map_initialized_) {
+    rebuild_slimmed_coeffs_();
+  }
   // for (int t = 0; t < paramb.num_types; ++t) {
   //   ann.c_2[t]
   // }
@@ -637,8 +724,157 @@ void NEPKK::convert_C(NEP_FLOAT* d_c, int NtypeI, int Nmax, int Nbase){
 }
 
 void NEPKK::set_atom_type_map(int type_nums, const int* type_list){
+  if (type_nums <= 0 || type_list == nullptr) {
+    std::cerr << "NEPKK requires a non-empty LAMMPS-to-NEP type map." << std::endl;
+    exit(1);
+  }
+  configured_type_map_.assign(type_list, type_list + type_nums);
   atom_type_map.resize(type_nums);
   atom_type_map.copy_from_host(type_list);
+  type_map_initialized_ = true;
+  rebuild_slimmed_coeffs_();
+}
+
+void NEPKK::rebuild_slimmed_coeffs_()
+{
+  nep_type_slim::Layout layout;
+  try {
+    layout = nep_type_slim::build_layout(paramb.num_types, configured_type_map_);
+  } catch (const std::exception& error) {
+    std::cerr << "Failed to build the NEP compact type map: " << error.what() << std::endl;
+    exit(1);
+  }
+
+  sim_type_set_ = layout.sim_to_nep;
+  sim_num_types_ = static_cast<int>(sim_type_set_.size());
+  paramb.sim_num_types = sim_num_types_;
+  std::fill(paramb.nep_to_sim, paramb.nep_to_sim + NUM_ELEMENTS, static_cast<int8_t>(-1));
+  for (int nep_type = 0; nep_type < paramb.num_types; ++nep_type) {
+    paramb.nep_to_sim[nep_type] = static_cast<int8_t>(layout.nep_to_sim[nep_type]);
+  }
+
+  std::vector<NEP_FLOAT> full_c2(static_cast<size_t>(annmb.num_c2));
+  std::vector<NEP_FLOAT> full_c3(static_cast<size_t>(annmb.num_c3));
+  CHECK_CUDA_NEP(cudaMemcpy(
+    full_c2.data(), annmb.c, full_c2.size() * sizeof(NEP_FLOAT), cudaMemcpyDeviceToHost));
+  CHECK_CUDA_NEP(cudaMemcpy(
+    full_c3.data(), annmb.c + annmb.num_c2,
+    full_c3.size() * sizeof(NEP_FLOAT), cudaMemcpyDeviceToHost));
+
+  std::vector<NEP_FLOAT> compact_c2;
+  std::vector<NEP_FLOAT> compact_c3;
+  try {
+    compact_c2 = nep_type_slim::extract_coefficients(
+      full_c2,
+      paramb.num_types,
+      sim_type_set_,
+      paramb.n_max_radial_plus1,
+      paramb.basis_size_radial_plus1);
+    compact_c3 = nep_type_slim::extract_coefficients(
+      full_c3,
+      paramb.num_types,
+      sim_type_set_,
+      paramb.n_max_angular_plus1,
+      paramb.basis_size_angular_plus1);
+  } catch (const std::exception& error) {
+    std::cerr << "Failed to compact NEP coefficients: " << error.what() << std::endl;
+    exit(1);
+  }
+
+  nep_data.param_c2.resize(compact_c2.size());
+  nep_data.param_c2.copy_from_host(compact_c2.data());
+  nep_data.param_c3.resize(compact_c3.size());
+  nep_data.param_c3.copy_from_host(compact_c3.data());
+
+  const size_t c2_bytes = compact_c2.size() * sizeof(NEP_FLOAT);
+  const size_t c3_bytes = compact_c3.size() * sizeof(NEP_FLOAT);
+  USE_SHAREMEM_C2 = c2_bytes < SHAREMEM_32;
+  USE_SHAREMEM_C3 = c3_bytes < SHAREMEM_32;
+  slimmed_coeffs_ready_ = true;
+
+  if (rank_0) {
+    printf(
+      "[NEPKK] Type-slim: sim_num_types=%d/%d, C2 %.2f->%.2f KiB, "
+      "C3 %.2f->%.2f KiB, shared C2/C3=%d/%d\n",
+      sim_num_types_,
+      paramb.num_types,
+      static_cast<double>(annmb.num_c2 * sizeof(NEP_FLOAT)) / 1024.0,
+      static_cast<double>(c2_bytes) / 1024.0,
+      static_cast<double>(annmb.num_c3 * sizeof(NEP_FLOAT)) / 1024.0,
+      static_cast<double>(c3_bytes) / 1024.0,
+      USE_SHAREMEM_C2,
+      USE_SHAREMEM_C3);
+  }
+}
+
+void NEPKK::compute_bec(
+    int inum,
+    int nlocal,
+    int nall,
+    int num_neighbors,
+    const int* ilist,
+    const int* numneigh,
+    const int* firstneigh)
+{
+  if (paramb.charge_mode != 2) return;
+
+  const int block_size = 128;
+  const int grid_size = (inum + block_size - 1) / block_size;
+  nep_data.bec.fill(FLOAT_LIT(0.0));
+
+  find_bec_diagonal_lmp<<<grid_size, block_size>>>(
+    inum,
+    nall,
+    ilist,
+    nep_data.charge.data(),
+    nep_data.bec.data());
+  CUDA_CHECK_KERNEL
+
+  find_bec_radial_lmp<<<grid_size, block_size>>>(
+    inum,
+    nlocal,
+    nall,
+    num_neighbors,
+    numneigh,
+    firstneigh,
+    paramb,
+    annmb,
+    ilist,
+    lmp_data.type.data(),
+    lmp_data.position.data(),
+    nep_data.charge_derivative.data(),
+    nep_data.bec.data());
+  CUDA_CHECK_KERNEL
+
+  find_bec_angular_lmp<<<grid_size, block_size>>>(
+    inum,
+    nlocal,
+    nall,
+    nep_data.NN_angular.data(),
+    nep_data.NL_angular.data(),
+    paramb,
+    annmb,
+    ilist,
+    lmp_data.type.data(),
+    lmp_data.position.data(),
+    nep_data.charge_derivative.data(),
+    nep_data.sum_fxyz.data(),
+    nep_data.bec.data());
+  CUDA_CHECK_KERNEL
+
+  const int bec_grid_size = (nall + block_size - 1) / block_size;
+  scale_bec_lmp<<<bec_grid_size, block_size>>>(
+    nall,
+    annmb.sqrt_epsilon_inf,
+    nep_data.bec.data());
+  CUDA_CHECK_KERNEL
+  cudaDeviceSynchronize();
+}
+
+void NEPKK::copy_bec_to_host(NEP_FLOAT* host_bec, int nall)
+{
+  if (paramb.charge_mode != 2) return;
+  nep_data.bec.copy_to_host(host_bec, nall * 9);
 }
 
 // small box possibly used for active learning:
@@ -665,8 +901,18 @@ void NEPKK::compute(
     double* force_per_atom_copy,
     double* virial_per_atom,
     double* cvirial_per_atom,
+    const double* box_h,
+    const char* kspace_method,
+    long long natoms_global,
+    int mpi_size,
+    NEPKKAllreduceDouble allreduce_double,
+    void* allreduce_context,
     double* h_etot_virial_global // len=7: etot + 6 virials
 ) {
+  if (!slimmed_coeffs_ready_) {
+    std::cerr << "NEPKK compact coefficients are not initialized; pair_coeff must be set before run." << std::endl;
+    exit(1);
+  }
   int BLOCK_SIZE256 = 256;
   // int BLOCK_SIZE128 = 128;
   int BLOCK_SIZE64 = 64;
@@ -693,6 +939,22 @@ void NEPKK::compute(
     cvflag_atom  = 0;
   }
   reset_nep_data(inum, nlocal, nall, vflag_either);// 初始化NEP辅助数组
+  NEPKK_Box box;
+  for (int d = 0; d < 9; ++d) {
+    box.h[d] = box_h[d];
+  }
+  const double det = box.h[0] * (box.h[4] * box.h[8] - box.h[5] * box.h[7]) -
+                     box.h[1] * (box.h[3] * box.h[8] - box.h[5] * box.h[6]) +
+                     box.h[2] * (box.h[3] * box.h[7] - box.h[4] * box.h[6]);
+  box.hi[0] = (box.h[4] * box.h[8] - box.h[5] * box.h[7]) / det;
+  box.hi[1] = (box.h[2] * box.h[7] - box.h[1] * box.h[8]) / det;
+  box.hi[2] = (box.h[1] * box.h[5] - box.h[2] * box.h[4]) / det;
+  box.hi[3] = (box.h[5] * box.h[6] - box.h[3] * box.h[8]) / det;
+  box.hi[4] = (box.h[0] * box.h[8] - box.h[2] * box.h[6]) / det;
+  box.hi[5] = (box.h[2] * box.h[3] - box.h[0] * box.h[5]) / det;
+  box.hi[6] = (box.h[3] * box.h[7] - box.h[4] * box.h[6]) / det;
+  box.hi[7] = (box.h[1] * box.h[6] - box.h[0] * box.h[7]) / det;
+  box.hi[8] = (box.h[0] * box.h[4] - box.h[1] * box.h[3]) / det;
 
   // 将double的原子坐标转换为float32 or 64
   doubleTofloat<<<(nall*3 + BLOCK_SIZE256 - 1) / BLOCK_SIZE256, BLOCK_SIZE256>>>(
@@ -719,10 +981,10 @@ void NEPKK::compute(
 
   //增大到64后，占据多了，66.6%，但是速度变慢了一倍。因为驻留线程多了之后造成了更高的内存带宽压力
   if (USE_SHAREMEM_C2) {//把两体项系数C全部load入共享内存 Ntype*Ntype*(Nmax+1)*(Nbase+1) * 4-float
-    size_t shared_mem_size = annmb.num_c2 * sizeof(NEP_FLOAT);
+    size_t shared_mem_size = nep_data.param_c2.size() * sizeof(NEP_FLOAT);
     calc_2b_descriptor_sharemem<<<(inum - 1) / BLOCK_SIZE32 + 1, BLOCK_SIZE32, shared_mem_size>>>(
       paramb,
-      annmb.c,
+      nep_data.param_c2.data(),
       inum,
       nlocal,
       device,
@@ -739,7 +1001,7 @@ void NEPKK::compute(
   } else {// 不使用共享内存的版本，系数C直接从全局内存中读取
     calc_2b_descriptor<<<(inum - 1) / BLOCK_SIZE32 + 1, BLOCK_SIZE32>>>(
       paramb,
-      annmb,
+      nep_data.param_c2.data(),
       inum,
       nlocal,
       device,
@@ -766,40 +1028,135 @@ void NEPKK::compute(
   CUDA_CHECK_KERNEL
 
   if (USE_SHAREMEM_C3) {// 把多体系数项C全部load到shared memory中
-    size_t shared_mem_size = annmb.num_c3 * sizeof(NEP_FLOAT);
+    size_t shared_mem_size = nep_data.param_c3.size() * sizeof(NEP_FLOAT);
     calc_3b_descriptor_sharemem<<<(inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64, shared_mem_size>>>(
       paramb,
-      annmb,
-      annmb.c+annmb.num_c2,
+      nep_data.param_c3.data(),
       inum,
       nlocal,
-      device,
-      annmb.dim,
       nep_data.NN_angular.data(),
       nep_data.NL_angular.data(),
       ilist,
       lmp_data.type.data(),
       lmp_data.position.data(),
       nep_data.Fp.data(),
-      nep_data.potential_per_atom.data(),
       nep_data.sum_fxyz.data());
     CUDA_CHECK_KERNEL
   } else {// 不使用共享内存的版本，系数C直接从全局内存中读取
     calc_3b_descriptor<<<(inum - 1) / BLOCK_SIZE32 + 1, BLOCK_SIZE32>>>(
       paramb,
-      annmb,
+      nep_data.param_c3.data(),
       inum,
       nlocal,
-      device,
-      annmb.dim,
       nep_data.NN_angular.data(),
       nep_data.NL_angular.data(),
       ilist,
       lmp_data.type.data(),
       lmp_data.position.data(),
       nep_data.Fp.data(),
-      nep_data.potential_per_atom.data(),
       nep_data.sum_fxyz.data());
+    CUDA_CHECK_KERNEL
+  }
+
+  const size_t ann_q_smem = static_cast<size_t>(annmb.dim) *
+    BLOCK_SIZE64 * sizeof(NEP_FLOAT);
+  apply_ann_forward<<<
+    (inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64, ann_q_smem>>>(
+    paramb,
+    annmb,
+    inum,
+    nlocal,
+    ilist,
+    lmp_data.type.data(),
+    nep_data.Fp.data(),
+    nep_data.potential_per_atom.data(),
+    nep_data.charge.data(),
+    nep_data.ann_alpha.data());
+  CUDA_CHECK_KERNEL
+
+  const int ann_atoms_per_block = 8;
+  const int ann_derivative_threads = 256;
+  const int ann_alpha_outputs = paramb.charge_mode == 2 ? 2 : 1;
+  const size_t ann_alpha_smem = static_cast<size_t>(annmb.num_neurons1) *
+    ann_atoms_per_block * ann_alpha_outputs * sizeof(NEP_FLOAT);
+  apply_ann_derivative<<<
+    (inum + ann_atoms_per_block - 1) / ann_atoms_per_block,
+    ann_derivative_threads,
+    ann_alpha_smem>>>(
+      paramb,
+      annmb,
+      inum,
+      nlocal,
+      ilist,
+      lmp_data.type.data(),
+      nep_data.ann_alpha.data(),
+      nep_data.charge_derivative.data(),
+      nep_data.Fp.data());
+  CUDA_CHECK_KERNEL
+
+  if (paramb.charge_mode == 2) {
+    nepkk_zero_global_mean_charge2(nlocal, natoms_global, allreduce_double, allreduce_context, nep_data.charge);
+    CUDA_CHECK_KERNEL
+    const std::string kspace = (kspace_method == nullptr) ? "ewald" : std::string(kspace_method);
+    if (kspace == "pppm") {
+      nepkk_pppm_find_force_charge2(
+        pppm_data,
+        nlocal,
+        paramb.charge_alpha,
+        paramb.charge_alpha_factor,
+        box,
+        paramb.pppm_mesh_spacing,
+        paramb.pppm_mesh_mode,
+        paramb.pppm_mesh,
+        nep_data.charge,
+        lmp_data.position,
+        nep_data.D_real,
+        force_per_atom,
+        cv_per_atom,
+        vflag_either,
+        cvflag_atom,
+        vatom_num,
+        mpi_size,
+        allreduce_double,
+        allreduce_context);
+    } else if (kspace == "ewald") {
+      nepkk_ewald_find_force_charge2(
+        nlocal,
+        BLOCK_SIZE64,
+        (nlocal - 1) / BLOCK_SIZE64 + 1,
+        paramb.num_kpoints_max,
+        paramb.charge_alpha,
+        paramb.charge_alpha_factor,
+        box,
+        nep_data.charge,
+        lmp_data.position,
+        nep_data.num_kpoints,
+        nep_data.kx,
+        nep_data.ky,
+        nep_data.kz,
+        nep_data.G,
+        nep_data.S_real,
+        nep_data.S_imag,
+        nep_data.D_real,
+        force_per_atom,
+        cv_per_atom,
+        vflag_either,
+        cvflag_atom,
+        vatom_num,
+        mpi_size,
+        allreduce_double,
+        allreduce_context);
+    } else {
+      std::cout << "NEPKK charge_mode=2 kspace_method must be ewald or pppm, got " << kspace << std::endl;
+      exit(1);
+    }
+    nepkk_zero_global_mean_charge2(nlocal, natoms_global, allreduce_double, allreduce_context, nep_data.D_real);
+    CUDA_CHECK_KERNEL
+    add_charge_energy_charge2<<<(nlocal + BLOCK_SIZE256 - 1) / BLOCK_SIZE256, BLOCK_SIZE256>>>(
+      nlocal,
+      nep_data.charge.data(),
+      nep_data.D_real.data(),
+      nep_data.potential_per_atom.data());
     CUDA_CHECK_KERNEL
   }
 
@@ -808,17 +1165,14 @@ void NEPKK::compute(
       smem_bytes += vatom_num * sizeof(NEP_FLOAT) * BLOCK_SIZE64;    // virial: 6 or 9 components
   }
   smem_bytes += paramb.n_max_radial_plus1 * sizeof(NEP_FLOAT);// n_max_radial_plus1 一定是小于线程块大小的
-  // backward_force_2b_perneigh 核函数相比于backward_force_2b 在3090上能获得接近一半的时间减少，但是在4090上反而性能下降
-  // 将中心原子的Fp放入共享内存性能几乎没有提升，块内线程处理每个近邻，导致取Fp地址缺乏连续性（在4090由于L2cache 更大，影响更明显）
-  // 这部分优化思路：需要把calc3bfeature这里的粒度拆分，一个块处理一个中心原子，然后写Fp可以按照行优先存储（一个行对应一个中心原子的Fp)\
-  // 此时不再存在写Fp的地址不连续问题,并且后续的backward force 可以获得收益 (wuxingxing.2026.2.28)
-  if (smem_bytes < SHAREMEM_32) {
+  const bool use_bwd_2b_perneigh = false;
+  if (paramb.charge_mode != 2 && use_bwd_2b_perneigh && smem_bytes < SHAREMEM_32) {
     backward_force_2b_perneigh<<<inum, BLOCK_SIZE64, smem_bytes>>>(
         vflag_either,
         cvflag_atom,
         vatom_num,
         paramb,
-        annmb,
+        nep_data.param_c2.data(),
         nall,
         inum,
         nlocal,
@@ -830,56 +1184,74 @@ void NEPKK::compute(
         lmp_data.position.data(),
         nep_data.Fp.data(),
         force_per_atom,
-        virial_per_atom
-    );  
-  } else {
-  // 32 或 64 没什么提升空间-3090
-  backward_force_2b<<<(inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64>>>( 
-    vflag_either,
-    cvflag_atom,
-    vatom_num,
-    paramb,
-    annmb,
-    nall,
-    inum,
-    nlocal,
-    max_I_neigh,
-    numneigh,
-    firstneigh,
-    ilist,
-    lmp_data.type.data(),
-    lmp_data.position.data(),
-    nep_data.Fp.data(),
-    force_per_atom,
-    cv_per_atom
+        cv_per_atom
     );
-  }
-  int shm_float_count = 3 + paramb.dim_angular + paramb.n_max_angular_plus1 * NUM_OF_ABC;
-  shm_float_count += BLOCK_SIZE32 * MAX_NUM_N * 2;// 168个寄存器使用, block 64 会导致共享内存翻倍，驻留block减少
-  size_t shared_bytes = shm_float_count * sizeof(NEP_FLOAT);
-  if (shared_bytes < SHAREMEM_32) {
-    dim3 grid(inum); // 中心原子数
-    dim3 block(BLOCK_SIZE32);
-    backward_force_3b_per_atom_sharemem<<<grid, block, shared_bytes>>>(
+  } else {
+    const size_t bwd_2b_fnp_bytes =
+      static_cast<size_t>(BLOCK_SIZE64) * paramb.basis_size_radial_plus1 * sizeof(NEP_FLOAT);
+    const size_t compact_c2_bytes = nep_data.param_c2.size() * sizeof(NEP_FLOAT);
+    const bool use_bwd_2b_shared_c2 =
+      USE_SHAREMEM_C2 && compact_c2_bytes + bwd_2b_fnp_bytes < SHAREMEM_32;
+    size_t bwd_2b_smem = bwd_2b_fnp_bytes +
+      (use_bwd_2b_shared_c2 ? compact_c2_bytes : 0);
+    if (paramb.charge_mode == 2) {
+      backward_force_2b_charge<<<(inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64, bwd_2b_smem>>>(
+        vflag_either,
+        cvflag_atom,
+        vatom_num,
         paramb,
-        annmb,
+        nep_data.param_c2.data(),
+        use_bwd_2b_shared_c2,
+        nall,
         inum,
         nlocal,
-        nep_data.NN_angular.data(),
-        nep_data.NL_angular.data(),
+        max_I_neigh,
+        numneigh,
+        firstneigh,
         ilist,
         lmp_data.type.data(),
         lmp_data.position.data(),
         nep_data.Fp.data(),
-        nep_data.sum_fxyz.data(),
-        nep_data.f12x.data(),
-        nep_data.f12y.data(),
-        nep_data.f12z.data()
-    );
-  } else {
-    backward_force_3b_dqnl<<<(inum - 1) / BLOCK_SIZE32 + 1, BLOCK_SIZE32>>>(
+        nep_data.charge_derivative.data(),
+        nep_data.D_real.data(),
+        force_per_atom,
+        cv_per_atom
+      );
+    } else {
+      backward_force_2b_nep<<<(inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64, bwd_2b_smem>>>(
+        vflag_either,
+        cvflag_atom,
+        vatom_num,
+        paramb,
+        nep_data.param_c2.data(),
+        use_bwd_2b_shared_c2,
+        nall,
+        inum,
+        nlocal,
+        max_I_neigh,
+        numneigh,
+        firstneigh,
+        ilist,
+        lmp_data.type.data(),
+        lmp_data.position.data(),
+        nep_data.Fp.data(),
+        force_per_atom,
+        cv_per_atom
+      );
+    }
+  }
+  const size_t bwd_3b_fn_bytes =
+    static_cast<size_t>(2) * BLOCK_SIZE64 * paramb.basis_size_angular_plus1 * sizeof(NEP_FLOAT);
+  const size_t compact_c3_bytes = nep_data.param_c3.size() * sizeof(NEP_FLOAT);
+  const bool use_bwd_3b_shared_c3 =
+    USE_SHAREMEM_C3 && compact_c3_bytes + bwd_3b_fn_bytes < SHAREMEM_32;
+  const size_t bwd_3b_smem = bwd_3b_fn_bytes +
+    (use_bwd_3b_shared_c3 ? compact_c3_bytes : 0);
+  backward_force_3b_dqnl<<<
+    (inum - 1) / BLOCK_SIZE64 + 1, BLOCK_SIZE64, bwd_3b_smem>>>(
       paramb,
-      annmb,
+      nep_data.param_c3.data(),
+      use_bwd_3b_shared_c3,
       inum,
       nlocal,
       nep_data.NN_angular.data(),
@@ -888,12 +1260,13 @@ void NEPKK::compute(
       lmp_data.type.data(),
       lmp_data.position.data(),
       nep_data.Fp.data(),
+      nep_data.charge_derivative.data(),
+      nep_data.D_real.data(),
       nep_data.sum_fxyz.data(),
       nep_data.f12x.data(),
       nep_data.f12y.data(),
       nep_data.f12z.data()
-      );
-  }
+    );
   CUDA_CHECK_KERNEL
   cudaDeviceSynchronize();
 
@@ -998,7 +1371,7 @@ void NEPKK::compute(
     CUDA_CHECK_KERNEL
     cudaDeviceSynchronize();
     nep_data.total_virial.copy_to_host(h_etot_virial_global+1, 6);
-    // printf("Virialtotal = %f %f %f %f %f %f\n", h_etot_virial_global[1], h_etot_virial_global[2], h_etot_virial_global[3], h_etot_virial_global[4], h_etot_virial_global[5], h_etot_virial_global[6]);
+    //printf("Virialtotal = %f %f %f %f %f %f\n", h_etot_virial_global[1], h_etot_virial_global[2], h_etot_virial_global[3], h_etot_virial_global[4], h_etot_virial_global[5], h_etot_virial_global[6]);
   }
 
   if (eflag_global && ff_index == 0) { // 根据需要计算总能，potential_per_atom是每个原子的能量，需要求和, 算偏差不需要总能

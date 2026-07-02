@@ -1,0 +1,41 @@
+package kokkos neigh full comm device
+newton on
+
+variable        NSTEPS          equal 1000
+variable        THERMO_FREQ     equal 100
+variable        DUMP_FREQ       equal 100
+variable        restart         equal 0
+variable        TEMP            equal 300.000000
+variable        PRESS           equal 0.000000
+variable        TAU_T           equal 0.100000
+variable        TAU_P           equal 0.500000
+
+units           metal
+boundary        p p p
+atom_style      atomic
+
+neighbor        1.0 bin
+neigh_modify    delay 10
+
+box             tilt large
+read_data       lmp.in
+change_box      all triclinic
+
+replicate 40 40 40
+
+mass            1 178.49
+mass            2 15.999
+
+pair_style      matpl/nep/kk nep.txt kspace ewald
+pair_coeff      * * 72 8
+
+velocity        all create ${TEMP} 35826
+fix             1 all npt/kk temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRESS} ${PRESS} ${TAU_P}
+
+
+thermo_style    custom step temp pe ke etotal press vol
+thermo          ${THERMO_FREQ}
+
+timestep        0.002000
+run             ${NSTEPS} upto
+
