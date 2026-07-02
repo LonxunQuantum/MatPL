@@ -277,8 +277,7 @@ class dp_network:
                                                                     T_0= self.dp_params.optimizer_param.t_0*iterations, 
                                                                     T_mult=self.dp_params.optimizer_param.t_mult,
                                                                     eta_min=self.dp_params.optimizer_param.stop_lr,
-                                                                    last_epoch=-1,
-                                                                    verbose=self.dp_params.optimizer_param.verbose)
+                                                                    last_epoch=-1)
 
         else:
             scheduler = None

@@ -14,6 +14,8 @@
 */
 #include "gpu_vector.cuh"
 
+#include <cufft.h>
+
 namespace {
 template <typename T>
 __global__ void gpu_fill(const size_t size, const T value, T* data) {
@@ -175,3 +177,4 @@ T* GPU_Vector<T>::data() {
 template class GPU_Vector<int>;
 template class GPU_Vector<float>;
 template class GPU_Vector<double>;
+template class GPU_Vector<cufftComplex>;

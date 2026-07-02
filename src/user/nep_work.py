@@ -17,6 +17,18 @@ from src.utils.json_operation import get_parameter, get_required_parameter
 from src.utils.atom_type_emb_dict import get_atomic_number_from_name
 from src.utils.nep_to_gpumd import extract_model
 
+def _get_kspace_method(input_json: dict):
+    kspace_method = get_parameter("kspace", input_json, None)
+    if kspace_method is None:
+        return "ewald"
+    if isinstance(kspace_method, str) and kspace_method.lower() in ["ewald", "pppm"]:
+        return kspace_method.lower()
+    print(
+        "WARNING! Detected kspace option but method '{}' is invalid. "
+        "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'.".format(kspace_method)
+    )
+    return "ewald"
+
 def find_free_port():
     """查找一个空闲的 TCP 端口"""
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -119,6 +131,7 @@ def nep_train(input_json: json, cmd:str):
 # author: wuxingxing
 # '''
 def nep_test(input_json: json, cmd:str):
+    kspace_method = _get_kspace_method(input_json)
     model_load_path = get_parameter("model_load_file", input_json, None)
     try:
         _model_checkpoint = torch.load(model_load_path, map_location=torch.device("cpu"), weights_only=False)
@@ -144,6 +157,7 @@ def nep_test(input_json: json, cmd:str):
     atom_type_list = get_atomic_number_from_name(atom_type_str)
     input_dict["atom_type"] = atom_type_list
     input_dict["nep_txt_file"] = model_load_path
+    # input_dict["model_load_file"] = get_parameter("model_load_file", input_json, None)
     input_dict["test_data"] = get_parameter("test_data", input_json, [])
     input_dict["datasets_path"] = get_parameter("datasets_path", input_json, [])
     input_dict["raw_files"] = get_parameter("raw_files", input_json, [])
@@ -156,7 +170,7 @@ def nep_test(input_json: json, cmd:str):
     nep_trainer = nep_network(nep_param)
     # nep_trainer.inference()
     # nep_trainer.gpu_nep_inference(model_load_path)
-    nep_trainer.multi_cpus_nep_inference(model_load_path) # the speed is 1cpu > 1gpu
+    nep_trainer.multi_cpus_nep_inference(model_load_path, kspace_method=kspace_method) # the speed is 1cpu > 1gpu
     # if nep_trainer.device.type == 'cuda':
     #     nep_trainer.inference()
         

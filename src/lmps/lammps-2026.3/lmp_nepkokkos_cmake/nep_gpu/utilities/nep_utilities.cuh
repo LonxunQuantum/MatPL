@@ -184,6 +184,38 @@ static __device__ void apply_ann_one_layer_nep5(
   energy -= w1[N_neu] + b1[0]; // typewise bias + common bias
 }
 
+static __device__ void apply_ann_one_layer_charge(
+  const int N_des,
+  const int N_neu,
+  const NEP_FLOAT* w0,
+  const NEP_FLOAT* b0,
+  const NEP_FLOAT* w1,
+  const NEP_FLOAT* b1,
+  NEP_FLOAT* q,
+  NEP_FLOAT& energy,
+  NEP_FLOAT* energy_derivative,
+  NEP_FLOAT& charge,
+  NEP_FLOAT* charge_derivative,
+  const int model_version)
+{
+  for (int n = 0; n < N_neu; ++n) {
+    NEP_FLOAT w0_times_q = FLOAT_LIT(0.0);
+    for (int d = 0; d < N_des; ++d) {
+      w0_times_q += w0[n * N_des + d] * q[d];
+    }
+    NEP_FLOAT x1 = tanh(w0_times_q - b0[n]);
+    NEP_FLOAT tanh_der = FLOAT_LIT(1.0) - x1 * x1;
+    energy += w1[n] * x1;
+    charge += w1[n + N_neu] * x1;
+    for (int d = 0; d < N_des; ++d) {
+      NEP_FLOAT y1 = tanh_der * w0[n * N_des + d];
+      energy_derivative[d] += w1[n] * y1;
+      charge_derivative[d] += w1[n + N_neu] * y1;
+    }
+  }
+  energy -= (model_version == 5 ? w1[N_neu * 2] + b1[0] : b1[0]);
+}
+
 static __device__ __forceinline__ void find_fc(NEP_FLOAT rc, NEP_FLOAT rcinv, NEP_FLOAT d12, NEP_FLOAT& fc)
 {
   if (d12 < rc) {
@@ -366,6 +398,32 @@ find_fn(const int n_max, const NEP_FLOAT rcinv, const NEP_FLOAT d12, const NEP_F
   }
 }
 
+static __device__ __forceinline__ NEP_FLOAT find_gn(
+  const int basis_size,
+  const NEP_FLOAT rcinv,
+  const NEP_FLOAT d12,
+  const NEP_FLOAT fc12,
+  const NEP_FLOAT* coefficients)
+{
+  const NEP_FLOAT d12_mul_rcinv = d12 * rcinv;
+  const NEP_FLOAT x = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) *
+      (d12_mul_rcinv - FLOAT_LIT(1.0)) - FLOAT_LIT(1.0);
+  const NEP_FLOAT half_fc12 = FLOAT_LIT(0.5) * fc12;
+  NEP_FLOAT gn = fc12 * coefficients[0];
+  if (basis_size >= 1) {
+    gn += (x + FLOAT_LIT(1.0)) * half_fc12 * coefficients[1];
+  }
+  NEP_FLOAT fn_m_minus_2 = FLOAT_LIT(1.0);
+  NEP_FLOAT fn_m_minus_1 = x;
+  for (int m = 2; m <= basis_size; ++m) {
+    const NEP_FLOAT fn_m = FLOAT_LIT(2.0) * x * fn_m_minus_1 - fn_m_minus_2;
+    gn += (fn_m + FLOAT_LIT(1.0)) * half_fc12 * coefficients[m];
+    fn_m_minus_2 = fn_m_minus_1;
+    fn_m_minus_1 = fn_m;
+  }
+  return gn;
+}
+
 static __device__ __host__ __forceinline__ void find_fn_and_fnp(
   const int n_max,
   const NEP_FLOAT rcinv,
@@ -398,6 +456,113 @@ static __device__ __host__ __forceinline__ void find_fn_and_fnp(
     NEP_FLOAT fn_tmp2 = (fn_tmp1 + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5);
     fnp[m] = (fnp_tmp * FLOAT_LIT(2.0) * (d12 * rcinv - FLOAT_LIT(1.0)) * rcinv) * fc12 + fn_tmp2 * fcp12;
     fn[m] = fn_tmp2 * fc12;
+  }
+}
+
+static __device__ __host__ __forceinline__ void find_fn_and_fnp_strided(
+  const int n_max,
+  const NEP_FLOAT rcinv,
+  const NEP_FLOAT d12,
+  const NEP_FLOAT fc12,
+  const NEP_FLOAT fcp12,
+  const int stride,
+  NEP_FLOAT* fn,
+  NEP_FLOAT* fnp)
+{
+  NEP_FLOAT d12_mul_rcinv = d12 * rcinv;
+  NEP_FLOAT x = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) *
+    (d12_mul_rcinv - FLOAT_LIT(1.0)) - FLOAT_LIT(1.0);
+  fn[0] = fc12;
+  fnp[0] = fcp12;
+  fn[stride] = (x + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5) * fc12;
+  fnp[stride] = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * rcinv * fc12 +
+    (x + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5) * fcp12;
+  NEP_FLOAT u0 = FLOAT_LIT(1.0);
+  NEP_FLOAT u1 = FLOAT_LIT(2.0) * x;
+  NEP_FLOAT u2;
+  NEP_FLOAT fn_m_minus_2 = FLOAT_LIT(1.0);
+  NEP_FLOAT fn_m_minus_1 = x;
+  for (int m = 2; m <= n_max; ++m) {
+    NEP_FLOAT fn_tmp1 = FLOAT_LIT(2.0) * x * fn_m_minus_1 - fn_m_minus_2;
+    fn_m_minus_2 = fn_m_minus_1;
+    fn_m_minus_1 = fn_tmp1;
+    NEP_FLOAT fnp_tmp = m * u1;
+    u2 = FLOAT_LIT(2.0) * x * u1 - u0;
+    u0 = u1;
+    u1 = u2;
+
+    NEP_FLOAT fn_tmp2 = (fn_tmp1 + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5);
+    fnp[m * stride] =
+      (fnp_tmp * FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * rcinv) * fc12 +
+      fn_tmp2 * fcp12;
+    fn[m * stride] = fn_tmp2 * fc12;
+  }
+}
+
+static __device__ __host__ __forceinline__ void find_fnp(
+  const int n_max,
+  const NEP_FLOAT rcinv,
+  const NEP_FLOAT d12,
+  const NEP_FLOAT fc12,
+  const NEP_FLOAT fcp12,
+  NEP_FLOAT* fnp)
+{
+  NEP_FLOAT d12_mul_rcinv = d12 * rcinv;
+  NEP_FLOAT x = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * (d12_mul_rcinv - FLOAT_LIT(1.0)) - FLOAT_LIT(1.0);
+  fnp[0] = fcp12;
+  fnp[1] = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * rcinv * fc12 +
+    (x + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5) * fcp12;
+  NEP_FLOAT u0 = FLOAT_LIT(1.0);
+  NEP_FLOAT u1 = FLOAT_LIT(2.0) * x;
+  NEP_FLOAT u2;
+  NEP_FLOAT fn_m_minus_2 = FLOAT_LIT(1.0);
+  NEP_FLOAT fn_m_minus_1 = x;
+  for (int m = 2; m <= n_max; ++m) {
+    NEP_FLOAT fn_tmp1 = FLOAT_LIT(2.0) * x * fn_m_minus_1 - fn_m_minus_2;
+    fn_m_minus_2 = fn_m_minus_1;
+    fn_m_minus_1 = fn_tmp1;
+    NEP_FLOAT fnp_tmp = m * u1;
+    u2 = FLOAT_LIT(2.0) * x * u1 - u0;
+    u0 = u1;
+    u1 = u2;
+
+    NEP_FLOAT fn_tmp2 = (fn_tmp1 + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5);
+    fnp[m] = (fnp_tmp * FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * rcinv) * fc12 +
+      fn_tmp2 * fcp12;
+  }
+}
+
+static __device__ __host__ __forceinline__ void find_fnp_strided(
+  const int n_max,
+  const NEP_FLOAT rcinv,
+  const NEP_FLOAT d12,
+  const NEP_FLOAT fc12,
+  const NEP_FLOAT fcp12,
+  const int stride,
+  NEP_FLOAT* fnp)
+{
+  NEP_FLOAT d12_mul_rcinv = d12 * rcinv;
+  NEP_FLOAT x = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * (d12_mul_rcinv - FLOAT_LIT(1.0)) - FLOAT_LIT(1.0);
+  fnp[0] = fcp12;
+  fnp[stride] = FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * rcinv * fc12 +
+    (x + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5) * fcp12;
+  NEP_FLOAT u0 = FLOAT_LIT(1.0);
+  NEP_FLOAT u1 = FLOAT_LIT(2.0) * x;
+  NEP_FLOAT u2;
+  NEP_FLOAT fn_m_minus_2 = FLOAT_LIT(1.0);
+  NEP_FLOAT fn_m_minus_1 = x;
+  for (int m = 2; m <= n_max; ++m) {
+    NEP_FLOAT fn_tmp1 = FLOAT_LIT(2.0) * x * fn_m_minus_1 - fn_m_minus_2;
+    fn_m_minus_2 = fn_m_minus_1;
+    fn_m_minus_1 = fn_tmp1;
+    NEP_FLOAT fnp_tmp = m * u1;
+    u2 = FLOAT_LIT(2.0) * x * u1 - u0;
+    u0 = u1;
+    u1 = u2;
+
+    NEP_FLOAT fn_tmp2 = (fn_tmp1 + FLOAT_LIT(1.0)) * FLOAT_LIT(0.5);
+    fnp[m * stride] = (fnp_tmp * FLOAT_LIT(2.0) * (d12_mul_rcinv - FLOAT_LIT(1.0)) * rcinv) * fc12 +
+      fn_tmp2 * fcp12;
   }
 }
 
@@ -796,34 +961,35 @@ static __device__ __forceinline__ void find_q(
   const int n_max_angular_plus_1,
   const int n,
   const NEP_FLOAT* s,
-  NEP_FLOAT* q)
+  NEP_FLOAT* q,
+  const int q_stride)
 {
   if (L_max >= 1) {
-    q[0 * n_max_angular_plus_1 + n] = find_q_one<1>(s);
+    q[(0 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<1>(s);
   }
   if (L_max >= 2) {
-    q[1 * n_max_angular_plus_1 + n] = find_q_one<2>(s);
+    q[(1 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<2>(s);
   }
   if (L_max >= 3) {
-    q[2 * n_max_angular_plus_1 + n] = find_q_one<3>(s);
+    q[(2 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<3>(s);
   }
   if (L_max >= 4) {
-    q[3 * n_max_angular_plus_1 + n] = find_q_one<4>(s);
+    q[(3 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<4>(s);
   }
   if (L_max >= 5) {
-    q[4 * n_max_angular_plus_1 + n] = find_q_one<5>(s);
+    q[(4 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<5>(s);
   }
   if (L_max >= 6) {
-    q[5 * n_max_angular_plus_1 + n] = find_q_one<6>(s);
+    q[(5 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<6>(s);
   }
   if (L_max >= 7) {
-    q[6 * n_max_angular_plus_1 + n] = find_q_one<7>(s);
+    q[(6 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<7>(s);
   }
   if (L_max >= 8) {
-    q[7 * n_max_angular_plus_1 + n] = find_q_one<8>(s);
+    q[(7 * n_max_angular_plus_1 + n) * q_stride] = find_q_one<8>(s);
   }
   if (num_L >= L_max + 1) {
-    q[L_max * n_max_angular_plus_1 + n] =
+    q[(L_max * n_max_angular_plus_1 + n) * q_stride] =
       C4B[0] * s[3] * s[3] * s[3] + C4B[1] * s[3] * (s[4] * s[4] + s[5] * s[5]) +
       C4B[2] * s[3] * (s[6] * s[6] + s[7] * s[7]) + C4B[3] * s[6] * (s[5] * s[5] - s[4] * s[4]) +
       C4B[4] * s[4] * s[5] * s[7];
@@ -831,8 +997,8 @@ static __device__ __forceinline__ void find_q(
   if (num_L >= L_max + 2) {
     NEP_FLOAT s0_sq = s[0] * s[0];
     NEP_FLOAT s1_sq_plus_s2_sq = s[1] * s[1] + s[2] * s[2];
-    q[(L_max + 1) * n_max_angular_plus_1 + n] = C5B[0] * s0_sq * s0_sq +
-                                                C5B[1] * s0_sq * s1_sq_plus_s2_sq +
-                                                C5B[2] * s1_sq_plus_s2_sq * s1_sq_plus_s2_sq;
+    q[((L_max + 1) * n_max_angular_plus_1 + n) * q_stride] =
+      C5B[0] * s0_sq * s0_sq + C5B[1] * s0_sq * s1_sq_plus_s2_sq +
+      C5B[2] * s1_sq_plus_s2_sq * s1_sq_plus_s2_sq;
   }
 }

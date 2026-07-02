@@ -30,6 +30,7 @@ namespace LAMMPS_NS {
             void unpack_reverse_comm(int, int*, double* ) override;
             void grow_memory(int nall);
             std::tuple<double, double, double, double, double, double> calc_max_error(double***, double**);
+            virtual void qnep_bec_atom(double **array, int nmax);
 
         protected:
             virtual void allocate();
@@ -53,6 +54,7 @@ namespace LAMMPS_NS {
             std::string explrError_fname = "explr.error";
             std::FILE *explrError_fp = nullptr;
             int out_freq = 1;
+            std::string kspace_method = "ewald";
 
             std::vector<int> atom_types;           // use for jit models
             std::vector<int> model_atom_type_idx;  // use for jit models 

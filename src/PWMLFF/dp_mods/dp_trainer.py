@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Subset
 from torch.autograd import Variable
-from src.loss.dploss import calc_loss, adjust_lr
+from src.loss.loss import adjust_lr, get_loss, print_l1_l2
 from src.optimizer.KFWrapper import KFOptimizerWrapper
 # import horovod.torch as hvd
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -17,21 +17,6 @@ from collections import defaultdict
 from src.utils.debug_operation import check_cuda_memory
 from src.utils.train_log import AverageMeter, Summary, ProgressMeter
 
-
-def print_l1_l2(model):
-    params = model.parameters()
-    dtype = next(params).dtype
-    device = next(params).device
-    L1 = torch.tensor(0.0, device=device, dtype=dtype).detach().requires_grad_(False)
-    L2 = torch.tensor(0.0, device=device, dtype=dtype).detach().requires_grad_(False)
-    nums_param = 0
-    for p in params:
-        L1 += torch.sum(torch.abs(p))
-        L2 += torch.sum(p**2)
-        nums_param += p.nelement()
-    L1 = L1 / nums_param
-    L2 = L2 / nums_param
-    return L1, L2
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam):
     batch_time = AverageMeter("Time", ":6.3f")
@@ -47,9 +32,25 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
     loss_Egroup = AverageMeter("Egroup", ":.4e", Summary.ROOT)
     loss_L1 = AverageMeter("Loss_L1", ":.4e", Summary.ROOT)
     loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT)
+    progress_meters = [
+        batch_time,
+        data_time,
+        learning_rate,
+        losses,
+        loss_L1,
+        loss_L2,
+        loss_Etot,
+        loss_Etot_per_atom,
+        loss_Force,
+        loss_Ei,
+    ]
+    if args.optimizer_param.train_egroup:
+        progress_meters.append(loss_Egroup)
+    if args.optimizer_param.train_virial:
+        progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, learning_rate, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
+        progress_meters,
         prefix="Epoch: [{}]".format(epoch),
     )
     
@@ -203,89 +204,17 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                     loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
                     loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
             
-            w_f, w_e, w_v, w_eg, w_ei = 0, 0, 0, 0, 0
-
-            if args.optimizer_param.train_force is True:
-                w_f = 1.0 
-                loss_val += loss_F_val
-            
-            if args.optimizer_param.train_energy is True:
-                w_e = 1.0
-                loss_val += loss_Etot_val
-            
-            if args.optimizer_param.train_virial is True and data_mask.any().item():
-                w_v = 1.0 
-                loss_val += loss_Virial_val
-            
-            if args.optimizer_param.train_egroup is True:
-                w_eg = 1.0 
-                loss_val += loss_Egroup_val
-
-            if args.optimizer_param.train_egroup is True and args.optimizer_param.train_virial is True:
-                loss, _, _ = calc_loss(
-                    args,
-                    0.001,
-                    real_lr,
-                    1,
-                    w_f,
-                    loss_F_val,
-                    w_e,
-                    loss_Etot_val,
-                    w_v,
-                    loss_Virial_val,
-                    w_eg,
-                    loss_Egroup_val,
-                    w_ei,
-                    loss_Ei_val,
-                    natoms_img[0].item(),
-                )
-            elif args.optimizer_param.train_egroup is True and args.optimizer_param.train_virial is False:
-                loss, _, _ = calc_loss(
-                    args,
-                    0.001,
-                    real_lr,
-                    2,
-                    w_f,
-                    loss_F_val,
-                    w_e,
-                    loss_Etot_val,
-                    w_eg,
-                    loss_Egroup_val,
-                    w_ei,
-                    loss_Ei_val,
-                    natoms_img[0].item(),
-                )
-            elif args.optimizer_param.train_egroup is False \
-                and args.optimizer_param.train_virial is True and data_mask.any().item():
-                loss, _, _ = calc_loss(
-                    args,
-                    0.001,
-                    real_lr,
-                    3,
-                    w_f,
-                    loss_F_val,
-                    w_e,
-                    loss_Etot_val,
-                    w_v,
-                    loss_Virial_val,
-                    w_ei,
-                    loss_Ei_val,
-                    natoms_img[0].item(),
-                )
-            else:
-                loss, _, _ = calc_loss(
-                    args,
-                    0.001,
-                    real_lr,
-                    4,
-                    w_f,
-                    loss_F_val,
-                    w_e,
-                    loss_Etot_val,
-                    w_ei,
-                    loss_Ei_val,
-                    natoms_img[0].item(),
-                )
+            train_virial = args.optimizer_param.train_virial is True and data_mask.any().item()
+            loss = get_loss(
+                args,
+                real_lr,
+                natoms_img[0].item(),
+                loss_F_val,
+                loss_Etot_val,
+                loss_Virial_val if train_virial else None,
+                loss_Egroup_val if args.optimizer_param.train_egroup else None,
+                train_virial,
+            )
             # import ipdb;ipdb.set_trace()
             loss.backward()
             if args.optimizer_param.norm_type is not None:
@@ -372,9 +301,24 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
     loss_L2 = AverageMeter("Loss_L2", ":.4e", Summary.ROOT)    
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT)
     
+    progress_meters = [
+        batch_time,
+        data_time,
+        losses,
+        loss_L1,
+        loss_L2,
+        loss_Etot,
+        loss_Etot_per_atom,
+        loss_Force,
+        loss_Ei,
+    ]
+    if args.optimizer_param.train_egroup:
+        progress_meters.append(loss_Egroup)
+    if args.optimizer_param.train_virial:
+        progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, loss_L1, loss_L2, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
+        progress_meters,
         prefix="Epoch: [{}]".format(epoch),
     )
 
@@ -521,8 +465,11 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
-            loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
-                        args.optimizer_param.pre_fac_etot * loss_Etot_val
+            loss_val = torch.zeros_like(loss_F_val)
+            if args.optimizer_param.train_force:
+                loss_val += args.optimizer_param.pre_fac_force * loss_F_val
+            if args.optimizer_param.train_energy:
+                loss_val += args.optimizer_param.pre_fac_etot * loss_Etot_val
 
             if args.optimizer_param.train_virial is True:
                 data_mask = Virial_label[:, 9] > 0
@@ -680,8 +627,11 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                 if args.optimizer_param.train_egroup is True:
                     loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
-                loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
-                        args.optimizer_param.pre_fac_etot * loss_Etot_val
+                loss_val = torch.zeros_like(loss_F_val)
+                if args.optimizer_param.train_force:
+                    loss_val += args.optimizer_param.pre_fac_force * loss_F_val
+                if args.optimizer_param.train_energy:
+                    loss_val += args.optimizer_param.pre_fac_etot * loss_Etot_val
 
                 if args.optimizer_param.train_virial is True:
                     data_mask = Virial_label[:, 9] > 0  # 判断最后一列是否大于 0
@@ -724,13 +674,21 @@ def valid(val_loader, model, criterion, device, args:InputParam):
     loss_Virial = AverageMeter("Virial", ":.4e", Summary.ROOT)
     loss_Virial_per_atom = AverageMeter("Virial_per_atom", ":.4e", Summary.ROOT)
 
+    progress_meters = [
+        batch_time,
+        losses,
+        loss_Etot,
+        loss_Etot_per_atom,
+        loss_Force,
+        loss_Ei,
+    ]
+    if args.optimizer_param.train_egroup:
+        progress_meters.append(loss_Egroup)
+    if args.optimizer_param.train_virial:
+        progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
         len(val_loader),
-        # + (
-        #     args.hvd
-        #     and (len(val_loader.sampler) * hvd.size() < len(val_loader.dataset))
-        # ),
-        [batch_time, losses, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_Egroup, loss_Virial, loss_Virial_per_atom],
+        progress_meters,
         prefix="Test: ",    
     )
     

@@ -1,4 +1,5 @@
 # Generated files
+train*
 datas
 datas/*
 *.o
