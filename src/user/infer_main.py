@@ -5,6 +5,26 @@ import glob
 import numpy as np
 from pwdata import Config
 from src.utils.nep_to_gpumd import get_atomic_name_from_number, check_atom_type_name
+
+def _extract_kspace_method(args: list[str]):
+    valid_methods = ["ewald", "pppm"]
+    if len(args) >= 2 and args[-2].lower() == "kspace":
+        method = args[-1].lower()
+        if method in valid_methods:
+            return args[:-2], method
+        print(
+            "WARNING! Detected kspace option but method '{}' is invalid. "
+            "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'.".format(args[-1])
+        )
+        return args[:-2], "ewald"
+    if len(args) >= 1 and args[-1].lower() == "kspace":
+        print(
+            "WARNING! Detected kspace option without method. "
+            "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'."
+        )
+        return args[:-1], "ewald"
+    return args, "ewald"
+
 def infer_main(sys_cmd:list[str]):
     ckpt_file = sys_cmd[0]
     sys_index = 0
@@ -15,6 +35,7 @@ def infer_main(sys_cmd:list[str]):
     device = None
     
     atom_names = sys_cmd[sys_index+1:]
+    atom_names, kspace_method = _extract_kspace_method(atom_names)
     if isinstance(atom_names, list) is False:
         atom_names = [atom_names]
     if format.lower() == "lammps/dump" or format.lower() == "lammps/lmp":
@@ -49,7 +70,7 @@ def infer_main(sys_cmd:list[str]):
         if infer.model_type == "DP":
             infer.inference(image_read)
         elif infer.model_type == "NEP":
-            infer.inference_nep_txt(image_read)
+            infer.inference_nep_txt(image_read, kspace_method=kspace_method)
 
 def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list[str]=None):
     # set atom_types in trajs

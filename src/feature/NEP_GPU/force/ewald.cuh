@@ -185,7 +185,7 @@ __global__ void find_force_charge_reciprocal_space_charge2(
     const double virial_xy = double(K_C_SP * temp_virial_sum[3]);
     const double virial_yz = double(K_C_SP * temp_virial_sum[4]);
     const double virial_zx = double(K_C_SP * temp_virial_sum[5]);
-    // Keep potential_per_atom as neural-network Ei; charge energy contributes force and virial only.
+    g_pe[n] += double(K_C_SP * temp_energy_sum);
     g_virial[n + 0 * N] += virial_xx;
     g_virial[n + 1 * N] += virial_yy;
     g_virial[n + 2 * N] += virial_zz;

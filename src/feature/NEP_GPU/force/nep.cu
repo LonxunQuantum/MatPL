@@ -744,7 +744,8 @@ void NEP::inference(
         nep_data.D_real,
         nep_data.force_per_atom,
         nep_data.virial_per_atom,
-        nep_data.total_virial);
+        nep_data.total_virial,
+        nep_data.potential_per_atom);
     } else if (kspace == "ewald") {
       ewald_find_force_charge2(
         N,

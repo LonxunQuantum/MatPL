@@ -311,7 +311,8 @@ __global__ void pppm_find_force_virial_from_field(
   double* g_fy,
   double* g_fz,
   double* g_virial,
-  double* g_total_virial)
+  double* g_total_virial,
+  double* g_pe)
 {
   const int n = blockIdx.x * blockDim.x + threadIdx.x + N1;
   if (n < N2) {
@@ -365,6 +366,7 @@ __global__ void pppm_find_force_virial_from_field(
     }
 
     g_D_real[n] = 2.0f * K_C_SP * D_real;
+    g_pe[n] += double(0.5f * g_charge[n] * g_D_real[n]);
     g_fx[n] += double(2.0f * q * E[0]);
     g_fy[n] += double(2.0f * q * E[1]);
     g_fz[n] += double(2.0f * q * E[2]);
@@ -482,7 +484,8 @@ inline void pppm_find_force_charge2(
   GPU_Vector<float>& D_real,
   GPU_Vector<double>& force_per_atom,
   GPU_Vector<double>& virial_per_atom,
-  GPU_Vector<double>& total_virial)
+  GPU_Vector<double>& total_virial,
+  GPU_Vector<double>& potential_per_atom)
 {
   pppm_find_para(pppm, N, alpha, alpha_factor, box);
   const PPPM_Para para = pppm.para;
@@ -597,7 +600,8 @@ inline void pppm_find_force_charge2(
     force_per_atom.data() + N,
     force_per_atom.data() + N * 2,
     virial_per_atom.data(),
-    total_virial.data());
+    total_virial.data(),
+    potential_per_atom.data());
   CUDA_CHECK_KERNEL
 }
 

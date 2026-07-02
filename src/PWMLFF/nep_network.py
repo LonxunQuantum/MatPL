@@ -119,14 +119,12 @@ def _calculate_nep_image_result(idx, image, input_atom_types, calc_obj, kspace_m
         if charge_label.size == atom_nums:
             charge_label = charge_label.reshape(atom_nums)
             charge_rmse = np.sqrt(np.mean((charge_predict - charge_label) ** 2))
-            charge_predict_save = charge_predict
         else:
             charge_label = float(charge_label.reshape(-1)[0]) if charge_label.size else 0.0
-            charge_predict_save = np.sum(charge_predict)
-            charge_rmse = np.abs(charge_predict_save - charge_label)
+            charge_rmse = np.abs(np.sum(charge_predict) - charge_label)
         result["charge_rmse"] = charge_rmse
         result["charge_label"] = charge_label
-        result["charge_predict"] = charge_predict_save
+        result["charge_predict"] = charge_predict
     else:
         result["charge_rmse"] = -1e6
         result["charge_label"] = np.array([])
@@ -750,20 +748,22 @@ class nep_network:
     '''
     def convert_to_gpumd(self, prefix=""):
         ckpt_path = os.path.join(self.input_param.file_paths.model_store_dir, self.input_param.file_paths.model_name)
-        save_nep_txt_path = os.path.join(self.input_param.file_paths.model_store_dir, f"{prefix}{self.input_param.file_paths.nep_model_file}")
         # extract parameters
         nep_content, model_atom_type, atom_names = extract_model(ckpt_path)
+        first_line = nep_content.splitlines()[0] if nep_content else ""
+        nep_file_name = "nep4.txt" if first_line.startswith("nep4") else "nep5.txt"
+        save_nep_txt_path = os.path.join(self.input_param.file_paths.model_store_dir, f"{prefix}{nep_file_name}")
         with open(save_nep_txt_path, 'w') as wf:
                 wf.writelines(nep_content)
 
     # mulit cpu, code has error
-    def process_image(self, idx, image, calc_obj=None):
+    def process_image(self, idx, image, calc_obj=None, kspace_method="ewald"):
         global calc
         if calc_obj is None:
             calc_obj = calc
-        return _calculate_nep_image_result(idx, image, self.input_param.atom_type, calc_obj)
+        return _calculate_nep_image_result(idx, image, self.input_param.atom_type, calc_obj, kspace_method=kspace_method)
 
-    def multi_cpus_nep_inference(self, nep_txt_path):
+    def multi_cpus_nep_inference(self, nep_txt_path, kspace_method="ewald"):
         time0 = time.time()
         images = NepTestData(self.input_param).image_list
         indexed_images = list(enumerate(images))
@@ -782,6 +782,7 @@ class nep_network:
                     self.input_param.atom_type,
                     device_type="cuda",
                     gpu_id=0,
+                    kspace_method=kspace_method,
                     print_info=1
                 )
             else:
@@ -795,7 +796,7 @@ class nep_network:
                             self.input_param.atom_type,
                             "cuda",
                             gpu_id,
-                            "ewald",
+                            kspace_method,
                             1 if gpu_id == 0 else 0
                         )
                         for gpu_id, chunk in enumerate(chunks)
@@ -810,11 +811,11 @@ class nep_network:
             calc.init_model(nep_txt_path)
             if cpu_count == 1:
                 for idx, image in indexed_images:
-                    results.append(self.process_image(idx, image))
+                    results.append(self.process_image(idx, image, kspace_method=kspace_method))
             else:
                 with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_count) as executor:
                     futures = [
-                        executor.submit(self.process_image, idx, image)
+                        executor.submit(self.process_image, idx, image, None, kspace_method)
                         for idx, image in indexed_images
                     ]
                     results = [future.result() for future in concurrent.futures.as_completed(futures)]

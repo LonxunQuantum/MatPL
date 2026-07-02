@@ -1388,7 +1388,8 @@ void find_force_charge_reciprocal_space(
   std::vector<double>& D_real,
   std::vector<double>& force,
   std::vector<double>& virial,
-  std::vector<double>& total_virial)
+  std::vector<double>& total_virial,
+  std::vector<double>& potential)
 {
   for (int n = 0; n < N; ++n) {
     const double q = charge[n];
@@ -1439,6 +1440,7 @@ void find_force_charge_reciprocal_space(
     total_virial[5] += virial_yz;
     total_virial[8] += virial_zz;
     D_real[n] = 2.0 * K_C_SP * temp_D_real_sum;
+    potential[n] += 0.5 * q * D_real[n];
     const double charge_factor = K_C_SP * 2.0 * q;
     force[n] += charge_factor * temp_force_sum[0];
     force[n + N] += charge_factor * temp_force_sum[1];
@@ -1711,7 +1713,8 @@ void pppm_find_force_charge_cpu(
   std::vector<double>& D_real,
   std::vector<double>& force,
   std::vector<double>& virial,
-  std::vector<double>& total_virial)
+  std::vector<double>& total_virial,
+  std::vector<double>& potential)
 {
   PPPM_Para_CPU para;
   double h[18] = {0.0};
@@ -1826,6 +1829,7 @@ void pppm_find_force_charge_cpu(
       }
     }
     D_real[n] = 2.0 * K_C_SP * D_sum;
+    potential[n] += 0.5 * charge[n] * D_real[n];
     force[n] += 2.0 * q * E[0];
     force[n + N] += 2.0 * q * E[1];
     force[n + 2 * N] += 2.0 * q * E[2];
@@ -3134,7 +3138,7 @@ void NEP_CPU::compute(
     if (kspace_method == "pppm") {
       pppm_find_force_charge_cpu(
         N, charge_para.alpha, charge_para.alpha_factor, box, charge_shifted, position,
-        D_real, force, virial, total_virial);
+        D_real, force, virial, total_virial, potential);
     } else if (kspace_method == "ewald") {
       find_k_and_G(
         charge_para.num_kpoints_max, charge_para.alpha, charge_para.alpha_factor,
@@ -3142,7 +3146,7 @@ void NEP_CPU::compute(
       find_structure_factor(N, num_kpoints[0], charge_shifted, position, kx, ky, kz, S_real, S_imag);
       find_force_charge_reciprocal_space(
         N, num_kpoints[0], charge_para.alpha_factor, charge_shifted, position, kx, ky, kz, G,
-        S_real, S_imag, D_real, force, virial, total_virial);
+        S_real, S_imag, D_real, force, virial, total_virial, potential);
     } else {
       std::cout << "Unsupported CPU NEP kspace method: " << kspace_method << std::endl;
       exit(1);
