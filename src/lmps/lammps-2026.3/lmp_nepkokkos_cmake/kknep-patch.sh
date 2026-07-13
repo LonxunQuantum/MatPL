@@ -48,11 +48,13 @@ if grep -q "$NEW_PROJECT_LINE" "$CMAKE_FILE"; then
 elif grep -q "$PROJECT_LINE" "$CMAKE_FILE"; then
     sed -i "s|${PROJECT_LINE}|${NEW_PROJECT_LINE}|g" "$CMAKE_FILE"
     echo "  - Project configuration updated to include CUDA"
+elif grep -q "LANGUAGES CXX C" "$CMAKE_FILE"; then
+    sed -i "/LANGUAGES CXX C/c\        LANGUAGES CXX C CUDA)" "$CMAKE_FILE"
+    echo "  - Project configuration updated to include CUDA"
 else
     echo "Error: Unsupported LAMMPS version detected"
     echo "Current LAMMPS version is not supported."
-    echo "Supported versions: 2023 and 2024 released versions of LAMMPS"
-    echo "Unsupported versions: 2025 released versions, develop or stable branch code"
+    echo "Supported versions: 2023, 2024 and 2025 released versions of LAMMPS"
     echo "Please check and try again with a supported version."
     exit 1
 fi
@@ -95,6 +97,8 @@ if(PKG_NEP_KK)
   if(NOT Kokkos_ENABLE_CUDA)
     message(FATAL_ERROR "NEP_KK requires CUDA support. Enable with -DKokkos_ENABLE_CUDA=yes")
   endif()
+
+  find_package(CUDAToolkit REQUIRED)
   
   message(STATUS "NEP_KK: Building with mandatory KOKKOS and CUDA")
   
@@ -109,12 +113,22 @@ if(PKG_NEP_KK)
   )
   # Simply add to compilation - let Kokkos configuration handle these files
   target_sources(lammps PRIVATE ${NEP_KOKKOS_SOURCES} ${NEP_KK_SOURCES})
+  target_link_libraries(lammps PUBLIC CUDA::cufft)
   # Only set include directories
   target_include_directories(lammps PRIVATE 
     ${LAMMPS_SOURCE_DIR}/KOKKOS
     ${LAMMPS_SOURCE_DIR}/nep_gpu/force
     ${LAMMPS_SOURCE_DIR}/nep_gpu/utilities
   )
+endif()
+
+#####################################################################
+# package of NEP with double precision
+#####################################################################
+option(PREC_NEPINFER "Use double precision" OFF)
+if(PREC_NEPINFER AND PKG_NEP_KK)
+    message(STATUS "PREC_NEPINFER is ON: Using double precision for NEP model.")
+    add_compile_definitions(PREC_NEPINFER)
 endif()
 
 ######################################################################
@@ -184,7 +198,7 @@ echo "Starting file copy process..."
 
 # Copy CPU files to src/
 echo "Copying CPU files to src/ directory..."
-CPU_FILES=("nep_cpu.cpp" "nep_cpu.h" "pair_nep.cpp" "pair_nep.h")
+CPU_FILES=("nep_cpu.cpp" "nep_cpu.h" "pair_nep.cpp" "pair_nep.h" "compute_qnep_bec_atom.cpp" "compute_qnep_bec_atom.h")
 for file in "${CPU_FILES[@]}"; do
     if [ -f "$file" ]; then
         cp -f "$file" "$LAMMPSROOT/src/"
@@ -275,6 +289,10 @@ echo "-DPKG_MATPLDP=yes \\"
 echo ""
 echo "For the D3 interface, please add the following option in cmake. Note that D3 requires CUDA support and cannot be used in combination with matpl/nep/kk."
 echo "-DPKG_MATPLD3=yes \\"
+echo ""
+
+echo "NEP adopts single-precision inference by default. For double-precision inference, please add the following option in cmake."
+echo "-DPREC_NEPINFER=ON \\"
 echo ""
 
 ######### 手动复制文件 #########

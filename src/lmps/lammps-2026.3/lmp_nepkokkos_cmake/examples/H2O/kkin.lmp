@@ -7,7 +7,7 @@ variable        PRESS           equal 0.000000
 variable        TAU_T           equal 0.050000
 variable        TAU_P           equal 0.500000
 
-package kokkos neigh full comm device
+package kokkos neigh half comm device
 newton on
 
 units           metal

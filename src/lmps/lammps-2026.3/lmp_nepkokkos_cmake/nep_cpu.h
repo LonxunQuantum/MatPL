@@ -38,6 +38,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #pragma once
 #include <string>
 #include <vector>
+#include <mpi.h>
 
 // #define USE_TABLE_FOR_RADIAL_FUNCTIONS
 
@@ -45,8 +46,10 @@ class NEP3_CPU
 {
 public:
   struct ParaMB {
+    bool use_typewise_cutoff_zbl = false;
+    double typewise_cutoff_zbl_factor = 0.65;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
-    int version = 2;
+    int version = 4;
     double rc_radial = 0.0;
     double rc_angular = 0.0;
     double rcinv_radial = 0.0;
@@ -61,6 +64,10 @@ public:
     int num_types_sq = 0;
     int num_c_radial = 0;
     int num_types = 0;
+    int charge_mode = 0;
+    int num_kpoints_max = 1000;
+    double charge_alpha = 0.0;
+    double charge_alpha_factor = 0.0;
     double q_scaler[140];
   };
 
@@ -81,6 +88,7 @@ public:
     const double* b0_pol[103];
     const double* w1_pol[103];
     const double* b1_pol;
+    const double* sqrt_epsilon_inf;
   };
 
   struct ZBL {
@@ -89,7 +97,7 @@ public:
     int num_types;
     double rc_inner = 1.0;
     double rc_outer = 2.0;
-    double atomic_numbers[103];
+    int atomic_numbers[103];
     double para[550];
   };
 
@@ -123,7 +131,17 @@ public:
     double* potential,       // eatom or nullptr
     double** f,              // atom->f
     double** virial,          // cvatom or nullptr
-    int model_index          // for multimodels' deviation
+    int virial_components,
+    int model_index,         // for multimodels' deviation
+    double xprd,
+    double yprd,
+    double zprd,
+    double xy,
+    double xz,
+    double yz,
+    const std::string& kspace_method,
+    long long natoms_global,
+    MPI_Comm mpi_comm
   );
 
   int num_atoms = 0;
@@ -135,6 +153,10 @@ public:
   std::vector<int> NN_radial, NL_radial, NN_angular, NL_angular;
   std::vector<double> r12;
   std::vector<double> Fp;
+  std::vector<double> Fp_charge;
+  std::vector<double> charge;
+  std::vector<double> charge_derivative;
+  std::vector<double> D_real;
   std::vector<double> sum_fxyz;
   std::vector<double> parameters;
   std::vector<std::string> element_list;

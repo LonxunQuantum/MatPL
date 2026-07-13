@@ -1,0 +1,827 @@
+#!/bin/bash
+# Default to single-core compilation
+JOB_COUNT=1
+EXTRACT_ONLY=0
+CLEAN_ALL=0
+VERSION=2026.3
+COMPILE_FORTRAN=0
+GPU_ARCH=${GPU_ARCH:-AMPERE86}
+DPREC=${DPREC:-}
+DPREC_ENABLED=0
+
+# Parse command-line arguments
+show_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo "MatPL-2026.3 Patch Installation Script"
+    echo ""
+    echo "Options:"
+    echo "  -j NUM     Number of CPU cores for compilation (default: 1)"
+    echo "  -m nn      Compile Fortran modules (for Linear and NN models)"
+    echo "  -a ARCH    Set Kokkos CUDA architecture for lammps-2026.3 (default: AMPERE86)"
+    echo "             ARCH is the Kokkos CUDA architecture suffix, for example AMPERE80, AMPERE86, ADA89, or HOPPER90. For more information on the architecture, please refer to https://docs.lammps.org/Build_extras.html#kokkos."
+    echo "  -d         Enable DPREC_NEPINFER and build lammps-2026.3 in build-64"
+    echo "  -u         Extract-only mode, exit after extraction"
+    echo "  -c         Clear all compilation caches before compiling"
+    echo "  --gpu-arch ARCH  Same as -a ARCH"
+    echo "  --dprec          Same as -d"
+    echo "  -h         Show this help message"
+    echo ""
+    exit 0
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -j)
+      if [ -z "$2" ]; then
+        echo "Option -j requires an argument." >&2
+        show_help
+      fi
+      JOB_COUNT=$2
+      echo "Using $JOB_COUNT CPU cores for compilation"
+      shift 2
+      ;;
+    -j*)
+      JOB_COUNT=${1#-j}
+      echo "Using $JOB_COUNT CPU cores for compilation"
+      shift
+      ;;
+    -m)
+      if [ "$2" = "nn" ]; then
+        COMPILE_FORTRAN=1
+        echo "Will compile Fortran modules (for Linear and NN models)"
+        shift 2
+      else
+        echo "Error: -m option only accepts 'nn' as argument"
+        show_help
+      fi
+      ;;
+    -mnn)
+      COMPILE_FORTRAN=1
+      echo "Will compile Fortran modules (for Linear and NN models)"
+      shift
+      ;;
+    -a|--gpu-arch)
+      if [ -z "$2" ]; then
+        echo "Option $1 requires an argument." >&2
+        show_help
+      fi
+      GPU_ARCH=$2
+      shift 2
+      ;;
+    --gpu-arch=*)
+      GPU_ARCH=${1#--gpu-arch=}
+      shift
+      ;;
+    -d|--dprec)
+      DPREC=ON
+      shift
+      ;;
+    -u)
+      EXTRACT_ONLY=1
+      echo "Extract-only mode enabled, will exit after extraction"
+      shift
+      ;;
+    -c)
+      CLEAN_ALL=1
+      echo "Clear all compilation caches before compiling"
+      shift
+      ;;
+    -h|--help)
+      show_help
+      ;;
+    *)
+      echo "Invalid option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "${DPREC,,}" in
+  1|true|yes|on)
+    DPREC_ENABLED=1
+    ;;
+  ""|0|false|no|off)
+    DPREC_ENABLED=0
+    ;;
+  *)
+    echo "Invalid DPREC value: $DPREC. Use ON/OFF, true/false, or 1/0." >&2
+    show_help
+    ;;
+esac
+
+echo "Using Kokkos CUDA architecture: $GPU_ARCH"
+if [ "$DPREC_ENABLED" -eq 1 ]; then
+    echo "DPREC_NEPINFER enabled; lammps-2026.3 will be built in build-64"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_NAME="$(basename "$0")"
+TMP_DIR_BASE="${SCRIPT_NAME%.sh}"
+TMP_EXTRACT_DIR="tmp-${TMP_DIR_BASE}-patching"
+
+echo "=========================================="
+echo "MatPL-$VERSION Patch Installation Program"
+echo "Start time: $(date)"
+echo "=========================================="
+
+echo "Creating temporary extraction directory: ${TMP_EXTRACT_DIR}"
+mkdir -p "${TMP_EXTRACT_DIR}"
+if [ $? -ne 0 ]; then
+    echo "Error: Unable to create temporary directory ${TMP_EXTRACT_DIR}"
+    exit 1
+fi
+
+echo "Extracting patch files..."
+SKIP=$(awk '/^__ARCHIVE_BELOW__/ { print NR + 1; exit 0; }' "$0")
+tail -n+$SKIP "$0" | base64 -d > "${TMP_EXTRACT_DIR}/patch.tar.gz"
+if [ $? -ne 0 ]; then
+    echo "Error: Base64 decoding failed"
+    rm -rf "${TMP_EXTRACT_DIR}"
+    exit 1
+fi
+
+echo "Decompressing patch files..."
+tar -xzf "${TMP_EXTRACT_DIR}/patch.tar.gz" -C "${TMP_EXTRACT_DIR}"
+if [ $? -ne 0 ]; then
+    echo "Error: Decompression failed"
+    rm -rf "${TMP_EXTRACT_DIR}"
+    exit 1
+fi
+
+rm -f "${TMP_EXTRACT_DIR}/patch.tar.gz"
+ls "${TMP_EXTRACT_DIR}"
+echo "Patch files extracted to: ${TMP_EXTRACT_DIR}"
+
+if [ $EXTRACT_ONLY -eq 1 ]; then
+    echo "=========================================="
+    echo "Extract-only mode: Exiting after extraction"
+    echo "Extracted files retained in: ${TMP_EXTRACT_DIR}"
+    echo "End time: $(date)"
+    echo "=========================================="
+    exit 0
+fi
+
+# ==================== 动态查找 pwdata / pwact 包 ====================
+PWDATA_PKG=$(ls "${TMP_EXTRACT_DIR}"/pwdata-*.tar.gz 2>/dev/null | head -1)
+PWACT_PKG=$(ls "${TMP_EXTRACT_DIR}"/pwact-*.tar.gz 2>/dev/null | head -1)
+
+if [ -z "$PWDATA_PKG" ] || [ -z "$PWACT_PKG" ]; then
+    echo "Error: pwdata or pwact package not found in ${TMP_EXTRACT_DIR}"
+    rm -rf "${TMP_EXTRACT_DIR}"
+    exit 1
+fi
+
+echo "Detected packages:"
+echo "  pwdata: $(basename "$PWDATA_PKG")"
+echo "  pwact : $(basename "$PWACT_PKG")"
+
+if [ -d "MatPL-${VERSION}" ]; then
+    echo "Found MatPL-${VERSION} (GPU version)"
+    CPU_ONLY=0
+    BASE_DIR="MatPL-${VERSION}"
+    MATPL_PREFIX="MatPL-"
+elif [ -d "MatPL_cpu-${VERSION}" ]; then
+    echo "Found MatPL_cpu-${VERSION} (CPU-only version)"
+    CPU_ONLY=1
+    BASE_DIR="MatPL_cpu-${VERSION}"
+    MATPL_PREFIX="MatPL_cpu-"
+else
+    echo "Error: Neither MatPL-${VERSION} nor MatPL_cpu-${VERSION} found!"
+    exit 1
+fi
+echo "CPU_ONLY flag set to: $CPU_ONLY"
+
+A_ROOT="${TMP_EXTRACT_DIR}/MatPL-${VERSION}"
+B_ROOT="${BASE_DIR}/${MATPL_PREFIX}${VERSION}"
+
+echo "=========================================="
+echo "Starting file difference checks..."
+echo "=========================================="
+CHECK_DIFF_SCRIPT="${TMP_EXTRACT_DIR}/check_diff.sh"
+echo ">>> Executing: bash \"${CHECK_DIFF_SCRIPT}\" \"${TMP_EXTRACT_DIR}\" \"${A_ROOT}\" \"${B_ROOT}\" \"${VERSION}\" \"$CPU_ONLY\""
+bash "${CHECK_DIFF_SCRIPT}" "${TMP_EXTRACT_DIR}" "${A_ROOT}" "${B_ROOT}" "${VERSION}" "$CPU_ONLY"
+exit_code=$?
+py_change=$((exit_code & 1))
+nep_cpu_change=$(( (exit_code >> 1) & 1 ))
+if [ $CPU_ONLY -eq 0 ]; then
+  nep_change=$(( (exit_code >> 2) & 1 ))
+else
+  nep_change=0
+fi
+op_change=$(( (exit_code >> 3) & 1 ))
+fortran_change=$(( (exit_code >> 4) & 1 ))
+lmp_change=$(( (exit_code >> 5) & 1 ))
+
+if [ "$COMPILE_FORTRAN" -eq 0 ]; then
+    echo "Note: -m nn option not specified, ignoring Fortran-related changes"
+    fortran_change=0
+fi
+
+echo "Check completed! Summary of results:"
+if [ $CPU_ONLY -eq 1 ]; then
+  echo "The current version is MatPL-CPU, skip check 3 nep_change"
+fi
+echo "py_change=$py_change"
+echo "nep_cpu_change=$nep_cpu_change"
+if [ $CPU_ONLY -eq 0 ]; then
+  echo "nep_change=$nep_change"
+fi
+echo "op_change=$op_change"
+echo "fortran_change=$fortran_change (after -m nn check: $COMPILE_FORTRAN)"
+echo "lmp_change=$lmp_change"
+echo "----------------------------------------"
+
+if [ $py_change -eq 0 ] && [ $nep_cpu_change -eq 0 ] && [ $nep_change -eq 0 ] && \
+   [ $op_change -eq 0 ] && [ $fortran_change -eq 0 ] && [ $lmp_change -eq 0 ]; then
+    echo "System is already up to date, no update needed!"
+    rm -rf "${TMP_EXTRACT_DIR}"
+    echo "=========================================="
+    echo "Installation completion time: $(date)"
+    echo "Status: No update needed"
+    echo "=========================================="
+    exit 0
+fi
+
+# ==================== 计算 Fortran 是否需要编译（两种情况） ====================
+FORTRAN_NEED_COMPILE=0
+if [ $fortran_change -eq 1 ] && [ "$COMPILE_FORTRAN" -eq 1 ]; then
+    FORTRAN_NEED_COMPILE=1
+    echo "fortran_change=1 and -m nn is set → Fortran compilation required"
+elif [ $fortran_change -eq 0 ] && [ "$COMPILE_FORTRAN" -eq 1 ] && [ ! -f "${B_ROOT}/src/lib/NeighConst.so" ]; then
+    FORTRAN_NEED_COMPILE=1
+    echo "fortran_change=0 but -m nn is set and NeighConst.so is missing → force Fortran compilation required"
+fi
+
+# ==================== 环境检查逻辑（全部检测完后再统一判断退出） ====================
+echo "=========================================="
+NEED_ENV_CHECK=0
+if [ $py_change -eq 1 ] && [ $nep_cpu_change -eq 0 ] && [ $nep_change -eq 0 ] && [ $op_change -eq 0 ] && \
+   [ $fortran_change -eq 0 ] && [ $lmp_change -eq 0 ]; then
+    echo "Only Python files changed (py_change=1), skipping environment checks"
+else
+    echo "Compilation-related changes detected, performing environment checks..."
+    NEED_ENV_CHECK=1
+fi
+echo "=========================================="
+
+if [ $NEED_ENV_CHECK -eq 1 ]; then
+    echo "Starting environment checks..."
+    check_ifort_mkl_val=0
+    check_gcc_version_val=0
+    check_cuda_version_val=0
+    check_nvcc_val=0
+
+    check_ifort_mkl() {
+        local ifort_ok=0
+        local mkl_ok=0
+        if command -v ifort &> /dev/null; then
+            ifort_version=$(ifort --version | grep "ifort" | awk '{print $3}' | cut -d'.' -f1-2)
+            major_version=$(echo $ifort_version | cut -d'.' -f1)
+            minor_version=$(echo $ifort_version | cut -d'.' -f2)
+            if [ "$major_version" -gt 19 ] || ([ "$major_version" -eq 19 ] && [ "$minor_version" -ge 1 ]); then
+                echo "✓ ifort version is no less than 19.1, current version is $ifort_version."
+                ifort_ok=1
+            else
+                echo "✗ ifort version is not greater than 19.1, current version is $ifort_version."
+            fi
+        else
+            echo "✗ ifort compiler not found."
+        fi
+        if [ -d "/opt/intel/mkl" ] || [ -d "$MKLROOT" ]; then
+            echo "✓ MKL library is installed."
+            mkl_ok=1
+        else
+            echo "✗ MKL library is not installed."
+        fi
+        if [ $ifort_ok -eq 1 ] && [ $mkl_ok -eq 1 ]; then
+            check_ifort_mkl_val=1
+        fi
+    }
+
+    check_gcc_version() {
+        if command -v gcc &> /dev/null; then
+            gcc_version=$(gcc -dumpversion | cut -d. -f1)
+            if [ "$gcc_version" -ge 8 ]; then
+                echo "✓ GCC version is $gcc_version (>= 8.0)."
+                check_gcc_version_val=1
+            else
+                echo "✗ GCC version is $gcc_version (< 8.0)."
+            fi
+        else
+            echo "✗ GCC not found."
+        fi
+    }
+
+    check_cuda_version() {
+        if command -v nvcc &> /dev/null; then
+            cuda_version=$(nvcc --version | grep "release" | awk '{print $6}' | cut -d"," -f1 | cut -c2-)
+            major_version=$(echo $cuda_version | cut -d'.' -f1)
+            minor_version=$(echo $cuda_version | cut -d'.' -f2)
+            if [ "$major_version" -gt 11 ] || ([ "$major_version" -eq 11 ] && [ "$minor_version" -ge 8 ]); then
+                echo "✓ CUDA version is 11.8 or higher, current version is $cuda_version."
+                check_cuda_version_val=1
+            else
+                echo "✗ CUDA version is lower than 11.8, current version is $cuda_version."
+            fi
+        else
+            echo "✗ nvcc command not found, CUDA might not be installed."
+        fi
+    }
+
+    check_nvcc() {
+        if command -v nvcc &> /dev/null; then
+            echo "✓ nvcc command exists."
+            check_nvcc_val=1
+        else
+            echo "✗ nvcc command does not exist."
+        fi
+    }
+
+    # 执行所有检查（全部跑完）
+    check_ifort_mkl
+    check_gcc_version
+    if [ "$CPU_ONLY" -eq 1 ]; then
+        echo "CPU-only mode: Skipping CUDA-related checks"
+        check_cuda_version_val=1
+        check_nvcc_val=1
+    else
+        check_cuda_version
+        check_nvcc
+    fi
+
+    echo "=========================================="
+    echo "        Environment Check Summary"
+    echo "=========================================="
+
+    # ==================== 全部检查完成后统一判断退出 ====================
+    EXIT_CODE=0
+
+    if [ "$check_gcc_version_val" -eq 0 ]; then
+        echo "✗ Error: GCC version check failed (must be >= 8.0)."
+        echo "  Please install GCC version 8.0 or higher before proceeding."
+        EXIT_CODE=1
+    fi
+
+    if { [ $nep_change -eq 1 ] || [ $op_change -eq 1 ] || [ $lmp_change -eq 1 ]; } && \
+       { [ "$check_cuda_version_val" -eq 0 ] || [ "$check_nvcc_val" -eq 0 ]; }; then
+        echo "✗ Error: CUDA/nvcc environment check failed."
+        echo "  nep/op/lmp modules need to be compiled but CUDA >= 11.8 and nvcc are required."
+        echo "  Please install CUDA (>= 11.8) and nvcc before proceeding."
+        EXIT_CODE=1
+    fi
+
+    if [ $FORTRAN_NEED_COMPILE -eq 1 ] && [ "$check_ifort_mkl_val" -eq 0 ]; then
+        echo "✗ Error: ifort/MKL environment check failed."
+        echo "  Fortran modules need to be compiled (either source changed or NeighConst.so missing) but ifort (>= 19.1) and MKL are required."
+        echo "  Please install ifort and MKL before proceeding."
+        EXIT_CODE=1
+    fi
+
+    if [ $EXIT_CODE -eq 1 ]; then
+        rm -rf "${TMP_EXTRACT_DIR}"
+        exit 1
+    fi
+
+    echo "✓ Environment check completed successfully."
+    echo "=========================================="
+fi
+
+# ==================== 备份 + 文件替换 + 编译 + pwact/pwdata 更新（省略不变部分） ====================
+echo "Applying patch files with backup..."
+BACKUP_DIR="${B_ROOT}-bk"
+
+if [ -d "$BACKUP_DIR" ]; then
+    echo "Backup directory $BACKUP_DIR already exists, rm ${BACKUP_DIR}..."
+    rm -rf "${BACKUP_DIR}"
+fi
+
+echo "Creating backup: renaming $B_ROOT to $BACKUP_DIR..."
+mv "$B_ROOT" "$BACKUP_DIR"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create backup by renaming $B_ROOT to $BACKUP_DIR"
+    rm -rf "${TMP_EXTRACT_DIR}"
+    exit 1
+fi
+
+echo "Copying $A_ROOT to $B_ROOT..."
+cp -r "$A_ROOT" "$B_ROOT"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to copy $A_ROOT to $B_ROOT"
+    mv "$BACKUP_DIR" "$B_ROOT"
+    rm -rf "${TMP_EXTRACT_DIR}"
+    exit 1
+fi
+
+for item in "example" ".gitignore" ".git"; do
+    if [ -e "$BACKUP_DIR/$item" ]; then
+        echo "Copying $BACKUP_DIR/$item to $B_ROOT/$item..."
+        cp -r "$BACKUP_DIR/$item" "$B_ROOT/$item"
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to copy $BACKUP_DIR/$item to $B_ROOT/$item"
+            rm -rf "$B_ROOT"
+            mv "$BACKUP_DIR" "$B_ROOT"
+            rm -rf "${TMP_EXTRACT_DIR}"
+            exit 1
+        fi
+    else
+        echo " $BACKUP_DIR/$item does not exist, skipping copy"
+    fi
+done
+
+# nep_cpu / NEP_GPU / op / bin / lib 替换（保持原样）
+if [ $nep_cpu_change -eq 0 ] && [ -d "$BACKUP_DIR/src/feature/nep_find_neigh" ]; then
+    echo "nep_cpu_change=0, replacing $B_ROOT/src/feature/nep_find_neigh with $BACKUP_DIR/src/feature/nep_find_neigh..."
+    rm -rf "$B_ROOT/src/feature/nep_find_neigh"
+    cp -r "$BACKUP_DIR/src/feature/nep_find_neigh" "$B_ROOT/src/feature/nep_find_neigh"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to replace $B_ROOT/src/feature/nep_find_neigh"
+        rm -rf "$B_ROOT"
+        mv "$BACKUP_DIR" "$B_ROOT"
+        rm -rf "${TMP_EXTRACT_DIR}"
+        exit 1
+    fi
+fi
+
+if [ $nep_change -eq 0 ] && [ -d "$BACKUP_DIR/src/feature/NEP_GPU" ]; then
+    echo "nep_change=0, replacing $B_ROOT/src/feature/NEP_GPU with $BACKUP_DIR/src/feature/NEP_GPU..."
+    rm -rf "$B_ROOT/src/feature/NEP_GPU"
+    cp -r "$BACKUP_DIR/src/feature/NEP_GPU" "$B_ROOT/src/feature/NEP_GPU"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to replace $B_ROOT/src/feature/NEP_GPU"
+        rm -rf "$B_ROOT"
+        mv "$BACKUP_DIR" "$B_ROOT"
+        rm -rf "${TMP_EXTRACT_DIR}"
+        exit 1
+    fi
+fi
+
+if [ $op_change -eq 0 ] && [ -d "$BACKUP_DIR/src/op" ]; then
+    echo "op_change=0, replacing $B_ROOT/src/op with $BACKUP_DIR/src/op..."
+    rm -rf "$B_ROOT/src/op"
+    cp -r "$BACKUP_DIR/src/op" "$B_ROOT/src/op"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to replace $B_ROOT/src/op"
+        rm -rf "$B_ROOT"
+        mv "$BACKUP_DIR" "$B_ROOT"
+        rm -rf "${TMP_EXTRACT_DIR}"
+        exit 1
+    fi
+fi
+
+if [ $fortran_change -eq 0 ] && [ -d "$BACKUP_DIR/src/bin" ]; then
+    echo "fortran_change=0, replacing $B_ROOT/src/bin with $BACKUP_DIR/src/bin..."
+    rm -rf "$B_ROOT/src/bin"
+    cp -r "$BACKUP_DIR/src/bin" "$B_ROOT/src/bin"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to replace $B_ROOT/src/bin"
+        rm -rf "$B_ROOT"
+        mv "$BACKUP_DIR" "$B_ROOT"
+        rm -rf "${TMP_EXTRACT_DIR}"
+        exit 1
+    fi
+fi
+
+if [ $fortran_change -eq 0 ] && [ -d "$BACKUP_DIR/src/lib" ]; then
+    echo "fortran_change=0, replacing $B_ROOT/src/lib with $BACKUP_DIR/src/lib..."
+    rm -rf "$B_ROOT/src/lib"
+    cp -r "$BACKUP_DIR/src/lib" "$B_ROOT/src/lib"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to replace $B_ROOT/src/lib"
+        rm -rf "$B_ROOT"
+        mv "$BACKUP_DIR" "$B_ROOT"
+        rm -rf "${TMP_EXTRACT_DIR}"
+        exit 1
+    fi
+fi
+
+echo "=========================================="
+echo "Starting compilation..."
+echo "=========================================="
+compile_errors=0
+package_errors=0
+failed_module=""
+RESTORED_ORIGINAL=0
+
+PY_STATUS=$([ $py_change -eq 1 ] && echo "Updated" || echo "No change")
+FORTRAN_STATUS=$([ $FORTRAN_NEED_COMPILE -eq 1 ] && echo "Pending" || echo "No change")
+NEP_CPU_STATUS=$([ $nep_cpu_change -eq 1 ] && echo "Pending" || echo "No change")
+if [ $CPU_ONLY -eq 0 ]; then
+    NEP_GPU_STATUS=$([ $nep_change -eq 1 ] && echo "Pending" || echo "No change")
+else
+    NEP_GPU_STATUS="Skipped (CPU-only)"
+fi
+OP_STATUS=$([ $op_change -eq 1 ] && echo "Pending" || echo "No change")
+LAMMPS_STATUS=$([ $lmp_change -eq 1 ] && echo "Pending" || echo "No change")
+PIP_STATUS="Pending"
+
+LAMMPS_ROOT="${BASE_DIR}/lammps-${VERSION}"
+LAMMPS_BUILD_DIR="build"
+if [ "$DPREC_ENABLED" -eq 1 ]; then
+    LAMMPS_BUILD_DIR="build-64"
+fi
+LAMMPS_BUILD_PATH="${LAMMPS_ROOT}/${LAMMPS_BUILD_DIR}"
+LAMMPS_BUILD_BACKUP="${LAMMPS_BUILD_PATH}-bk-before-patch"
+LAMMPS_ENV_PATH="${LAMMPS_ROOT}/env.sh"
+LAMMPS_ENV_BACKUP="${LAMMPS_ENV_PATH}-bk-before-patch"
+LAMMPS_BACKUP_PREPARED=0
+LAMMPS_BUILD_BACKED_UP=0
+LAMMPS_ENV_BACKED_UP=0
+
+restore_original_installation() {
+    if [ "$RESTORED_ORIGINAL" -eq 1 ]; then
+        return
+    fi
+
+    echo "=========================================="
+    echo "Compilation failed, restoring original installation..."
+    echo "=========================================="
+
+    if [ -d "$BACKUP_DIR" ]; then
+        rm -rf "$B_ROOT"
+        mv "$BACKUP_DIR" "$B_ROOT"
+    else
+        echo "Warning: backup directory $BACKUP_DIR not found; cannot restore MatPL source tree"
+    fi
+
+    if [ "$LAMMPS_BACKUP_PREPARED" -eq 1 ]; then
+        if [ "$LAMMPS_BUILD_BACKED_UP" -eq 1 ]; then
+            rm -rf "$LAMMPS_BUILD_PATH"
+            mv "$LAMMPS_BUILD_BACKUP" "$LAMMPS_BUILD_PATH"
+        else
+            rm -rf "$LAMMPS_BUILD_PATH"
+        fi
+
+        if [ "$LAMMPS_ENV_BACKED_UP" -eq 1 ]; then
+            rm -f "$LAMMPS_ENV_PATH"
+            mv "$LAMMPS_ENV_BACKUP" "$LAMMPS_ENV_PATH"
+        else
+            rm -f "$LAMMPS_ENV_PATH"
+        fi
+    fi
+
+    RESTORED_ORIGINAL=1
+    echo "Original installation has been restored."
+}
+
+prepare_lammps_build_backup() {
+    if [ "$CPU_ONLY" -eq 1 ]; then
+        return 0
+    fi
+
+    LAMMPS_BACKUP_PREPARED=1
+    rm -rf "$LAMMPS_BUILD_BACKUP"
+    rm -f "$LAMMPS_ENV_BACKUP"
+
+    if [ -d "$LAMMPS_BUILD_PATH" ]; then
+        mv "$LAMMPS_BUILD_PATH" "$LAMMPS_BUILD_BACKUP"
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to back up $LAMMPS_BUILD_PATH"
+            return 1
+        fi
+        LAMMPS_BUILD_BACKED_UP=1
+    fi
+
+    if [ -f "$LAMMPS_ENV_PATH" ]; then
+        mv "$LAMMPS_ENV_PATH" "$LAMMPS_ENV_BACKUP"
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to back up $LAMMPS_ENV_PATH"
+            return 1
+        fi
+        LAMMPS_ENV_BACKED_UP=1
+    fi
+
+    return 0
+}
+
+cleanup_lammps_build_backup() {
+    rm -rf "$LAMMPS_BUILD_BACKUP"
+    rm -f "$LAMMPS_ENV_BACKUP"
+}
+
+if [ $FORTRAN_NEED_COMPILE -eq 1 ]; then
+    echo "-------------------------------------------"
+    echo "Compiling Fortran module..."
+    CMP_FORTRAN_SCRIPT="${TMP_EXTRACT_DIR}/cmp_fortran.sh"
+    if [ -f "$CMP_FORTRAN_SCRIPT" ]; then
+        echo ">>> Executing: bash \"${CMP_FORTRAN_SCRIPT}\" \"${BASE_DIR}\" \"${VERSION}\" \"${MATPL_PREFIX}${VERSION}\" \"${CLEAN_ALL}\" \"${CPU_ONLY}\" -j1"
+        bash "${CMP_FORTRAN_SCRIPT}" "${BASE_DIR}" "${VERSION}" "${MATPL_PREFIX}${VERSION}" "${CLEAN_ALL}" "${CPU_ONLY}" -j1
+        if [ $? -ne 0 ]; then
+            echo "Error: fortran compilation failed"
+            compile_errors=1
+            failed_module="Fortran modules"
+            FORTRAN_STATUS="Failed, original installation restored"
+            restore_original_installation
+        else
+            FORTRAN_STATUS="Updated"
+        fi
+    else
+        echo "Warning: cmp_fortran.sh script does not exist"
+        compile_errors=1
+        failed_module="Fortran modules"
+        FORTRAN_STATUS="Failed, compile script missing"
+        restore_original_installation
+    fi
+    echo "-------------------------------------------"
+fi
+
+if [ $nep_cpu_change -eq 1 ] && [ $compile_errors -eq 0 ]; then
+    echo "-------------------------------------------"
+    echo "Compiling NEP CPU module..."
+    CMP_NEPCPU_SCRIPT="${TMP_EXTRACT_DIR}/cmp_nepcpu.sh"
+    if [ -f "$CMP_NEPCPU_SCRIPT" ]; then
+        echo ">>> Executing: bash \"${CMP_NEPCPU_SCRIPT}\" \"${BASE_DIR}\" \"${VERSION}\" \"${MATPL_PREFIX}${VERSION}\" \"${CLEAN_ALL}\" \"${CPU_ONLY}\" -j\"${JOB_COUNT}\""
+        bash "${CMP_NEPCPU_SCRIPT}" "${BASE_DIR}" "${VERSION}" "${MATPL_PREFIX}${VERSION}" "${CLEAN_ALL}" "${CPU_ONLY}" -j"${JOB_COUNT}"
+        if [ $? -ne 0 ]; then
+            echo "Error: NEP CPU compilation failed"
+            compile_errors=1
+            failed_module="NEP CPU module"
+            NEP_CPU_STATUS="Failed, original installation restored"
+            restore_original_installation
+        else
+            NEP_CPU_STATUS="Updated"
+        fi
+    else
+        echo "Warning: cmp_nepcpu.sh script does not exist"
+        compile_errors=1
+        failed_module="NEP CPU module"
+        NEP_CPU_STATUS="Failed, compile script missing"
+        restore_original_installation
+    fi
+    echo "-------------------------------------------"
+fi
+
+if [ $nep_change -eq 1 ] && [ $compile_errors -eq 0 ] && [ $CPU_ONLY -eq 0 ]; then
+    echo "-------------------------------------------"
+    echo "Compiling NEP GPU module..."
+    CMP_NEPGPU_SCRIPT="${TMP_EXTRACT_DIR}/cmp_nepgpu.sh"
+    if [ -f "$CMP_NEPGPU_SCRIPT" ]; then
+        echo ">>> Executing: bash \"${CMP_NEPGPU_SCRIPT}\" \"${BASE_DIR}\" \"${VERSION}\" \"${MATPL_PREFIX}${VERSION}\" \"${CLEAN_ALL}\" -j\"${JOB_COUNT}\""
+        bash "${CMP_NEPGPU_SCRIPT}" "${BASE_DIR}" "${VERSION}" "${MATPL_PREFIX}${VERSION}" "${CLEAN_ALL}" -j"${JOB_COUNT}"
+        if [ $? -ne 0 ]; then
+            echo "Error: NEP GPU compilation failed"
+            compile_errors=1
+            failed_module="NEP GPU module"
+            NEP_GPU_STATUS="Failed, original installation restored"
+            restore_original_installation
+        else
+            NEP_GPU_STATUS="Updated"
+        fi
+    else
+        echo "Warning: cmp_nepgpu.sh script does not exist"
+        compile_errors=1
+        failed_module="NEP GPU module"
+        NEP_GPU_STATUS="Failed, compile script missing"
+        restore_original_installation
+    fi
+    echo "-------------------------------------------"
+fi
+
+if [ $op_change -eq 1 ] && [ $compile_errors -eq 0 ]; then
+    echo "-------------------------------------------"
+    echo "Compiling OP module..."
+    CMP_OP_SCRIPT="${TMP_EXTRACT_DIR}/cmp_op.sh"
+    if [ -f "$CMP_OP_SCRIPT" ]; then
+        echo ">>> Executing: bash \"${CMP_OP_SCRIPT}\" \"${BASE_DIR}\" \"${VERSION}\" \"${MATPL_PREFIX}${VERSION}\" \"${CLEAN_ALL}\" \"${CPU_ONLY}\" -j\"${JOB_COUNT}\""
+        bash "${CMP_OP_SCRIPT}" "${BASE_DIR}" "${VERSION}" "${MATPL_PREFIX}${VERSION}" "${CLEAN_ALL}" "${CPU_ONLY}" -j"${JOB_COUNT}"
+        if [ $? -ne 0 ]; then
+            echo "Error: OP compilation failed"
+            compile_errors=1
+            failed_module="OP operator module"
+            OP_STATUS="Failed, original installation restored"
+            restore_original_installation
+        else
+            OP_STATUS="Updated"
+        fi
+    else
+        echo "Warning: cmp_op.sh script does not exist"
+        compile_errors=1
+        failed_module="OP operator module"
+        OP_STATUS="Failed, compile script missing"
+        restore_original_installation
+    fi
+    echo "-------------------------------------------"
+fi
+
+if [ $lmp_change -eq 1 ] && [ $compile_errors -eq 0 ]; then
+    echo "-------------------------------------------"
+    echo "Compiling LAMMPS module..."
+    CMP_LMPS_SCRIPT="${TMP_EXTRACT_DIR}/cmp_lmps.sh"
+    if [ -f "$CMP_LMPS_SCRIPT" ]; then
+        LAMMPS_DPREC_ARG=""
+        if [ "$DPREC_ENABLED" -eq 1 ]; then
+            LAMMPS_DPREC_ARG="--dprec"
+        fi
+        if ! prepare_lammps_build_backup; then
+            compile_errors=1
+            failed_module="LAMMPS module"
+            LAMMPS_STATUS="Failed, LAMMPS build backup failed"
+            restore_original_installation
+        else
+            echo ">>> Executing: bash \"${CMP_LMPS_SCRIPT}\" \"${BASE_DIR}\" \"${CPU_ONLY}\" \"${VERSION}\" \"${CLEAN_ALL}\" -j\"${JOB_COUNT}\" --gpu-arch \"${GPU_ARCH}\" ${LAMMPS_DPREC_ARG}"
+            bash "${CMP_LMPS_SCRIPT}" "${BASE_DIR}" "${CPU_ONLY}" "${VERSION}" "${CLEAN_ALL}" -j"${JOB_COUNT}" --gpu-arch "${GPU_ARCH}" ${LAMMPS_DPREC_ARG}
+            if [ $? -ne 0 ]; then
+                echo "Error: LAMMPS compilation failed"
+                compile_errors=1
+                failed_module="LAMMPS module"
+                LAMMPS_STATUS="Failed, original installation restored"
+                restore_original_installation
+            else
+                LAMMPS_STATUS="Updated"
+                cleanup_lammps_build_backup
+            fi
+        fi
+    else
+        echo "Warning: cmp_lmps.sh script does not exist"
+        compile_errors=1
+        failed_module="LAMMPS module"
+        LAMMPS_STATUS="Failed, compile script missing"
+        restore_original_installation
+    fi
+    echo "-------------------------------------------"
+fi
+
+if [ "$compile_errors" -ne 0 ]; then
+    [ "$FORTRAN_STATUS" = "Pending" ] && FORTRAN_STATUS="Skipped due to previous failure"
+    [ "$NEP_CPU_STATUS" = "Pending" ] && NEP_CPU_STATUS="Skipped due to previous failure"
+    [ "$NEP_GPU_STATUS" = "Pending" ] && NEP_GPU_STATUS="Skipped due to previous failure"
+    [ "$OP_STATUS" = "Pending" ] && OP_STATUS="Skipped due to previous failure"
+    [ "$LAMMPS_STATUS" = "Pending" ] && LAMMPS_STATUS="Skipped due to previous failure"
+    [ "$PY_STATUS" = "Updated" ] && PY_STATUS="Rolled back after failure"
+    [ "$FORTRAN_STATUS" = "Updated" ] && FORTRAN_STATUS="Rolled back after failure"
+    [ "$NEP_CPU_STATUS" = "Updated" ] && NEP_CPU_STATUS="Rolled back after failure"
+    [ "$NEP_GPU_STATUS" = "Updated" ] && NEP_GPU_STATUS="Rolled back after failure"
+    [ "$OP_STATUS" = "Updated" ] && OP_STATUS="Rolled back after failure"
+    [ "$LAMMPS_STATUS" = "Updated" ] && LAMMPS_STATUS="Rolled back after failure"
+    PIP_STATUS="Skipped due to compilation failure"
+fi
+
+# ==================== 最后执行 pwact / pwdata 更新 ====================
+if [ "$compile_errors" -eq 0 ]; then
+echo "=========================================="
+echo "Starting check and update pwact and pwdata (after all compilation)..."
+echo "=========================================="
+CMP_PIP="${TMP_EXTRACT_DIR}/cmp_pip.sh"
+echo ">>> Executing: bash \"${CMP_PIP}\" \"${TMP_EXTRACT_DIR}\" \"${BASE_DIR}\" \"${VERSION}\" \"${PWDATA_PKG}\" \"${PWACT_PKG}\" \"${CPU_ONLY}\""
+bash "${CMP_PIP}" "${TMP_EXTRACT_DIR}" "${BASE_DIR}" "${VERSION}" "${PWDATA_PKG}" "${PWACT_PKG}" "${CPU_ONLY}"
+if [ $? -ne 0 ]; then
+    PIP_STATUS="Failed"
+    package_errors=1
+    failed_module="${failed_module:-pwact/pwdata package update}"
+else
+    PIP_STATUS="Updated / Installed"
+fi
+else
+    echo "Skipping pwact/pwdata update because compilation failed."
+fi
+
+# ==================== 最终完整总结 ====================
+echo "=========================================="
+echo "Final Update Summary"
+echo "=========================================="
+echo "Python files (py)                  : $PY_STATUS"
+echo "NEP CPU module (nep_cpu)           : $NEP_CPU_STATUS"
+if [ $CPU_ONLY -eq 0 ]; then
+echo "NEP GPU module (nep)               : $NEP_GPU_STATUS"
+fi
+echo "OP operator module (op)            : $OP_STATUS"
+echo "Fortran modules (fortran)          : $FORTRAN_STATUS"
+echo "LAMMPS (lammps-2026.3)             : $LAMMPS_STATUS"
+echo "pwact package                      : $PIP_STATUS"
+echo "pwdata package                     : $PIP_STATUS"
+if [ -n "$failed_module" ]; then
+echo "Failed module                      : $failed_module"
+fi
+echo "=========================================="
+
+if [ $compile_errors -eq 0 ]; then
+    echo "Deleting backup directory $BACKUP_DIR..."
+    rm -rf "$BACKUP_DIR"
+    cleanup_lammps_build_backup
+    if [ $? -ne 0 ]; then
+        echo "Warning: Failed to delete backup directory $BACKUP_DIR"
+    fi
+else
+    echo "=========================================="
+    echo "Installation failed; original installation has been restored."
+    echo "=========================================="
+fi
+
+echo "Cleaning up temporary files..."
+rm -rf "${TMP_EXTRACT_DIR}"
+
+echo "=========================================="
+echo "Installation completion time: $(date)"
+if [ $compile_errors -eq 0 ] && [ $package_errors -eq 0 ]; then
+    echo "Status: Installation completed successfully"
+elif [ $compile_errors -eq 0 ] && [ $package_errors -ne 0 ]; then
+    echo "Status: Installation completed with package update errors"
+else
+    echo "Status: Installation failed; original installation restored"
+fi
+echo "=========================================="
+if [ $compile_errors -ne 0 ] || [ $package_errors -ne 0 ]; then
+    exit 1
+fi
+exit 0
+
+__ARCHIVE_BELOW__

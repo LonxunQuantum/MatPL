@@ -79,8 +79,11 @@ void Box::get_inverse(void)
       cpu_h[n] /= det;
     }
   } else {
-    for (int n = 9; n < 12; n++) {
-      cpu_h[n] = 1 / cpu_h[n - 9];
+    for (int n = 9; n < 18; n++) {
+      cpu_h[n] = 0.0;
     }
+    cpu_h[9] = 1.0 / cpu_h[0];
+    cpu_h[13] = 1.0 / cpu_h[4];
+    cpu_h[17] = 1.0 / cpu_h[8];
   }
 }

@@ -16,6 +16,7 @@
 #include "atom_kokkos.h"
 #include "atom_masks.h"
 #include "comm.h"
+#include "domain.h"
 #include "error.h"
 #include "force.h"
 #include "kokkos.h"
@@ -29,18 +30,37 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <cuda_runtime.h>
 
 using namespace LAMMPS_NS;
+
+namespace {
+void nepkk_mpi_allreduce_sum_double(const double* sendbuf, double* recvbuf, int count, void* context)
+{
+  MPI_Comm comm = *static_cast<MPI_Comm*>(context);
+  MPI_Allreduce(sendbuf, recvbuf, count, MPI_DOUBLE, MPI_SUM, comm);
+}
+}
 
 /* ---------------------------------------------------------------------- */
 
 template<class DeviceType>
 PairNEPKokkos<DeviceType>::PairNEPKokkos(LAMMPS *lmp) : PairNEP(lmp)
 {
+  centroidstressflag = CENTROID_AVAIL;
+  local_maxeatom = 0;
+  local_maxvatom = 0;
+  local_maxcvatom = 0;
   respa_enable = 0;
-  suffix_flag |= Suffix::KOKKOS;
 
+  restartinfo = 0;
+  manybody_flag = 1;
+  single_enable = 0;
+  one_coeff = 1;
+
+  suffix_flag |= Suffix::KOKKOS;
   kokkosable = 1;
   atomKK = (AtomKokkos *) atom;
   execution_space = ExecutionSpaceFromDevice<DeviceType>::space;
@@ -48,8 +68,8 @@ PairNEPKokkos<DeviceType>::PairNEPKokkos(LAMMPS *lmp) : PairNEP(lmp)
   datamask_modify = F_MASK | ENERGY_MASK | VIRIAL_MASK;
 
   me = comm->me;
-  h_etot_virial_global.resize(7);
-  // 这种方式可以直接输出到log.lammps中
+  h_etot_virial_global.resize(10);
+  // This can write directly to log.lammps.
   // if (comm->me == 0) {
   //   utils::logmesg(lmp, "=== PairNEPKokkos Constructor Finished ===\n");
   // }
@@ -66,8 +86,16 @@ PairNEPKokkos<DeviceType>::~PairNEPKokkos()
   if (allocated) {
     memoryKK->destroy_kokkos(k_eatom, eatom);
     memoryKK->destroy_kokkos(k_vatom, vatom);
+    memoryKK->destroy_kokkos(k_cvatom, cvatom);
   }
+  memory->destroy(setflag);
+  memory->destroy(cutsq);
   h_etot_virial_global = decltype(h_etot_virial_global)();
+  if (is_rank_0 && explrError_fp != nullptr) {
+        fclose(explrError_fp);
+        explrError_fp = nullptr;
+  }
+
   // printf("=====rank %d device %d doing ~pairnep end =====\n", rank, device_id);
   // NEP model cleanup if needed
   // nep_gpu_model.cleanup(); // Assuming NEP has a cleanup method
@@ -120,6 +148,44 @@ void PairNEPKokkos<DeviceType>::settings(int narg, char **arg)
         out_freq = utils::inumeric(FLERR, arg[++iarg], false, lmp);
     } else if (strcmp(arg[iarg], "out_file") == 0) {
         explrError_fname = arg[++iarg];
+    } else if (strcmp(arg[iarg], "kspace") == 0 || strcmp(arg[iarg], "kspace_method") == 0) {
+        kspace_method = arg[++iarg];
+        if (kspace_method != "ewald" && kspace_method != "pppm") {
+          error->all(FLERR, "pair_style matpl/nep/kk kspace must be ewald or pppm");
+        }
+    } else if (strcmp(arg[iarg], "pppm_spacing") == 0) {
+        if (iarg + 1 >= narg) {
+          error->all(FLERR, "pair_style matpl/nep/kk pppm_spacing requires one value");
+        }
+        pppm_mesh_spacing = utils::numeric(FLERR, arg[++iarg], false, lmp);
+        if (pppm_mesh_spacing <= 0.0) {
+          error->all(FLERR, "pair_style matpl/nep/kk pppm_spacing must be positive");
+        }
+    } else if (strcmp(arg[iarg], "pppm_mesh") == 0) {
+        if (iarg + 1 >= narg) {
+          error->all(FLERR, "pair_style matpl/nep/kk pppm_mesh requires friendly, power2, or 3 integer values");
+        }
+        std::string mesh_arg(arg[iarg + 1]);
+        if (mesh_arg == "friendly") {
+          pppm_mesh_mode = 1;
+          for (int d = 0; d < 3; ++d) pppm_mesh[d] = 0;
+          ++iarg;
+        } else if (mesh_arg == "power2") {
+          pppm_mesh_mode = 0;
+          for (int d = 0; d < 3; ++d) pppm_mesh[d] = 0;
+          ++iarg;
+        } else {
+          if (iarg + 3 >= narg) {
+            error->all(FLERR, "pair_style matpl/nep/kk pppm_mesh requires friendly, power2, or 3 integer values");
+          }
+          pppm_mesh_mode = 2;
+          for (int d = 0; d < 3; ++d) {
+            pppm_mesh[d] = utils::inumeric(FLERR, arg[++iarg], false, lmp);
+            if (pppm_mesh[d] <= 0) {
+              error->all(FLERR, "pair_style matpl/nep/kk pppm_mesh values must be positive");
+            }
+          }
+        }
     } 
     iarg++;    
   }
@@ -133,25 +199,40 @@ void PairNEPKokkos<DeviceType>::settings(int narg, char **arg)
   }
     
   nprocs_total = comm->nprocs;
-  // 移除硬编码device_id=0和手动cudaSetDevice
-  // Kokkos已在LAMMPS init时设置当前设备（基于 -k on g Ng）
-  // 如果NEP需要查询当前ID，可用：int device_id = Kokkos::device_id();
-  // 但通常无需手动设置，避免覆盖Kokkos
+  // Do not hard-code device_id=0 or call cudaSetDevice manually.
+  // Kokkos sets the current device during LAMMPS initialization.
+  // Querying the current CUDA device is enough for logging/bookkeeping.
   
   if (std::is_same<DeviceType, LMPDeviceType>::value) {
-    // 可选：查询并日志当前设备（调试用）
+    // Optional: query the current device for diagnostics.
     cudaGetDevice(&device_id);
     // printf("Rank %d: Using CUDA device %d (Kokkos-managed)\n", comm->me, device_id);
     rank = comm->me;
     // if (is_rank_0) {
     //   printf("Rank %d: Using CUDA device %d (Kokkos-managed)\n", comm->me, device_id);
     // }
-    // 无需 cudaSetDevice(device_id); // 已由Kokkos设置
+    // No cudaSetDevice(device_id); Kokkos already selected the device.
   }
   nep_gpu_models.resize(num_ff);
   for (int i=0; i < num_ff; i++) {
     std::string model_file = potential_files[i];
     nep_gpu_models[i].read_neptxt(model_file.c_str(), is_rank_0, comm->me, device_id, i);
+    nep_gpu_models[i].paramb.pppm_mesh_spacing = static_cast<NEP_FLOAT>(pppm_mesh_spacing);
+    nep_gpu_models[i].paramb.pppm_mesh_mode = pppm_mesh_mode;
+    for (int d = 0; d < 3; ++d) nep_gpu_models[i].paramb.pppm_mesh[d] = pppm_mesh[d];
+    if (is_rank_0 && nep_gpu_models[i].paramb.charge_mode == 2) {
+      utils::logmesg(lmp, "NEP Kokkos qNEP kspace method: " + kspace_method + "\n");
+      if (kspace_method == "pppm") {
+        utils::logmesg(lmp, "NEP Kokkos PPPM target mesh spacing: " + std::to_string(pppm_mesh_spacing) + "\n");
+        if (pppm_mesh_mode == 1) {
+          utils::logmesg(lmp, "NEP Kokkos PPPM mesh mode: friendly (2/3/5/7 FFT-friendly mesh)\n");
+        } else if (pppm_mesh_mode == 2) {
+          utils::logmesg(lmp, "NEP Kokkos PPPM mesh mode: explicit user mesh " + std::to_string(pppm_mesh[0]) + " " + std::to_string(pppm_mesh[1]) + " " + std::to_string(pppm_mesh[2]) + "\n");
+        } else {
+          utils::logmesg(lmp, "NEP Kokkos PPPM mesh mode: power2 (default, GPUMD-compatible). For large systems, use pppm_mesh friendly or explicit pppm_mesh Nx Ny Nz to reduce GPU memory.\n");
+        }
+      }
+    }
     if (i == 0) {
       cutoff = nep_gpu_models[i].paramb.rc_radial;
       cutoffsq = cutoff * cutoff;
@@ -171,10 +252,10 @@ void PairNEPKokkos<DeviceType>::coeff(int narg, char **arg)
 {
   if (!allocated) allocate();
   for (int f1 = 0; f1 < num_ff; f1++) {
-    std::vector<int> atom_type_module = nep_gpu_models[f1].element_atomic_number_list;
+    std::vector<int> atom_type_module = nep_gpu_models[f1].cpu_element_atomic_number_list;
     std::vector<int> atom_types;
     for (int ii = 2; ii < narg; ++ii) {
-      std::string element = utils::strdup(arg[ii]);  // LAMMPS提供的安全转换
+      std::string element = utils::strdup(arg[ii]);
       int temp = find_atomic_number(element);
       // int temp = std::stoi(arg[ii]);
       auto iter = std::find(atom_type_module.begin(), atom_type_module.end(), temp);   
@@ -184,8 +265,8 @@ void PairNEPKokkos<DeviceType>::coeff(int narg, char **arg)
           // model_atom_type_idx.push_back(index); 
           // atom_types.push_back(temp);
           atom_types.push_back(index);
-          // printf("=== rank %d device_id %d coeff the config atom type %d index in ff is %d\n",
-          //   rank, device_id, temp, index);
+          // printf("=== rank %d device_id %d coeff the config atom type %d index in ff is %d\n",\
+            rank, device_id, temp, index);
       }
       else
       {
@@ -221,11 +302,11 @@ void PairNEPKokkos<DeviceType>::init_style()
                            !std::is_same<DeviceType,LMPDeviceType>::value);
   request->set_kokkos_device(std::is_same<DeviceType,LMPDeviceType>::value);
 
-  // if (is_rank_0) printf("======== in init_style: neighflag = %d =========\n", neighflag);
-  // if (force->newton_pair == 0)
-  //   error->all(FLERR,"Pair style matpl/nep/kk requires newton pair on");
+  if (is_rank_0) printf("======== in init_style: neighflag = %d =========\n", neighflag);
+  if (force->newton_pair == 0)
+    error->all(FLERR, "Pair style matpl/nep/kk requires newton pair on");
   newton_pair = force->newton_pair;
-  printf("===== DEBUG: newton_pair = %d =====\n", newton_pair);
+  // printf("===== DEBUG: newton_pair = %d =====\n", newton_pair);
 }
 
 /* ----------------------------------------------------------------------
@@ -303,23 +384,15 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
 {
   eflag = eflag_in;
   vflag = vflag_in;
+  // if (neighflag == FULL)  
+  no_virial_fdotr_compute = 1;
   ev_init(eflag, vflag, 0);
   // size_t total, used, free;
   bigint ntimestep = update->ntimestep;
   bool is_devi_step = (num_ff > 1) && (ntimestep % out_freq == 0);
-  // printf("===== is_devi_step %d numff %d ntimestep %d out_freq %d========\n", is_devi_step, num_ff, ntimestep, out_freq);
-  // eflag_atom=2;
-  // printf("DEBUG rank=%d device_id=%d step=%d eflag=%d, vflag=%d, eflag_atom=%d, vflag_atom=%d vflag_global=%d\n", \
-        rank, device_id, ntimestep, eflag, vflag, eflag_atom, vflag_atom, vflag_global);
-  //eflag, vflag, eflag_atom, vflag_atom
-  // 计算eflag 总能，需要每个原子的能量，为了避免atomicadd in nep核函数，需要分别计算每个原子的能量，然后累加
-  // 计算 vfag 总的应力，需要计算每个原子的应力，然后累加
-  // 对于每原子的能量、受力、应力，先计算到一个数组中，然后需要再copy?
-  // nep_gpu_model.getGPUMemoryStats(total, used, free);
-  // printf("MB-before-0 rank=%d device_id=%d step=%d Total=%f Used=%f Free=%f (GB)\n", rank, device_id, ntimestep, total / (1024.0 * 1024.0 * 1024.0), used / (1024.0 * 1024.0 * 1024.0), free / (1024.0 * 1024.0 * 1024.0));
 
-  atomKK->sync(execution_space,X_MASK|F_MASK|TYPE_MASK); //同步原子数据到设备
-  if (eflag || vflag) atomKK->modified(execution_space,datamask_modify);
+  atomKK->sync(execution_space, X_MASK | F_MASK | TYPE_MASK);
+  if (eflag || vflag) atomKK->modified(execution_space, datamask_modify);
   else atomKK->modified(execution_space,F_MASK);
   x = atomKK->k_x.template view<DeviceType>();
   f = atomKK->k_f.template view<DeviceType>();
@@ -329,16 +402,59 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   nall = atom->nlocal + atom->nghost;
   inum = list->inum;
 
-  if (eflag_atom) {
-  memoryKK->destroy_kokkos(k_eatom,eatom);
-  memoryKK->create_kokkos(k_eatom,eatom,maxeatom,"pair:eatom");
-  d_eatom = k_eatom.view<DeviceType>();
+  for (const auto &model : nep_gpu_models) {
+    if (nlocal > model.max_nlocal) {
+      const std::int64_t radial_neighbor_count =
+        static_cast<std::int64_t>(nlocal) *
+        static_cast<std::int64_t>(model.paramb.MN_radial);
+      if (radial_neighbor_count > std::numeric_limits<int>::max()) {
+        error->one(
+          FLERR,
+          "The atom count on a single GPU is too large (current local atom count: {}) and "
+          "exceeds the supported memory capacity. Reduce the number of atoms per GPU or use "
+          "MatPL-pro.",
+          nlocal);
+      }
+    }
   }
 
-  if (vflag_either) {
-    memoryKK->destroy_kokkos(k_vatom,vatom);
-    memoryKK->create_kokkos(k_vatom,vatom,maxvatom,"pair:vatom");
+  // printf("DEBUG rank=%d device_id=%d step=%d eflag=%d, vflag=%d, vflag_fdotr=%d eflag_atom=%d, vflag_atom=%d cvflag_atom=%d vflag_global=%d vflag_either %d centroidstressflag=%d atom->nmax %d maxeatom %d->%d maxvatom %d->%d maxcvatom %d->%d nlocal %d inum %d nall %d neighbor->includegroup %d no_virial_fdotr_compute %d lmp->kokkos->neighflag %d \n", \
+        rank, device_id, ntimestep, eflag, vflag, vflag_fdotr, eflag_atom, vflag_atom, cvflag_atom, vflag_global, vflag_either, centroidstressflag, atom->nmax, maxeatom, local_maxeatom, maxvatom, local_maxvatom, maxcvatom, local_maxcvatom, nlocal, inum, nall, neighbor->includegroup, no_virial_fdotr_compute, lmp->kokkos->neighflag);
+  // printf("======compute before k_eatom.extent(0) %d k_vatom.extent(0) %d k_cvatom.extent(0) %d ======\n",k_eatom.extent(0), k_vatom.extent(0), k_cvatom.extent(0));
+  
+  cur_atom_max = max(cur_atom_max, atom->nmax);
+  double *virial_per_atom_ptr = nullptr;
+  double *cvirial_per_atom_ptr = nullptr;
+
+  if (eflag_atom) {
+    if (local_maxeatom < cur_atom_max) local_maxeatom = cur_atom_max;
+    memoryKK->destroy_kokkos(k_eatom, eatom);
+    memoryKK->create_kokkos(k_eatom, eatom, local_maxeatom, "pair:eatom");
+    d_eatom = k_eatom.view<DeviceType>();
+  }
+
+  if (cvflag_atom) {
+    if (local_maxcvatom < cur_atom_max) local_maxcvatom = cur_atom_max;
+    memoryKK->destroy_kokkos(k_cvatom, cvatom);
+    memoryKK->create_kokkos(k_cvatom, cvatom, local_maxcvatom, "pair:cvatom");
+    d_cvatom = k_cvatom.view<DeviceType>();
+    Kokkos::deep_copy(d_cvatom, 0.0);
+    cvirial_per_atom_ptr = d_cvatom.data();
+  } else if (vflag_atom) {
+    if (local_maxvatom < cur_atom_max) local_maxvatom = cur_atom_max;
+    memoryKK->destroy_kokkos(k_vatom, vatom);
+    memoryKK->create_kokkos(k_vatom, vatom, local_maxvatom, "pair:vatom");
     d_vatom = k_vatom.view<DeviceType>();
+    Kokkos::deep_copy(d_vatom, 0.0);
+    virial_per_atom_ptr = d_vatom.data();
+  } else if (vflag_global) {
+    if (local_maxvatom_work < cur_atom_max) {
+      local_maxvatom_work = cur_atom_max;
+      k_vatom_work = DAT::tdual_virial_array("pair:vatom_work", local_maxvatom_work);
+    }
+    d_vatom_work = k_vatom_work.view<DeviceType>();
+    Kokkos::deep_copy(d_vatom_work, 0.0);
+    virial_per_atom_ptr = d_vatom_work.data();
   }
   
   if (num_ff > 1) {
@@ -369,18 +485,22 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   // printf("ntimestep %d rank=%d device_id=%d nranks=%d | (e,v,ee,eg,ea,ve,vg,va)=(%d,%d,%d,%d,%d,%d,%d,%d) | inum=%d, nall=%d | maxeatom=%d, maxvatom=%d | lmpneigh=%dX%d | xsize=%d X %d | fsize=%d X %d | vsize=%d X %d paramb-2b %d 3b %d\n", \
        ntimestep, rank, device_id, nprocs_total, eflag, vflag, eflag_either, eflag_global, eflag_atom, vflag_either, vflag_global, vflag_atom, inum, nall, maxeatom, maxvatom, num_neighs, max_neighs, x.extent(0), x.extent(1), f.extent(0), f.extent(1), d_vatom.extent(0), d_vatom.extent(1), nep_gpu_models[0].paramb.n_max_radial, nep_gpu_models[0].paramb.n_max_angular);
   // (e,v,ee,eg,ea,ve,vg,va)=(1,2,1,1,0,0,0,0) 
-  // compute pe_atom all pe/atom 开启后 maxeatom 才不为0，在dump步 eflag_atom 为2，其他步为0
+  // maxeatom is nonzero when compute pe/atom is enabled.
   // (e,v,ee,eg,ea,ve,vg,va)=(3,2,3,1,2,0,0,0)
 
   need_dup = lmp->kokkos->need_dup<DeviceType>();
   if (need_dup) {
-    dup_f     = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(f);
-    dup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_eatom);
-    dup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_vatom);
+    dup_f = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(f);
+    if (eflag_atom)
+      dup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_eatom);
+    if (vflag_atom)
+      dup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterDuplicated>(d_vatom);
   } else {
-    ndup_f     = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(f);
-    ndup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_eatom);
-    ndup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_vatom);
+    ndup_f = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(f);
+    if (eflag_atom)
+      ndup_eatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_eatom);
+    if (vflag_atom)
+      ndup_vatom = Kokkos::Experimental::create_scatter_view<Kokkos::Experimental::ScatterSum, Kokkos::Experimental::ScatterNonDuplicated>(d_vatom);
   }
   copymode = 1;
   // EV_FLOAT ev;
@@ -394,31 +514,45 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
 
   // Invoke NEP computation
   // printf("=========nep start compute force ==========\n");
-  if (!is_devi_step) {//增加了多模型偏差值计算，不涉及多模型则nep_gpu_models数组只有1个模型
+  double box_h[9] = {
+    domain->xprd, domain->xy,   domain->xz,
+    0.0,          domain->yprd, domain->yz,
+    0.0,          0.0,          domain->zprd
+  };
+  MPI_Comm nepkk_mpi_comm = world;
+  if (!is_devi_step) {
     nep_gpu_models[0].compute(
       eflag_global,
       eflag_atom, 
       vflag_either,
       vflag_global,
       vflag_atom,
+      cvflag_atom,
       nall,                    // nall = nlocal + nghost
       inum,                    // inum = number of local atoms
       nlocal,                  // nlocal
       max_neighs,
       num_neighs,
-      const_cast<int*>(reinterpret_cast<const int*>(type.data())),           // 原子类型
+      const_cast<int*>(reinterpret_cast<const int*>(type.data())),
       const_cast<int*>(reinterpret_cast<const int*>(d_ilist.data())),        // ilist
       const_cast<int*>(reinterpret_cast<const int*>(d_numneigh.data())),     // numneigh
       const_cast<int*>(reinterpret_cast<const int*>(d_neighbors.data())),    // neighbors
-      const_cast<double*>(reinterpret_cast<const double*>(x.data())),        // 位置
-      // const_cast<double*>(reinterpret_cast<const double*>(d_eatom.data())),        // 位置
-      // d_eatom.data(),                                 // 原子能量输出
+      const_cast<double*>(reinterpret_cast<const double*>(x.data())),
+      // const_cast<double*>(reinterpret_cast<const double*>(d_eatom.data())),
+      // d_eatom.data(),
       // const_cast<double*>(reinterpret_cast<double*>(d_eatom.data())),
       d_eatom.data(),
       nullptr,
-      f.data(),                                       // 力输出 如果num_ff 大于0，只输出到full_f
-      nullptr,                                        // 如果 num_ff 大于0，输出到f 和 full_f
-      d_vatom.data(),                                 // 总维里输出
+      f.data(),                                       // force output
+      nullptr,
+      virial_per_atom_ptr,                           // 6-component per-atom virial or internal work buffer
+      cvirial_per_atom_ptr,                          // 9-component centroid virial
+      box_h,
+      kspace_method.c_str(),
+      static_cast<long long>(atom->natoms),
+      comm->nprocs,
+      nepkk_mpi_allreduce_sum_double,
+      &nepkk_mpi_comm,
       h_etot_virial_global.data()
     );
     // printf("=========end start compute force  etot %f ==========\n", h_etot_virial_global[0]);
@@ -437,25 +571,34 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         vflag_either,
         vflag_global,
         vflag_atom,
+        cvflag_atom,
         nall,                    // nall = nlocal + nghost
         inum,                    // inum = number of local atoms
         nlocal,                  // nlocal
         max_neighs,
         num_neighs,
-        const_cast<int*>(reinterpret_cast<const int*>(type.data())),           // 原子类型
+        const_cast<int*>(reinterpret_cast<const int*>(type.data())),
         const_cast<int*>(reinterpret_cast<const int*>(d_ilist.data())),        // ilist
         const_cast<int*>(reinterpret_cast<const int*>(d_numneigh.data())),     // numneigh
         const_cast<int*>(reinterpret_cast<const int*>(d_neighbors.data())),    // neighbors
-        const_cast<double*>(reinterpret_cast<const double*>(x.data())),        // 位置
-        // const_cast<double*>(reinterpret_cast<const double*>(d_eatom.data())),        // 位置
-        // d_eatom.data(),                                 // 原子能量输出
+        const_cast<double*>(reinterpret_cast<const double*>(x.data())),
+        // const_cast<double*>(reinterpret_cast<const double*>(d_eatom.data())),
+        // d_eatom.data(),
         // const_cast<double*>(reinterpret_cast<double*>(d_eatom.data())),
         d_eatom.data(),
         full_e_ptr,
-        f.data(),                                       // 力输出 如果num_ff 大于0，只输出到full_f
-        full_f_ptr,                                  // 如果 num_ff 大于0，输出到f 和 full_f
-        d_vatom.data(),                                 // 总维里输出
+        f.data(),                                       // force output
+        full_f_ptr,
+        virial_per_atom_ptr,                           // 6-component per-atom virial or internal work buffer
+        cvirial_per_atom_ptr,                          // 9-component centroid virial
+        box_h,
+        kspace_method.c_str(),
+        static_cast<long long>(atom->natoms),
+        comm->nprocs,
+        nepkk_mpi_allreduce_sum_double,
+        &nepkk_mpi_comm,
         h_etot_virial_global.data()
+        // neighbor_rebuilt
       );
       // printf("=========end start compute force  etot %f ==========\n", h_etot_virial_global[0]);
       // Wait for NEP computation to complete
@@ -466,11 +609,12 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   // nep_gpu_model.getGPUMemoryStats(total, used, free);
   // printf("MB-after-0 rank=%d device_id=%d step=%d Total=%f Used=%f Free=%f (GB)\n", rank, device_id, ntimestep, total / (1024.0 * 1024.0 * 1024.0), used / (1024.0 * 1024.0 * 1024.0), free / (1024.0 * 1024.0 * 1024.0));
   if (is_devi_step) {
-    comm_reverse = 3 * num_ff;                 // 设置per-atom doubles数
+    reverse_comm_mode = REVERSE_DEVIATION_FORCE;
+    comm_reverse = 3 * num_ff;
     auto d_full_f = k_full_f.view<DeviceType>();
     auto d_full_e = k_full_e.view<DeviceType>();
     auto h_temp = Kokkos::create_mirror_view(d_full_f);
-    Kokkos::deep_copy(h_temp, d_full_f);  // 先拷贝当前 device 到临时 host
+    Kokkos::deep_copy(h_temp, d_full_f);
     // printf("===== DEBUG: temp host BEFORE reverse_comm =====\n");
     // for (int ff = 0; ff < num_ff; ++ff) {
     //   printf("force temp host [ff %d]:\n", ff);
@@ -480,13 +624,14 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     //            h_temp(base_idx), h_temp(base_idx+1), h_temp(base_idx+2));
     //   }
     // }
-    // 调用 reverse_comm（内部会调用 pack/unpack，使用 h_temp 作为数据源）
-    comm->reverse_comm(this);  // 调用pack/unpack
-    comm_reverse = 0;                          // 重置
+    // reverse_comm calls pack/unpack below.
+    comm->reverse_comm(this);  // 璋冪敤pack/unpack
+    comm_reverse = 0;                          // 閲嶇疆
+    reverse_comm_mode = REVERSE_NONE;
 
     auto h_final_f = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_full_f);
     auto h_final_e = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_full_e);
-    atomKK->sync(Host, datamask_read | datamask_modify); // 确保x, f, type, eatom同步
+    atomKK->sync(Host, datamask_read | datamask_modify);
     auto h_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), x);
     auto h_f = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), f);
     auto h_eatom = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_eatom);
@@ -530,12 +675,45 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         glb_avg_f_err = 0.0;
         glb_avg_ei_err = 0.0;
     }
+    if (is_rank_0) {
+      fprintf(explrError_fp, "%9lld %16.9f %16.9f %16.9f %16.9f %16.9f %16.9f\n",
+              update->ntimestep,
+              glb_avg_f_err, glb_min_f_err, glb_max_f_err,
+              glb_avg_ei_err, glb_min_ei_err, glb_max_ei_err);
+      fflush(explrError_fp);
+    }
+  }
 
-    fprintf(explrError_fp, "%9lld %16.9f %16.9f %16.9f %16.9f %16.9f %16.9f\n",
-            update->ntimestep,
-            glb_avg_f_err, glb_min_f_err, glb_max_f_err,
-            glb_avg_ei_err, glb_min_ei_err, glb_max_ei_err);
-    fflush(explrError_fp);
+  if (cvflag_atom) {
+    k_cvatom.template modify<DeviceType>();
+    k_cvatom.sync<LMPHostType>();
+
+    // auto h_cv = k_cvatom.h_view;
+    // for (int i = 0; i < maxcvatom; ++i) {
+    //   cvatom[i] = h_cv.data() + i * 9;
+    // }
+
+    // for (int i = 0; i < nall; ++i) {
+    //   cvatom[i][0] = h_cv.data()[i + 0 * nall];  // xx
+    //   cvatom[i][1] = h_cv.data()[i + 1 * nall];  // yy
+    //   cvatom[i][2] = h_cv.data()[i + 2 * nall];  // zz
+    //   cvatom[i][3] = h_cv.data()[i + 3 * nall];  // xy
+    //   cvatom[i][4] = h_cv.data()[i + 4 * nall];  // xz
+    //   cvatom[i][5] = h_cv.data()[i + 5 * nall];  // yz
+    //   cvatom[i][6] = h_cv.data()[i + 6 * nall];  // yx
+    //   cvatom[i][7] = h_cv.data()[i + 7 * nall];  // zx
+    //   cvatom[i][8] = h_cv.data()[i + 8 * nall];  // zy
+    // }
+
+    // for (int i = 0; i < std::min(10, nlocal); ++i) {
+    //   printf(" local cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
+    // }
+    // for (int i = nall-11; i < nall; ++i) {
+    //   printf(" ghost cvatom[%6d]: %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+    //          i, cvatom[i][0], cvatom[i][1], cvatom[i][2], cvatom[i][3], cvatom[i][4], cvatom[i][5], cvatom[i][6], cvatom[i][7], cvatom[i][8]);
+    // }
+
   }
 
   if (need_dup)
@@ -559,14 +737,14 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     k_eatom.template sync<LMPHostType>();
   }
 
-  if (vflag_either) {
+  if (vflag_atom) {
     if (need_dup)
       Kokkos::Experimental::contribute(d_vatom, dup_vatom);
     k_vatom.template modify<DeviceType>();
     k_vatom.template sync<LMPHostType>();
   }
 
-  if (vflag_fdotr) pair_virial_fdotr_compute(this);
+  // if (vflag_fdotr) pair_virial_fdotr_compute(this); error in many body force.
 
   copymode = 0;
   // free duplicated memory
@@ -575,18 +753,70 @@ void PairNEPKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     dup_eatom = decltype(dup_eatom)();
     dup_vatom = decltype(dup_vatom)();
   }  
-  // 同步MPI进程，确保所有rank完成计算
+  // Synchronize MPI ranks after computation.
   MPI_Barrier(world);
 }
 
-// pack_reverse_comm：使用临时 mirror 拷贝 device 数据
+template<class DeviceType>
+void PairNEPKokkos<DeviceType>::qnep_bec_atom(double **array, int nmax)
+{
+  if (nep_gpu_models.empty() || !nep_gpu_models[0].has_charge_bec()) {
+    error->all(FLERR, "compute qnep/bec/atom requires a NEP-charge pair_style matpl/nep/kk potential");
+  }
+  if (nall <= 0 || nlocal < 0 || inum <= 0) {
+    error->all(FLERR, "compute qnep/bec/atom was invoked before pair_style matpl/nep/kk computed this step");
+  }
+  if (nmax < nlocal) {
+    error->all(FLERR, "compute qnep/bec/atom internal array is smaller than atom->nlocal");
+  }
+
+  nep_gpu_models[0].compute_bec(
+    inum,
+    nlocal,
+    nall,
+    d_neighbors.extent(0),
+    const_cast<int*>(reinterpret_cast<const int*>(d_ilist.data())),
+    const_cast<int*>(reinterpret_cast<const int*>(d_numneigh.data())),
+    const_cast<int*>(reinterpret_cast<const int*>(d_neighbors.data())));
+  Kokkos::fence();
+
+  h_bec_nep_float.resize(nall * 9);
+  h_bec_reverse.resize(nall * 9);
+  nep_gpu_models[0].copy_bec_to_host(h_bec_nep_float.data(), nall);
+  for (int i = 0; i < nall * 9; ++i) {
+    h_bec_reverse[i] = static_cast<double>(h_bec_nep_float[i]);
+  }
+
+  reverse_comm_mode = REVERSE_BEC;
+  comm_reverse = 9;
+  comm->reverse_comm(this);
+  comm_reverse = 0;
+  reverse_comm_mode = REVERSE_NONE;
+
+  for (int i = 0; i < nlocal; ++i) {
+    for (int d = 0; d < 9; ++d) {
+      array[i][d] = h_bec_reverse[i + nall * d];
+    }
+  }
+}
+
+// pack_reverse_comm: pack either BEC values or model-deviation forces.
 template<class DeviceType>
 int PairNEPKokkos<DeviceType>::pack_reverse_comm(int n, int first, double *buf)
 {
-  // 获取 device 视图（临时）
+  if (reverse_comm_mode == REVERSE_BEC) {
+    int m = 0;
+    const int last = first + n;
+    for (int i = first; i < last; ++i) {
+      for (int d = 0; d < 9; ++d) {
+        buf[m++] = h_bec_reverse[i + nall * d];
+      }
+    }
+    return m;
+  }
+
   auto d_full_f = k_full_f.view<DeviceType>();
 
-  // 强制拷贝 device → host（绕过 sync 问题）
   auto h_temp = Kokkos::create_mirror_view(d_full_f);
   Kokkos::deep_copy(h_temp, d_full_f);
 
@@ -604,18 +834,26 @@ int PairNEPKokkos<DeviceType>::pack_reverse_comm(int n, int first, double *buf)
   return m;
 }
 
-// unpack_reverse_comm：先累加到临时 host mirror，再拷贝回 device
+// unpack_reverse_comm: accumulate data received from ghost owners.
 template<class DeviceType>
 void PairNEPKokkos<DeviceType>::unpack_reverse_comm(int n, int *list, double *buf)
 {
-  // 获取 device 视图
+  if (reverse_comm_mode == REVERSE_BEC) {
+    int m = 0;
+    for (int i = 0; i < n; ++i) {
+      const int j = list[i];
+      for (int d = 0; d < 9; ++d) {
+        h_bec_reverse[j + nall * d] += buf[m++];
+      }
+    }
+    return;
+  }
+
   auto d_full_f = k_full_f.view<DeviceType>();
 
-  // 先把当前 device 数据拷贝到临时 host（保留原始值）
   auto h_temp = Kokkos::create_mirror_view(d_full_f);
   Kokkos::deep_copy(h_temp, d_full_f);
 
-  // 累加其他 rank 贡献到临时 host
   int m = 0;
   for (int i = 0; i < n; ++i) {
     int j = list[i];
@@ -635,8 +873,6 @@ std::tuple<double, double, double, double, double, double>
 PairNEPKokkos<DeviceType>::calc_max_error(const int* ilist, const double* h_full_f, const double* h_full_e, const int num_ff, const int inum, const int nlocal, const int nall, const int rank)
 {
     double num_ff_inv = 1.0 / num_ff;
-    // 注意索引，要用 inum 去索引原子
-    // 1. 计算所有模型的平均力 f_ave 和平均能量 ei_ave（只对 local atoms）
     std::vector<double> f_ave(inum * 3, 0.0);
     std::vector<double> ei_ave(inum, 0.0);
     int i_index = 0;
@@ -646,7 +882,7 @@ PairNEPKokkos<DeviceType>::calc_max_error(const int* ilist, const double* h_full
         int base_idx_f = ff * nall * 3 + i_index * 3;
         int base_idx_e = ff * nlocal + i_index;
 
-        f_ave[i * 3 + 0] += h_full_f[base_idx_f + 0];// 结果不用按照local存
+        f_ave[i * 3 + 0] += h_full_f[base_idx_f + 0];
         f_ave[i * 3 + 1] += h_full_f[base_idx_f + 1];
         f_ave[i * 3 + 2] += h_full_f[base_idx_f + 2];
 
@@ -655,7 +891,6 @@ PairNEPKokkos<DeviceType>::calc_max_error(const int* ilist, const double* h_full
       }
     }
 
-    // 求平均
     for (int i = 0; i < inum * 3; ++i) {
         f_ave[i] *= num_ff_inv;
     }
@@ -663,12 +898,11 @@ PairNEPKokkos<DeviceType>::calc_max_error(const int* ilist, const double* h_full
         ei_ave[i] *= num_ff_inv;
     }
 
-    // 2. 计算每个模型的偏差（平方和用于后续 rms）
-    std::vector<double> f_err_sq_sum(inum, 0.0);   // 每个原子的力平方偏差和（用于均方根）
-    std::vector<double> ei_err_sq_sum(inum, 0.0);  // 每个原子的能量平方偏差和
+    std::vector<double> f_err_sq_sum(inum, 0.0);
+    std::vector<double> ei_err_sq_sum(inum, 0.0);
 
-    double avg_f_err = 0.0;   // 用于计算平均力误差
-    double avg_ei_err = 0.0;  // 用于计算平均能量误差
+    double avg_f_err = 0.0;
+    double avg_ei_err = 0.0;
 
     double min_f_err = 1e9, max_f_err = 0.0;
     double min_ei_err = 1e9, max_ei_err = 0.0;

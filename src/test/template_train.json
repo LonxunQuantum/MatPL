@@ -50,15 +50,14 @@
             "number_node": 1,
             "gpu_per_node": 1,
             "cpu_per_node": 1,
-            "queue_name": "3080ti,new3080ti,q4,3090,4090",
+            "queue_name": "4090",
             "custom_flags": [
             ],
             "source_list": [
-                "/data/home/wuxingxing/pack/v2pack/gpuinstall/MatPL-2025.3/matpl-env.sh"
+                "/data/home/wuxingxing/pack/pack-2026.3/gpu-install/MatPL-2026.3/matpl-env.sh"
             ],
             "module_list": [
-                "cuda/11.8-share",
-                "intel/2020"
+                "cuda/12.4-share"
             ],
             "env_list": [
             ]
@@ -75,11 +74,10 @@
             "custom_flags": [
             ],
             "source_list": [
-                "/data/home/wuxingxing/pack/v2pack/gpuinstall/MatPL-2025.3/matpl-env.sh"
+                "/data/home/wuxingxing/pack/pack-2026.3/gpu-install/MatPL-2026.3/matpl-env.sh"
             ],
             "module_list": [
-                "cuda/11.8-share",
-                "intel/2020"
+                "cuda/12.4-share"
             ],
             "env_list": [
             ]
@@ -116,15 +114,15 @@
             "custom_flags": [
             ],
             "source_list": [
-                "/data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh"
+                "/data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh",
+                "/data/home/wuxingxing/xcode/qnep-op/env.sh"
             ],
             "module_list": [
                 "intel/2020",
                 "cuda/11.8-share"
             ],
             "env_list": [
-                "conda activate matpl-2025.3",
-                "source /data/home/wuxingxing/codespace/MatPL-2025.3-sharemem/env.sh"
+                "conda activate matpl-2026.3"
             ]
         },
         {
@@ -140,14 +138,14 @@
             ],
             "source_list": [
                 "/data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh",
-                "/data/home/wuxingxing/codespace/MatPL-2025.3-sharemem/env.sh"
+                "/data/home/wuxingxing/xcode/qnep-op/env.sh"
             ],
             "_module_list": [
                 "intel/2020",
                 "cuda/11.8-share"
             ],
             "env_list": [
-                "conda activate matpl-2025.3"
+                "conda activate matpl-2026.3"
             ]
         },
         {
@@ -206,14 +204,14 @@
         
     ],
 
-    "work_dir": "./test_workdir_offcpu",
+    "work_dir": "./test_workdir_offgpu-cpu",
     "work_list": [
         {
             "_work_type":"mcloud envs(gpu and cpu) for DP, NEP",
-            "envs":[4],
+            "envs":[2,3],
             "epochs":[1,1,1],
-            "train_inputs":[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,13,14,15,16,17,18,19,20,21,22,23,24],
-            "_train_inputs":[6, 7, 8, 9, 11, 12,13,14,15,16,17,18,19,20,21,22,23,24]
+            "_train_inputs":[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,13,14,15,16,17,18,19,20,21,22,23,24],
+            "train_inputs":[6, 7, 8, 9, 11, 12,13,14,15,16,17,18,19,20,21,22,23,24]
         }
     ]
 }

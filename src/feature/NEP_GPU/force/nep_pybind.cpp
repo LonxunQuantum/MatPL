@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include "nep.cuh"
+#include <string>
 
 namespace py = pybind11;
 
@@ -14,7 +15,8 @@ PYBIND11_MODULE(nep_gpu, m) {
         .def("inference", [](NEP& self, 
                                   py::array_t<int> itype_cpu, 
                                   py::array_t<double> box_cpu, 
-                                  py::array_t<double> position_cpu) {
+                                  py::array_t<double> position_cpu,
+                                  const std::string& kspace_method) {
             // 获取 NumPy 数组的指针
             auto itype_ptr = itype_cpu.mutable_data();
             auto box_ptr = box_cpu.mutable_data();
@@ -22,19 +24,23 @@ PYBIND11_MODULE(nep_gpu, m) {
             // 调用 NEP 的 inference 方法
             int N = itype_cpu.size();
             // printf("=========input N is %d =====\n", N);
-            self.inference(N, itype_ptr, box_ptr, position_ptr);
+            self.inference(N, itype_ptr, box_ptr, position_ptr, kspace_method.c_str());
             size_t potential_size = self.nep_data.cpu_potential_per_atom.size();
             size_t force_size = self.nep_data.cpu_force_per_atom.size();
             size_t virial_size = self.nep_data.cpu_total_virial.size();
+            size_t charge_size = self.nep_data.cpu_charge.size();
+            size_t bec_size = self.nep_data.cpu_bec.size();
             // std::vector<size_t> force_shape = {force_size/3, 3};
             return py::make_tuple(
                 py::array_t<double>(potential_size, self.nep_data.cpu_potential_per_atom.data()),
                 py::array_t<double>(force_size, self.nep_data.cpu_force_per_atom.data()),
-                py::array_t<double>(virial_size, self.nep_data.cpu_total_virial.data())
+                py::array_t<double>(virial_size, self.nep_data.cpu_total_virial.data()),
+                py::array_t<float>(charge_size, self.nep_data.cpu_charge.data()),
+                py::array_t<float>(bec_size, self.nep_data.cpu_bec.data())
             );
         }, 
         py::arg("itype_cpu"), 
         py::arg("box_cpu"), 
-        py::arg("position_cpu"));
+        py::arg("position_cpu"),
+        py::arg("kspace_method") = "ewald");
 }
-

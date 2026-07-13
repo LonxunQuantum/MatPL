@@ -44,7 +44,7 @@ class KFOptimizerWrapper:
                 is_calc_f=False,
             )
         elif train_type == "NEP":
-            Etot_predict, _, _, _, _ = self.model(
+            Etot_predict, _, _, _, _, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],
@@ -115,6 +115,106 @@ class KFOptimizerWrapper:
         self.optimizer.step(error)
         return Etot_predict
 
+    def update_charge(
+        self, inputs: list, Charge_label: torch.Tensor, update_prefactor: float = 1, train_type = "NEP"
+    ) -> torch.Tensor:
+        if train_type != "NEP":
+            raise Exception("Error! charge KF update is only realized for NEP!")
+
+        Charge_label = Charge_label.reshape(-1, 1)
+        Etot_predict, _, _, _, _, Charge_predict, _ = self.model(
+            inputs[0],
+            inputs[1],
+            inputs[2],
+            inputs[3],
+            inputs[4],
+            inputs[5],
+            inputs[6],
+            inputs[7],
+            inputs[8],
+            inputs[9],
+            is_calc_f=False,
+            charge_label=Charge_label,
+        )
+        if Charge_predict is None:
+            return None
+
+        natoms_sum = int(inputs[0].shape[0] / inputs[6].shape[0])
+        self.optimizer.set_grad_prefactor(natoms_sum)
+        self.optimizer.zero_grad()
+
+        bs = Charge_label.shape[0]
+        error = Charge_label - Charge_predict
+        error = error / natoms_sum
+        mask = error < 0
+
+        error = error * update_prefactor
+        error[mask] = -1 * error[mask]
+        error = error.mean()
+
+        _Charge_predict = update_prefactor * Charge_predict
+        _Charge_predict[mask] = -1.0 * _Charge_predict[mask]
+        (_Charge_predict.sum() + Etot_predict.sum() * 0).backward(retain_graph=True)
+        error = error * math.sqrt(bs)
+        self.optimizer.step(error)
+        return Charge_predict
+
+    def update_bec(
+        self, inputs: list, BEC_label: torch.Tensor, update_prefactor: float = 1, train_type = "NEP"
+    ) -> torch.Tensor:
+        if train_type != "NEP":
+            raise Exception("Error! BEC KF update is only realized for NEP!")
+
+        bec_mask = BEC_label[:, 0] > -1e6
+        if bec_mask.any().item() is False:
+            return None
+
+        natoms_sum = int(inputs[0].shape[0] / inputs[6].shape[0])
+        valid_indices = torch.nonzero(bec_mask, as_tuple=False).reshape(-1).detach().cpu().numpy()
+        atoms_selected = min(self.atoms_selected, len(valid_indices))
+        atoms_per_group = min(self.atoms_per_group, atoms_selected)
+        if atoms_selected == 0 or atoms_per_group == 0:
+            return None
+        atoms_selected = (atoms_selected // atoms_per_group) * atoms_per_group
+        if atoms_selected == 0:
+            atoms_selected = atoms_per_group
+        sampled = np.random.choice(valid_indices, atoms_selected, replace=False).reshape(-1, atoms_per_group)
+
+        self.optimizer.set_grad_prefactor(natoms_sum * atoms_per_group * 9)
+        BEC_predict = None
+        bs = inputs[6].shape[0]
+        for index_list in sampled:
+            self.optimizer.zero_grad()
+            index_tensor = torch.as_tensor(index_list, dtype=torch.long, device=BEC_label.device)
+            Etot_predict, _, _, _, _, _, BEC_predict = self.model(
+                inputs[0],
+                inputs[1],
+                inputs[2],
+                inputs[3],
+                inputs[4],
+                inputs[5],
+                inputs[6],
+                inputs[7],
+                inputs[8],
+                inputs[9],
+                is_calc_f=False,
+                charge_label=inputs[10],
+            )
+            if BEC_predict is None:
+                return None
+            error_tmp = BEC_label[index_tensor] - BEC_predict[index_tensor]
+            error_tmp = update_prefactor * error_tmp
+            mask = error_tmp < 0
+            error_tmp[mask] = -1 * error_tmp[mask]
+            error = error_tmp.mean()
+
+            tmp_bec_predict = BEC_predict[index_tensor] * update_prefactor
+            tmp_bec_predict[mask] = -1.0 * tmp_bec_predict[mask]
+            (tmp_bec_predict.sum() + Etot_predict.sum() * 0).backward(retain_graph=True)
+            error = error * math.sqrt(bs)
+            self.optimizer.step(error)
+        return BEC_predict
+
     def update_egroup(
         self, inputs: list, Egroup_label: torch.Tensor, update_prefactor: float = 1, train_type = "DP"
     ) -> None:
@@ -132,7 +232,7 @@ class KFOptimizerWrapper:
                 is_calc_f=False,
             )
         elif train_type == "NEP":
-            _, _, _, Egroup_predict, _ = self.model(
+            _, _, _, Egroup_predict, _, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],
@@ -227,7 +327,7 @@ class KFOptimizerWrapper:
                 inputs[5]
             )
         elif train_type == "NEP":
-            Etot_predict, _, _, _, Virial_predict = self.model(
+            Etot_predict, _, _, _, Virial_predict, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],
@@ -355,7 +455,7 @@ class KFOptimizerWrapper:
                     inputs[0], inputs[1], inputs[2], inputs[3], 0, inputs[4], inputs[5]
                 )
             elif train_type == "NEP":
-                Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict = self.model(
+                Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, _, _ = self.model(
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6], inputs[7], 0, inputs[8], inputs[9]
                 )
             elif train_type == "NN":  # nn training
@@ -414,7 +514,7 @@ class KFOptimizerWrapper:
                 is_calc_f=False,
             )
         elif train_type == "NEP":
-            _, Ei_predict, _, _, _ = self.model(
+            _, Ei_predict, _, _, _, _, _ = self.model(
                 inputs[0],
                 inputs[1],
                 inputs[2],

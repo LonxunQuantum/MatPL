@@ -83,14 +83,23 @@ class FittingNet(nn.Module):
         i = len(self.network_size) - 1
         if from_nep_txt:
             wij = torch.from_numpy(nep_txt_param[2])
-            bias_init = nep_txt_param[3] * torch.ones(1, self.network_size[i]) # torch.ones(1)
+            bias_value = torch.as_tensor(nep_txt_param[3], dtype=wij.dtype)
+            if bias_value.ndim == 0:
+                bias_init = bias_value * torch.ones(1, self.network_size[i], dtype=wij.dtype)
+            else:
+                bias_init = bias_value.reshape(1, self.network_size[i]).to(dtype=wij.dtype)
         else:
             wij = torch.randn(self.network_size[i-1], self.network_size[i])
             normal(wij, mean=0, std=(1.0 / np.sqrt(self.network_size[i-1] + self.network_size[i])))
 
             if self.last_bias:
                 bias_init = torch.randn(1, self.network_size[i])
-                normal(bias_init, mean=ener_shift, std=1.0)
+                normal(bias_init, mean=0.0, std=1.0)
+                ener_shift_tensor = torch.as_tensor(ener_shift, dtype=bias_init.dtype)
+                if ener_shift_tensor.ndim == 0:
+                    bias_init += ener_shift_tensor
+                else:
+                    bias_init += ener_shift_tensor.reshape(1, self.network_size[i])
         
         if self.last_bias:
             self.layers.append(LayerModule(wij, bias_init, None))
@@ -158,6 +167,117 @@ class FittingNet(nn.Module):
                 else:
                     x = torch.matmul(x, layer.weight)
         return x
+
+
+class QNEPFittingNet(nn.Module):
+
+    def __init__(self,
+                 network_size: List[int],
+                 bias: bool,
+                 resnet_dt: bool,
+                 activation: str,
+                 input_dim: int,
+                 ener_shift: float,
+                 charge_mode: int,
+                 magic = False,
+                 nep_txt_param: List[np.array]=None,
+                 last_bias:bool=True):
+        super(QNEPFittingNet, self).__init__()
+        self.network_size = [input_dim] + network_size
+        self.bias_flag = bias
+        self.last_bias = last_bias
+        self.resnet_dt_flag = resnet_dt
+        self.activation = torch.tanh if activation == "tanh" else None
+        self.charge_mode = charge_mode
+        self.output_num = 2
+
+        self.layers = nn.ModuleList()
+        from_nep_txt = nep_txt_param is not None
+        for i in range(1, len(self.network_size)):
+            if from_nep_txt:
+                wij = torch.from_numpy(nep_txt_param[0])
+                layer_bias = torch.from_numpy(nep_txt_param[1])
+            else:
+                wij = torch.Tensor(self.network_size[i-1], self.network_size[i])
+                normal(wij, mean=0, std=(1.0 / np.sqrt(self.network_size[i-1] + self.network_size[i])))
+
+                layer_bias = None
+                if self.bias_flag:
+                    layer_bias = torch.Tensor(1, self.network_size[i])
+                    normal(layer_bias, mean=0, std=1)
+
+            resnet_dt = None
+            if i > 1 and self.resnet_dt_flag:
+                resnet_dt = torch.Tensor(1, self.network_size[i])
+                normal(resnet_dt, mean=0.1, std=0.001)
+
+            self.layers.append(LayerModule(wij, layer_bias, resnet_dt))
+
+        hidden_dim = self.network_size[-1]
+        if from_nep_txt:
+            output_weight = torch.from_numpy(nep_txt_param[2])
+            if output_weight.ndim == 1:
+                output_weight = output_weight.reshape(hidden_dim, self.output_num)
+            energy_weight = output_weight[:, 0:1]
+            charge_weight = output_weight[:, 1:2]
+            energy_bias = None
+            if self.last_bias:
+                energy_bias = torch.as_tensor(nep_txt_param[3], dtype=energy_weight.dtype)
+                if energy_bias.ndim > 0:
+                    energy_bias = energy_bias.reshape(-1)[0]
+                energy_bias = energy_bias.reshape(1, 1)
+        else:
+            energy_weight = torch.Tensor(hidden_dim, 1)
+            charge_weight = torch.Tensor(hidden_dim, 1)
+            normal(energy_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
+            normal(charge_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
+            energy_bias = None
+            if self.last_bias:
+                energy_bias = torch.as_tensor(ener_shift, dtype=energy_weight.dtype).reshape(1, 1)
+
+        self.energy_head = LayerModule(energy_weight, energy_bias, None)
+        self.charge_head = LayerModule(charge_weight, None, None)
+
+    def get_param_list(self):
+        param_list = []
+        last_bias_list = []
+        for i, layer in enumerate(self.layers):
+            if self.bias_flag and layer.bias is not None:
+                param_list.extend(list(layer.weight.transpose(1, 0).flatten().cpu().detach().numpy()))
+                param_list.extend((-layer.bias).flatten().cpu().detach().numpy())
+            else:
+                param_list.extend(list(layer.weight.flatten().cpu().detach().numpy()))
+            if i > 0:
+                if self.network_size[i+1] == self.network_size[i] and layer.resnet_dt is not None:
+                    param_list.extend(list(layer.resnet_dt.flatten().cpu().detach().numpy()))
+
+        param_list.extend(list(self.energy_head.weight.flatten().cpu().detach().numpy()))
+        if self.energy_head.bias is not None:
+            last_bias_list.extend((-self.energy_head.bias).flatten().cpu().detach().numpy())
+        param_list.extend(list(self.charge_head.weight.flatten().cpu().detach().numpy()))
+        return param_list, last_bias_list
+
+    def forward(self, x: torch.Tensor):
+        for i, layer in enumerate(self.layers):
+            if self.bias_flag and layer.bias is not None:
+                hiden = torch.matmul(x, layer.weight) + layer.bias
+            else:
+                hiden = torch.matmul(x, layer.weight)
+
+            hiden = self.activation(hiden)
+            if i > 0:
+                if self.network_size[i+1] == self.network_size[i] and layer.resnet_dt is not None:
+                    x = hiden * layer.resnet_dt + x
+                else:
+                    x = hiden + x
+            else:
+                x = hiden
+
+        energy = torch.matmul(x, self.energy_head.weight)
+        if self.energy_head.bias is not None:
+            energy = energy + self.energy_head.bias
+        charge = torch.matmul(x, self.charge_head.weight)
+        return energy, charge
 '''    
 class EmbeddingNet0(nn.Module):
     def __init__(self, 

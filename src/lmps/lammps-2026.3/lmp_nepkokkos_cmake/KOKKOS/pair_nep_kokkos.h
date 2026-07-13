@@ -51,8 +51,10 @@ class PairNEPKokkos : public PairNEP {
   int find_atomic_number(std::string& key);
   int pack_reverse_comm(int, int, double *);
   void unpack_reverse_comm(int, int *, double *);
+  void qnep_bec_atom(double **array, int nmax) override;
   std::tuple<double, double, double, double, double, double> calc_max_error(const int* ilist, const double* h_full_f, const double* h_full_e, const int num_ff, const int inum, const int nlocal, const int nall, const int rank);
  protected:
+  enum ReverseCommMode { REVERSE_NONE, REVERSE_DEVIATION_FORCE, REVERSE_BEC };
   
   // 坐标和力的一维视图包装器
    Kokkos::View<const double*, DeviceType> get_position_view() {
@@ -73,11 +75,16 @@ class PairNEPKokkos : public PairNEP {
   int num_ff;
   bool is_rank_0;
   int nprocs_total;
+  int cur_atom_max = 0;
   int global_nall = 0;
   int global_nlocal = 0;
   bool reverse_force = false;
   std::vector<NEPKK> nep_gpu_models;  // NEP model instance
   std::vector<std::string> potential_files;
+  std::string kspace_method = "ewald";
+  double pppm_mesh_spacing = 1.0;
+  int pppm_mesh_mode = 0;
+  int pppm_mesh[3] = {0, 0, 0};
 
   std::string explrError_fname = "explr.error";
   std::FILE *explrError_fp = nullptr;
@@ -97,19 +104,33 @@ class PairNEPKokkos : public PairNEP {
   
   DAT::tdual_efloat_1d k_eatom;
   DAT::tdual_virial_array k_vatom;
+  DAT::tdual_virial_array k_vatom_work;
 //   DAT::tdual_ffloat_2d k_cutsq;
   typename AT::t_efloat_1d d_eatom;
   typename AT::t_virial_array d_vatom; //device [nall][6]
+  typename AT::t_virial_array d_vatom_work; // internal global virial work buffer
   
   typename AT::t_int_1d_randomread d_ilist;
   typename AT::t_int_1d_randomread d_numneigh;
   typename AT::t_neighbors_2d d_neighbors;
+
+  int local_maxeatom = 0;
+  int local_maxvatom = 0;
+  int local_maxvatom_work = 0;
+  int local_maxcvatom = 0;
+  // 手动定义 9 分量 DualView（因为 kokkos_type.h 中没有 tdual_virial9_array）
+  typedef Kokkos::DualView<double*[9], Kokkos::LayoutRight, LMPDeviceType> tdual_virial9_array;
+  tdual_virial9_array k_cvatom;                    // DualView（host + device）
+  Kokkos::View<double*[9], Kokkos::LayoutRight, DeviceType> d_cvatom;    // active execution-space view
   
   int need_dup;
   int neighflag, newton_pair;
   int eflag, vflag;
   int rank, device_id;
   std::vector<double> h_etot_virial_global;
+  ReverseCommMode reverse_comm_mode = REVERSE_NONE;
+  std::vector<double> h_bec_reverse;
+  std::vector<NEP_FLOAT> h_bec_nep_float;
   // NEP data structures - Kokkos Views for raw pointers
 
   using KKDeviceType = typename KKDevice<DeviceType>::value;

@@ -56,6 +56,11 @@ PairNEP::~PairNEP()
 
 }
 
+void PairNEP::qnep_bec_atom(double ** /*array*/, int /*nmax*/)
+{
+    error->all(FLERR, "compute qnep/bec/atom requires pair_style matpl/nep/kk with a NEP-charge potential");
+}
+
 /* ----------------------------------------------------------------------
    allocate all arrays
 ------------------------------------------------------------------------- */
@@ -95,14 +100,22 @@ void PairNEP::settings(int narg, char** arg)
             iarg++;
         } else {
             break;
-        }
     }
+}
+
     while (iarg < narg) {
         if (strcmp(arg[iarg], "out_freq") == 0) {
             out_freq = utils::inumeric(FLERR, arg[++iarg], false, lmp);
         } else if (strcmp(arg[iarg], "out_file") == 0) {
             explrError_fname = arg[++iarg];
-        } 
+        } else if (strcmp(arg[iarg], "kspace") == 0 || strcmp(arg[iarg], "kspace_method") == 0) {
+            kspace_method = arg[++iarg];
+            if (kspace_method != "ewald" && kspace_method != "pppm") {
+                error->all(FLERR, "pair_style matpl/nep kspace must be ewald or pppm");
+            }
+            if (me == 0) utils::logmesg(lmp, "NEP-CPU kspace: " + kspace_method + "\n");
+
+        }
         iarg++;
     }
 
@@ -405,6 +418,7 @@ void PairNEP::compute(int eflag, int vflag)
 
     double* per_atom_potential = nullptr;
     double** per_atom_virial = nullptr;
+    int per_atom_virial_components = 0;
     double *virial = force->pair->virial;
     double **f = atom->f;
     // for dp and nep model from jitscript
@@ -417,13 +431,20 @@ void PairNEP::compute(int eflag, int vflag)
         double total_virial[6] = {0.0};
         if (cvflag_atom) {
             per_atom_virial = cvatom;
+            per_atom_virial_components = 9;
+        } else if (vflag_atom) {
+            per_atom_virial = vatom;
+            per_atom_virial_components = 6;
         }
         if (eflag_atom) {
             per_atom_potential = eatom;
         }
         nep_cpu_models[0].compute_for_lammps(
         atom->nlocal, list->inum, list->ilist, list->numneigh, list->firstneigh, atom->type, atom->x,
-        total_potential, total_virial, per_atom_potential, atom->f, per_atom_virial, ff_idx);
+        total_potential, total_virial, per_atom_potential, atom->f, per_atom_virial,
+        per_atom_virial_components, ff_idx,
+        domain->xprd, domain->yprd, domain->zprd, domain->xy, domain->xz, domain->yz,
+        kspace_method, static_cast<long long>(atom->natoms), world);
         if (eflag) {
             eng_vdwl += total_potential;
         }
@@ -437,6 +458,10 @@ void PairNEP::compute(int eflag, int vflag)
         // printf("namx %d atom->nmax %d nall %d\n", nmax, atom->nmax, n_all);
         if (cvflag_atom) {
             per_atom_virial = cvatom;
+            per_atom_virial_components = 9;
+        } else if (vflag_atom) {
+            per_atom_virial = vatom;
+            per_atom_virial_components = 6;
         }
         if (eflag_atom) {
             per_atom_potential = eatom;
@@ -458,7 +483,10 @@ void PairNEP::compute(int eflag, int vflag)
             }
             nep_cpu_models[ff_idx].compute_for_lammps(
                 atom->nlocal, list->inum, list->ilist, list->numneigh, list->firstneigh,atom->type, atom->x,
-                total_potential, total_virial, e_atom_n[ff_idx], f_n[ff_idx], per_atom_virial, ff_idx);
+                total_potential, total_virial, e_atom_n[ff_idx], f_n[ff_idx], per_atom_virial,
+                per_atom_virial_components, ff_idx,
+                domain->xprd, domain->yprd, domain->zprd, domain->xy, domain->xz, domain->yz,
+                kspace_method, static_cast<long long>(atom->natoms), world);
             if (ff_idx == 0) {
                 for (int i = 0; i < n_all; i++) {
                     f[i][0] = f_n[0][i][0];

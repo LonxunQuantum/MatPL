@@ -71,7 +71,7 @@ def variable_length_collate_fn(batch):
         return [x[key] for x in tensors]
 
     for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei"]:
+        if key in ["position", "force", "atom_type_map", "ei", "bec"]:
             items = extract_items(filtered_batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
@@ -94,7 +94,7 @@ def variable_length_collate_fn_nolimit(batch):
         return [x[key] for x in tensors]
 
     for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei"]:
+        if key in ["position", "force", "atom_type_map", "ei", "bec"]:
             items = extract_items(batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
@@ -262,9 +262,16 @@ class UniDataset(Dataset):
         data["force"] = torch.from_numpy(self.image_list[index].force).to(self.dtype)
         data["ei"] = torch.from_numpy(self.image_list[index].atomic_energy).to(self.dtype)
         data["energy"] = torch.from_numpy(np.array([self.image_list[index].Ep])).to(self.dtype)
+        charge = getattr(self.image_list[index], "charge", None)
+        if charge is None:
+            charge = getattr(self.image_list[index], "total_charge", 0.0)
+        data["charge"] = torch.from_numpy(np.array([charge], dtype=float)).to(self.dtype)
         data["position"] = torch.from_numpy(self.image_list[index].position).to(self.dtype)
         data["virial"] = torch.from_numpy(np.ones([9]) * -1e6).to(self.dtype) if self.image_list[index].virial is None \
                             else torch.from_numpy(self.image_list[index].virial.flatten()).to(self.dtype)
+        bec = getattr(self.image_list[index], "bec", None)
+        data["bec"] = torch.from_numpy(np.ones([len(data["atom_type_map"]), 9]) * -1e6).to(self.dtype) if bec is None \
+                            else torch.from_numpy(np.asarray(bec).reshape(-1, 9)).to(self.dtype)
         return data
         # for key in list(data.keys()):
         #     print(key)
