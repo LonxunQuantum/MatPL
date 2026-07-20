@@ -183,7 +183,8 @@ public:
     int* itype_cpu, //atoms' type,the len is [n_all]
     double* box_cpu, 
     double* position_cpu, // postion of atoms x, [n_all * 3]
-    const char* kspace_method = "ewald"
+    const char* kspace_method = "ewald",
+    double total_charge = 0.0
     );
   double rc; // maximum cutoff distance
   bool is_gpumd_nep = false;

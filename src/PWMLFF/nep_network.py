@@ -35,6 +35,66 @@ sys.path.append(codepath + '/..')
 sys.path.append(codepath + '/../aux')
 sys.path.append(codepath + '/../..')
 
+def _get_image_total_charge(image, default_total_charge=0.0):
+    charge = getattr(image, "charge", None)
+    fragment = getattr(image, "fragment", None)
+    if charge is not None:
+        charge_array = np.asarray(charge, dtype=float)
+        if fragment is not None and charge_array.size == getattr(image, "atom_nums", charge_array.size):
+            fragment_array = np.asarray(fragment).reshape(-1)
+            charge_array = charge_array.reshape(-1)
+            if fragment_array.size == charge_array.size:
+                valid_fragment = fragment_array >= 0
+                if valid_fragment.any():
+                    fragment_charge = charge_array[valid_fragment]
+                    fragment_id = fragment_array[valid_fragment]
+                    if np.isfinite(fragment_charge).all():
+                        total_charge = 0.0
+                        for frag in np.unique(fragment_id):
+                            total_charge += fragment_charge[fragment_id == frag][0]
+                        return float(total_charge)
+                    total_charge = np.asarray(getattr(image, "total_charge", default_total_charge), dtype=float).reshape(-1)
+                    if total_charge.size and np.isfinite(total_charge[0]):
+                        return float(total_charge[0])
+                    return float(default_total_charge)
+        if charge_array.size == 1 and np.isfinite(charge_array.reshape(-1)[0]):
+            return float(charge_array.reshape(-1)[0])
+    total_charge = getattr(image, "total_charge", default_total_charge)
+    total_charge = np.asarray(total_charge, dtype=float).reshape(-1)
+    if total_charge.size and np.isfinite(total_charge[0]):
+        return float(total_charge[0])
+    return float(default_total_charge)
+
+
+def _get_fragment_charge_rmse_and_label(image, charge_predict):
+    charge_label = getattr(image, "charge", None)
+    fragment = getattr(image, "fragment", None)
+    atom_nums = getattr(image, "atom_nums", len(charge_predict))
+    if charge_label is None or fragment is None:
+        return None
+    charge_label = np.asarray(charge_label, dtype=float).reshape(-1)
+    fragment = np.asarray(fragment).reshape(-1)
+    if charge_label.size != atom_nums or fragment.size != atom_nums:
+        return None
+    valid = (fragment >= 0) & np.isfinite(charge_label)
+    if not valid.any():
+        return None
+    pred_frag_charge = []
+    label_frag_charge = []
+    for frag in np.unique(fragment[valid]):
+        frag_mask = fragment == frag
+        valid_frag_mask = frag_mask & valid
+        if not valid_frag_mask.any():
+            continue
+        pred_frag_charge.append(np.sum(charge_predict[frag_mask]))
+        label_frag_charge.append(charge_label[valid_frag_mask][0])
+    if len(label_frag_charge) == 0:
+        return None
+    pred_frag_charge = np.asarray(pred_frag_charge)
+    label_frag_charge = np.asarray(label_frag_charge)
+    return np.sqrt(np.mean((pred_frag_charge - label_frag_charge) ** 2)), charge_label
+
+
 def _init_nep_txt_calculator(nep_txt_path, device_type="cpu", gpu_id=0, print_info=0):
     if device_type == "cuda":
         torch.cuda.set_device(gpu_id)
@@ -69,7 +129,8 @@ def _calculate_nep_image_result(idx, image, input_atom_types, calc_obj, kspace_m
         list(type_maps[0]),
         list(np.array(image.lattice).transpose(1, 0).reshape(-1)),
         np.array(image.position).transpose(1, 0).reshape(-1),
-        kspace_method
+        kspace_method,
+        _get_image_total_charge(image)
     )
     ei_predict, force_predict, virial_predict = inference_result[:3]
     charge_predict = inference_result[3] if len(inference_result) > 3 else []
@@ -112,16 +173,20 @@ def _calculate_nep_image_result(idx, image, input_atom_types, calc_obj, kspace_m
     charge_predict = np.array(charge_predict)
     if charge_predict.size:
         charge_predict = charge_predict.reshape(atom_nums)
-        charge_label = getattr(image, "charge", None)
-        if charge_label is None:
-            charge_label = getattr(image, "total_charge", 0.0)
-        charge_label = np.asarray(charge_label)
-        if charge_label.size == atom_nums:
-            charge_label = charge_label.reshape(atom_nums)
-            charge_rmse = np.sqrt(np.mean((charge_predict - charge_label) ** 2))
+        fragment_charge_result = _get_fragment_charge_rmse_and_label(image, charge_predict)
+        if fragment_charge_result is not None:
+            charge_rmse, charge_label = fragment_charge_result
         else:
-            charge_label = float(charge_label.reshape(-1)[0]) if charge_label.size else 0.0
-            charge_rmse = np.abs(np.sum(charge_predict) - charge_label)
+            charge_label = getattr(image, "charge", None)
+            if charge_label is None:
+                charge_label = _get_image_total_charge(image)
+            charge_label = np.asarray(charge_label, dtype=float)
+            if charge_label.size == atom_nums:
+                charge_label = charge_label.reshape(atom_nums)
+                charge_rmse = np.sqrt(np.mean((charge_predict - charge_label) ** 2))
+            else:
+                charge_label = float(charge_label.reshape(-1)[0]) if charge_label.size else _get_image_total_charge(image)
+                charge_rmse = np.abs(np.sum(charge_predict) - charge_label)
         result["charge_rmse"] = charge_rmse
         result["charge_label"] = charge_label
         result["charge_predict"] = charge_predict
@@ -826,7 +891,7 @@ class nep_network:
         force_label_list, force_predict_list = [], []
         virial_rmse, virial_atom_rmse = [], []
         virial_label_list, virial_predict_list = [], []
-        charge_label_list, charge_predict_list = [], []
+        charge_label_list, charge_predict_list, charge_rmse_list = [], [], []
         bec_label_list, bec_predict_list = [], []
         atom_num_list = []
         virial_index = [0, 1, 2, 4, 5, 8]
@@ -854,6 +919,8 @@ class nep_network:
             if has_charge:
                 charge_label_list.append(result["charge_label"])
                 charge_predict_list.append(result["charge_predict"])
+                if result["charge_rmse"] > -1e6:
+                    charge_rmse_list.append(result["charge_rmse"])
             if has_bec:
                 bec_label_list.append(result["bec_label"])
                 bec_predict_list.append(result["bec_predict"])
@@ -880,7 +947,8 @@ class nep_network:
             write_arrays_to_file(os.path.join(inference_path, "dft_bec.txt"), bec_label_list, head_line="#\txx\txy\txz\tyx\tyy\tyz\tzx\tzy\tzz")
             write_arrays_to_file(os.path.join(inference_path, "inference_bec.txt"), bec_predict_list, head_line="#\txx\txy\txz\tyx\tyy\tyz\tzx\tzy\tzz")
 
-        rmse_E, rmse_F, rmse_V, e_r2, f_r2, v_r2, rmse_charge, charge_r2, rmse_bec, bec_r2 = inference_plot(inference_path, return_extra=True)
+        rmse_E, rmse_F, rmse_V, e_r2, f_r2, v_r2, plot_rmse_charge, charge_r2, rmse_bec, bec_r2 = inference_plot(inference_path, return_extra=True)
+        rmse_charge = np.mean(charge_rmse_list) if len(charge_rmse_list) else plot_rmse_charge
         inference_cout = ""
         inference_cout += "For {} images: \n".format(len(images))
         inference_cout += "Average RMSE of Etot per atom: {} R2: {}\n".format(rmse_E, e_r2)

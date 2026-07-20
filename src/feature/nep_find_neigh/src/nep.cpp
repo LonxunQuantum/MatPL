@@ -1103,16 +1103,21 @@ void find_descriptor(
   }
 }
 
-void zero_total_charge(const int N, std::vector<double>& charge)
+void shift_total_charge(const int N, std::vector<double>& charge, const double total_charge)
 {
   double sum_charge = 0.0;
   for (int n = 0; n < N; ++n) {
     sum_charge += charge[n];
   }
-  const double mean_charge = sum_charge / N;
+  const double charge_correction = (total_charge - sum_charge) / N;
   for (int n = 0; n < N; ++n) {
-    charge[n] -= mean_charge;
+    charge[n] += charge_correction;
   }
+}
+
+void zero_total_charge(const int N, std::vector<double>& charge)
+{
+  shift_total_charge(N, charge, 0.0);
 }
 
 void zero_mean_D_real(const int N, std::vector<double>& D_real)
@@ -3051,7 +3056,8 @@ void NEP_CPU::compute(
   std::vector<double>& force,
   std::vector<double>& virial,
   std::vector<double>& total_virial,
-  const std::string& kspace_method)
+  const std::string& kspace_method,
+  double total_charge)
 {
   if (paramb.model_type != 0) {
     std::cout << "Cannot compute potential using a non-potential NEP model.\n";
@@ -3124,7 +3130,8 @@ void NEP_CPU::compute(
     std::fill(bec.begin(), bec.begin() + N * 9, 0.0);
     std::fill(D_real.begin(), D_real.begin() + N, 0.0);
     std::vector<double> charge_shifted(charge.begin(), charge.begin() + N);
-    zero_total_charge(N, charge_shifted);
+    shift_total_charge(N, charge_shifted, total_charge);
+    charge = charge_shifted;
     find_bec_diagonal(N, charge_shifted, bec);
     find_bec_radial(
       paramb, annmb, N, NN_radial.data(), NL_radial.data(), type.data(),

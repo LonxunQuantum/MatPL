@@ -583,7 +583,8 @@ void NEP::inference(
   int* itype_cpu, //atoms' type,the len is [n_all]
   double* box_cpu, // [xx, yx, zx, xy, yy, zy, xz, yz, zz]
   double* position_cpu, // postion of atoms x, [n_all * 3]
-  const char* kspace_method
+  const char* kspace_method,
+  double total_charge
   ) {
   int BLOCK_SIZE = 64;
   int grid_size = (N- 1) / BLOCK_SIZE + 1;
@@ -681,9 +682,7 @@ void NEP::inference(
       nep_data.sum_fxyz.data());
     CUDA_CHECK_KERNEL
 
-    nep_data.charge.copy_to_host(nep_data.cpu_charge.data());
-
-    zero_total_charge<<<1, 1024>>>(N, nep_data.charge.data());
+    shift_total_charge<<<1, 1024>>>(N, nep_data.charge.data(), static_cast<float>(total_charge));
     CUDA_CHECK_KERNEL
 
     find_bec_diagonal<<<grid_size, BLOCK_SIZE>>>(
@@ -916,6 +915,7 @@ void NEP::inference(
   nep_data.potential_per_atom.copy_to_host(nep_data.cpu_potential_per_atom.data());
   nep_data.force_per_atom.copy_to_host(nep_data.cpu_force_per_atom.data());
   if (paramb.charge_mode == 2) {
+    nep_data.charge.copy_to_host(nep_data.cpu_charge.data());
     nep_data.bec.copy_to_host(nep_data.cpu_bec.data());
   }
 

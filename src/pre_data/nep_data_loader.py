@@ -71,7 +71,7 @@ def variable_length_collate_fn(batch):
         return [x[key] for x in tensors]
 
     for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei", "bec"]:
+        if key in ["position", "force", "atom_type_map", "ei", "bec", "fragment", "fragment_charge"]:
             items = extract_items(filtered_batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
@@ -94,7 +94,7 @@ def variable_length_collate_fn_nolimit(batch):
         return [x[key] for x in tensors]
 
     for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei", "bec"]:
+        if key in ["position", "force", "atom_type_map", "ei", "bec", "fragment", "fragment_charge"]:
             items = extract_items(batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
@@ -262,10 +262,37 @@ class UniDataset(Dataset):
         data["force"] = torch.from_numpy(self.image_list[index].force).to(self.dtype)
         data["ei"] = torch.from_numpy(self.image_list[index].atomic_energy).to(self.dtype)
         data["energy"] = torch.from_numpy(np.array([self.image_list[index].Ep])).to(self.dtype)
-        charge = getattr(self.image_list[index], "charge", None)
-        if charge is None:
-            charge = getattr(self.image_list[index], "total_charge", 0.0)
-        data["charge"] = torch.from_numpy(np.array([charge], dtype=float)).to(self.dtype)
+        image = self.image_list[index]
+        charge = getattr(image, "charge", None)
+        fragment = getattr(image, "fragment", None)
+        natoms = len(data["atom_type_map"])
+        charge_array = None if charge is None else np.asarray(charge, dtype=float).reshape(-1)
+        fragment_array = None if fragment is None else np.asarray(fragment, dtype=int).reshape(-1)
+
+        if (
+            charge_array is not None
+            and fragment_array is not None
+            and charge_array.size == natoms
+            and fragment_array.size == natoms
+        ):
+            data["fragment"] = torch.from_numpy(fragment_array).to(self.index_type)
+            data["fragment_charge"] = torch.from_numpy(charge_array).to(self.dtype)
+            valid_charge = ~np.isnan(charge_array)
+            if valid_charge.all():
+                total_charge = 0.0
+                for frag_id in np.unique(fragment_array):
+                    frag_mask = fragment_array == frag_id
+                    total_charge += charge_array[frag_mask][0]
+            else:
+                total_charge = getattr(image, "total_charge", 0.0)
+        elif charge_array is not None and charge_array.size == 1:
+            total_charge = charge_array[0]
+        else:
+            total_charge = getattr(image, "total_charge", 0.0)
+        if "fragment" not in data:
+            data["fragment"] = torch.full((natoms,), -1, dtype=self.index_type)
+            data["fragment_charge"] = torch.full((natoms,), float("nan"), dtype=self.dtype)
+        data["charge"] = torch.from_numpy(np.array([total_charge], dtype=float)).to(self.dtype)
         data["position"] = torch.from_numpy(self.image_list[index].position).to(self.dtype)
         data["virial"] = torch.from_numpy(np.ones([9]) * -1e6).to(self.dtype) if self.image_list[index].virial is None \
                             else torch.from_numpy(self.image_list[index].virial.flatten()).to(self.dtype)
