@@ -116,7 +116,7 @@ def get_loss(
             optimizer_param.end_pre_fac_charge,
             real_lr,
         )
-        loss = loss + pref_charge * loss_Charge_val / avg_atom_number
+        loss = loss + pref_charge * loss_Charge_val
 
     if getattr(optimizer_param, "train_bec", False) and loss_BEC_val is not None:
         pref_bec = get_adam_loss_prefactor(

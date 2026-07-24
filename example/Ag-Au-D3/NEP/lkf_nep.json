@@ -31,7 +31,6 @@
     "optimizer": {
         "optimizer": "LKF",
         "epochs": 1,
-        "p0_weight": 1e-2,
         "batch_size": 8,
         "print_freq": 10,
         "block_size": 5120,
@@ -39,10 +38,7 @@
         "kalman_nue": 0.9987,
         "train_energy": true,
         "train_force": true,
-        "train_virial": true,
-        "pre_fac_force": 2.0,
-        "pre_fac_etot": 1.0,
-        "pre_fac_virial": 1.0
+        "train_virial": true
     },
     "format":"pwmlff/npy",
     "train_data": [

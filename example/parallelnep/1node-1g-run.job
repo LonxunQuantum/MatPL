@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1
-#SBATCH --partition=3090,q4,4090
+#SBATCH --partition=3080ti
 
 echo "SLURM_SUBMIT_DIR is $SLURM_SUBMIT_DIR"
 echo "Starting job $SLURM_JOB_ID at " `date`

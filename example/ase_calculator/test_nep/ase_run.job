@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --gpus-per-task=1
-#SBATCH --partition=3080ti,3090
+#SBATCH --partition=3080ti,new3080ti
 
 echo "SLURM_SUBMIT_DIR is $SLURM_SUBMIT_DIR"
 
@@ -19,7 +19,9 @@ start=$(date +%s)
 #conda activate matpl-2025.3
 #source /data/home/wuxingxing/codespace/MatPL-2025.3/env.sh
 
-source /share/app/MATPL/MatPL-2025.3/env.sh
+#source /share/app/MATPL/MatPL-2025.3/env.sh
+
+source /share/app/MATPL/MatPL-2026.3/env.sh
 
 python ase_test.py
 

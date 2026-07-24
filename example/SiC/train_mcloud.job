@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --gpus-per-task=1
-#SBATCH --partition=3080ti,3090
+#SBATCH --partition=3080ti
 
 
 source  /share/app/MATPL/MatPL-2025.3/env.sh

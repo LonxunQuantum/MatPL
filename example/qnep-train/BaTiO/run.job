@@ -4,19 +4,20 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1
-#SBATCH --partition=3090,q4
+#SBATCH --partition=3080ti
 
 echo "SLURM_SUBMIT_DIR is $SLURM_SUBMIT_DIR"
 echo "Starting job $SLURM_JOB_ID at " `date`
 echo "Running on nodes: $SLURM_NODELIST"
 
 start=$(date +%s)
-module load intel/2020
-module load cuda/11.8-share
-source /data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh
-conda activate matpl-2026.3
-source /data/home/wuxingxing/xcode/qnep/env.sh
+# module load intel/2020
+# module load cuda/11.8-share
+# source /data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh
+# conda activate matpl-2026.3
+# source /data/home/wuxingxing/xcode/qnep/env.sh
 
+source /share/app/MATPL/MatPL-2026.3/env.sh 
 
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 #MASTER_PORT=12355
