@@ -938,6 +938,82 @@ class NEP(nn.Module):
         if self.charge_mode and self.gpumd_nep4:
             Ei = Ei + self.common_bias
         return Ei, charge, grad_feat_E_scaled, grad_feat_Q_scaled
+
+    def calculate_force_virial_from_descriptor_grad(
+            self,
+            dE: Optional[torch.Tensor],
+            dE_angular: Optional[torch.Tensor],
+            dE_zbl: Optional[torch.Tensor],
+            Ri: Optional[torch.Tensor],
+            Ri_d: Optional[torch.Tensor],
+            Ri_angular: Optional[torch.Tensor],
+            Ri_d_angular: Optional[torch.Tensor],
+            Ri_zbl: Optional[torch.Tensor],
+            Ri_d_zbl: Optional[torch.Tensor],
+            list_neigh: Optional[torch.Tensor],
+            list_neigh_angular: Optional[torch.Tensor],
+            list_neigh_zbl: Optional[torch.Tensor],
+            num_atom: torch.Tensor,
+            device: torch.device,
+            dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        num_atom_flat = num_atom.reshape(-1)
+        natoms_sum = int(num_atom_flat.sum().item())
+        batch_size = num_atom_flat.shape[0]
+
+        def aggregate_cpu(branch_dE, branch_Ri, branch_Ri_d, branch_list_neigh):
+            branch_dE = torch.unsqueeze(branch_dE, dim=-1)
+            dE_Rid = torch.mul(branch_dE, branch_Ri_d).sum(dim=-2)
+            force = torch.zeros((natoms_sum + 1, 3), device=device, dtype=dtype)
+            force[1:natoms_sum + 1, :] = -1 * dE_Rid.sum(dim=-2)
+            indice = (branch_list_neigh + 1).flatten().unsqueeze(-1).expand(-1, 3).to(torch.int64)
+            values = dE_Rid.view(-1, 3)
+            force.scatter_add_(0, indice, values).view(natoms_sum + 1, 3)
+            force = force[1:, :]
+
+            image_atom_index = torch.cumsum(num_atom_flat, dim=0)
+            image_atom_index = torch.cat((torch.tensor([0], device=device), image_atom_index), dim=0)
+            virial = torch.zeros((batch_size, 9), device=device, dtype=dtype)
+            for i in range(0, batch_size):
+                start = image_atom_index[i]
+                end = image_atom_index[i + 1]
+                virial[i, 0] = (branch_Ri[start:end, :, 1] * dE_Rid[start:end, :, 0]).flatten().sum(dim=0)
+                virial[i, 1] = (branch_Ri[start:end, :, 1] * dE_Rid[start:end, :, 1]).flatten().sum(dim=0)
+                virial[i, 2] = (branch_Ri[start:end, :, 1] * dE_Rid[start:end, :, 2]).flatten().sum(dim=0)
+                virial[i, 4] = (branch_Ri[start:end, :, 2] * dE_Rid[start:end, :, 1]).flatten().sum(dim=0)
+                virial[i, 5] = (branch_Ri[start:end, :, 2] * dE_Rid[start:end, :, 2]).flatten().sum(dim=0)
+                virial[i, 8] = (branch_Ri[start:end, :, 3] * dE_Rid[start:end, :, 2]).flatten().sum(dim=0)
+                virial[i, 3] = virial[i, 1]
+                virial[i, 6] = virial[i, 2]
+                virial[i, 7] = virial[i, 5]
+            return force, virial
+
+        def aggregate_gpu(branch_dE, branch_Ri, branch_Ri_d, branch_list_neigh):
+            branch_Ri_d = branch_Ri_d.view(natoms_sum, -1, 3)
+            dE_tmp = branch_dE.view(natoms_sum, 1, -1)
+            force = -1 * torch.matmul(dE_tmp, branch_Ri_d).squeeze(-2)
+            image_dr = branch_Ri[:, :, 1:].clone()
+            force = CalcOps.calculateNepForce(branch_list_neigh, branch_dE, branch_Ri_d, force)[0]
+            virial = CalcOps.calculateNepVirial(branch_list_neigh, branch_dE, image_dr, branch_Ri_d, num_atom)[0]
+            return force, virial
+
+        aggregate = aggregate_cpu if device.type == "cpu" else aggregate_gpu
+        force_total = torch.zeros((natoms_sum, 3), device=device, dtype=dtype)
+        virial_total = torch.zeros((batch_size, 9), device=device, dtype=dtype)
+
+        if self.train_2b and dE is not None:
+            force, virial = aggregate(dE, Ri, Ri_d, list_neigh)
+            force_total = force_total + force
+            virial_total = virial_total + virial
+        if self.l_max_3b > 0 and dE_angular is not None:
+            force, virial = aggregate(dE_angular, Ri_angular, Ri_d_angular, list_neigh_angular)
+            force_total = force_total + force
+            virial_total = virial_total + virial
+        if Ri_zbl is not None and dE_zbl is not None:
+            force, virial = aggregate(dE_zbl, Ri_zbl, Ri_d_zbl, list_neigh_zbl)
+            force_total = force_total + force
+            virial_total = virial_total + virial
+
+        return -force_total, -virial_total
      
     def calculate_force_virial(self, 
                                 Ri: torch.Tensor,
@@ -987,6 +1063,22 @@ class NEP(nn.Module):
             dE_zbl = grad_map["zbl"]
             if dE_zbl is None:
                 dE_zbl = torch.zeros_like(Ri_zbl)
+        return self.calculate_force_virial_from_descriptor_grad(
+            dE if self.train_2b else None,
+            dE_angular if self.l_max_3b > 0 else None,
+            dE_zbl if Ri_zbl is not None else None,
+            Ri,
+            Ri_d,
+            Ri_angular,
+            Ri_d_angular,
+            Ri_zbl,
+            Ri_d_zbl,
+            list_neigh,
+            list_neigh_angular,
+            list_neigh_zbl,
+            num_atom,
+            device,
+            dtype)
         # t8 = time.time()
         '''
         # this result is same as the above code
