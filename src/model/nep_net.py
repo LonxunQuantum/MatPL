@@ -902,6 +902,42 @@ class NEP(nn.Module):
         if self.charge_mode and self.gpumd_nep4:
             Ei = Ei + self.common_bias
         return Ei, charge
+
+    def calculate_Ei_with_grad(
+            self,
+            Imagetype_map: torch.Tensor,
+            feats_scaled: torch.Tensor,
+            device: torch.device
+            ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+        Ei = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device)
+        grad_feat_E_scaled = torch.zeros_like(feats_scaled)
+        if self.charge_mode:
+            charge = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device)
+            grad_feat_Q_scaled = torch.zeros_like(feats_scaled)
+        else:
+            charge = None
+            grad_feat_Q_scaled = None
+
+        for idx, fit_net in enumerate(self.fitting_net):
+            mask = (Imagetype_map == idx)
+            if not mask.any():
+                continue
+            indices = torch.arange(len(Imagetype_map.flatten()), device=device)[mask]
+            feat = feats_scaled[indices, :]
+            if self.charge_mode:
+                energy_ntype, charge_ntype, grad_e_ntype, grad_q_ntype = fit_net.forward_with_input_grad(feat)
+                Ei[mask] = energy_ntype.reshape(-1)
+                charge[mask] = charge_ntype.reshape(-1)
+                grad_feat_E_scaled[indices, :] = grad_e_ntype
+                grad_feat_Q_scaled[indices, :] = grad_q_ntype
+            else:
+                energy_ntype, grad_e_ntype = fit_net.forward_with_input_grad(feat)
+                Ei[mask] = energy_ntype.reshape(-1)
+                grad_feat_E_scaled[indices, :] = grad_e_ntype
+
+        if self.charge_mode and self.gpumd_nep4:
+            Ei = Ei + self.common_bias
+        return Ei, charge, grad_feat_E_scaled, grad_feat_Q_scaled
      
     def calculate_force_virial(self, 
                                 Ri: torch.Tensor,
