@@ -19,6 +19,11 @@ else:
     torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
     CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
 
+# 无 bec 标签的结构中，Li/Na/K(+1)、Mg/Ca(+2) 金属离子的 BEC 按物理意义设为单位矩阵
+# 参与训练；其余原子（非金属及 Fe/Zn 过渡金属）保持 -1e6 掩码，不参与 bec 训练
+BEC_DEFAULT_METAL_TYPES = (3, 11, 12, 19, 20)  # Li Na Mg K Ca 的原子序数
+BEC_DEFAULT_VALUE = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # xx xy xz yx yy yz zx zy zz
+
 def get_det(box: np.array):
     matrix = box.reshape((3, 3))
     return np.linalg.det(matrix)
@@ -139,7 +144,8 @@ class UniDataset(Dataset):
                 batch_max_types=-1,
                 dtype: Union[torch.dtype, str] = torch.float64, 
                 index_type: Union[torch.dtype, str] = torch.int64,
-                use_cartesian=True):
+                use_cartesian=True,
+                fill_metal_bec=False):
         super(UniDataset, self).__init__()
         self.dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
         self.dirs = data_paths  # include all movement data path
@@ -155,6 +161,7 @@ class UniDataset(Dataset):
         self.avg_image_atom= None
         self.use_cartesian = use_cartesian
         self.batch_max_types = batch_max_types
+        self.fill_metal_bec = fill_metal_bec
         self.dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
         self.index_type = (
             index_type
@@ -297,8 +304,15 @@ class UniDataset(Dataset):
         data["virial"] = torch.from_numpy(np.ones([9]) * -1e6).to(self.dtype) if self.image_list[index].virial is None \
                             else torch.from_numpy(self.image_list[index].virial.flatten()).to(self.dtype)
         bec = getattr(self.image_list[index], "bec", None)
-        data["bec"] = torch.from_numpy(np.ones([len(data["atom_type_map"]), 9]) * -1e6).to(self.dtype) if bec is None \
-                            else torch.from_numpy(np.asarray(bec).reshape(-1, 9)).to(self.dtype)
+        if bec is not None:
+            data["bec"] = torch.from_numpy(np.asarray(bec).reshape(-1, 9)).to(self.dtype)
+        else:
+            bec_array = np.ones([len(data["atom_type_map"]), 9]) * -1e6
+            if self.fill_metal_bec:
+                atom_z = np.asarray(self.image_list[index].atom_types_image)
+                metal_mask = np.isin(atom_z, BEC_DEFAULT_METAL_TYPES)
+                bec_array[metal_mask] = np.array(BEC_DEFAULT_VALUE, dtype=float)
+            data["bec"] = torch.from_numpy(bec_array).to(self.dtype)
         return data
         # for key in list(data.keys()):
         #     print(key)

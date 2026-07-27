@@ -318,16 +318,17 @@ class nep_network:
                                             cutoff_radial = self.input_param.nep_param.cutoff[0],
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
                                             batch_max_types=self.input_param.max_allow_atom_type,
-                                            cal_energy=True)
+                                            cal_energy=True,
+                                            fill_metal_bec=self.input_param.optimizer_param.train_bec)
 
             valid_dataset = UniDataset(self.input_param.file_paths.valid_data_path, 
                                             self.input_param.file_paths.format, 
                                             self.input_param.atom_type,
                                             cutoff_radial = self.input_param.nep_param.cutoff[0],
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
-                                            cal_energy=False
+                                            cal_energy=False,
+                                            fill_metal_bec=self.input_param.optimizer_param.train_bec
                                             )
-
             energy_shift = train_dataset.get_energy_shift()
             # 使用 DistributedSampler
             train_sampler = torch.utils.data.distributed.DistributedSampler(
