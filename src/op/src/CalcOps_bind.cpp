@@ -8,7 +8,11 @@ TORCH_LIBRARY(CalcOps_cuda, m) {
     m.def("calculateVirial", calculateVirial);
     m.def("calculateCompress", calculateCompress);
     m.def("calculateNepFeat", calculateNepFeat);
+    m.def("calculateNepFeatWithGradContext", calculateNepFeatWithGradContext);
+    m.def("calculateNepFeatInputGrad", calculateNepFeatInputGrad);
     m.def("calculateNepMbFeat", calculateNepMbFeat);
+    m.def("calculateNepMbFeatWithGradContext", calculateNepMbFeatWithGradContext);
+    m.def("calculateNepMbFeatInputGrad", calculateNepMbFeatInputGrad);
     m.def("calculateNepForce", calculateNepForce);
     m.def("calculateNepVirial", calculateNepVirial);
     m.def("calculate_maxneigh", calculate_maxneigh);
