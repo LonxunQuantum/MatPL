@@ -40,6 +40,7 @@ class NEP(nn.Module):
         self.set_init_nep_param(input_param)
         self.charge_mode = getattr(input_param.nep_param, "charge_mode", 0) or 0
         self.charge_output_num = 2 if self.charge_mode else 1
+        self.use_analytical_nep_grad = bool(getattr(input_param.nep_param, "use_analytical_nep_grad", False))
         self.gpumd_nep4 = bool(getattr(input_param.nep_param, "gpumd_nep4", False))
         self.zbl = input_param.nep_param.zbl
         self.zbl_factor = input_param.nep_param.use_typewise_cutoff_zbl
@@ -373,6 +374,13 @@ class NEP(nn.Module):
         radial_NL = NL_radial
         radial_Ri = Ri
         radial_Ri_d = Ri_d
+        use_analytical_nep_grad = bool(
+            self.use_analytical_nep_grad and
+            device.type != "cpu" and
+            is_calc_f is not False and
+            need_force is not False)
+        radial_context = None
+        angular_context = None
 
         if device.type == "cpu":
             NL_radial_type = radial_NL.new_full(radial_NL.shape, -1).requires_grad_(False)
@@ -387,7 +395,16 @@ class NEP(nn.Module):
         else:# cuda ops
             if self.train_2b:
                 feat_2b = torch.zeros(natoms_sum, self.two_feat_num, dtype=dtype, device=device, requires_grad=True)
-                feat_2b = CalcOps.calculateNepFeat(self.c_param_2.contiguous(),
+                radial_outputs = CalcOps.calculateNepFeatWithGradContext(
+                                                self.c_param_2.contiguous(),
+                                                Ri,
+                                                NL_radial,
+                                                atom_type_map,
+                                                feat_2b,
+                                                self.cutoff_radial,
+                                                self.multi_feat_num,
+                                                int(self.input_param.nep_param.fix_cij)
+                                                ) if use_analytical_nep_grad else CalcOps.calculateNepFeat(self.c_param_2.contiguous(),
                                                 Ri, 
                                                 NL_radial, 
                                                 atom_type_map,
@@ -395,10 +412,25 @@ class NEP(nn.Module):
                                                 self.cutoff_radial,
                                                 self.multi_feat_num,
                                                 int(self.input_param.nep_param.fix_cij)
-                                                )[0]
+                                                )
+                feat_2b = radial_outputs[0]
+                if use_analytical_nep_grad:
+                    radial_context = radial_outputs[1:]
             if self.l_max_3b > 0:
                 feat_3b = torch.zeros(natoms_sum, self.multi_feat_num, dtype=dtype, device=device, requires_grad=True)
-                feat_3b = CalcOps.calculateNepMbFeat(self.c_param_3.contiguous(),
+                angular_outputs = CalcOps.calculateNepMbFeatWithGradContext(
+                                                        self.c_param_3.contiguous(),
+                                                        Ri_angular,
+                                                        NL_angular,
+                                                        atom_type_map,
+                                                        feat_3b,
+                                                        self.two_feat_num,
+                                                        self.l_max_3b,
+                                                        self.l_max_4b,
+                                                        self.l_max_5b,
+                                                        self.cutoff_angular,
+                                                        int(self.input_param.nep_param.fix_cij)
+                                                        ) if use_analytical_nep_grad else CalcOps.calculateNepMbFeat(self.c_param_3.contiguous(),
                                                         Ri_angular, 
                                                         NL_angular, 
                                                         atom_type_map, 
@@ -409,7 +441,10 @@ class NEP(nn.Module):
                                                         self.l_max_5b, 
                                                         self.cutoff_angular,
                                                         int(self.input_param.nep_param.fix_cij)
-                                                        )[0]
+                                                        )
+                feat_3b = angular_outputs[0]
+                if use_analytical_nep_grad:
+                    angular_context = angular_outputs[1:]
 
                 if self.train_2b:
                     feats = torch.concat([feat_2b, feat_3b], dim=-1)
@@ -419,7 +454,11 @@ class NEP(nn.Module):
                 feats = feat_2b
         feats_in = self.q_scaler * feats
         # feats_in = (feats-self.q_min)/(self.q_max-self.q_min)
-        Ei, charge = self.calculate_Ei(atom_type_map, feats_in, device)
+        if use_analytical_nep_grad:
+            Ei, charge, grad_feat_E_scaled, grad_feat_Q_scaled = self.calculate_Ei_with_grad(atom_type_map, feats_in, device)
+        else:
+            Ei, charge = self.calculate_Ei(atom_type_map, feats_in, device)
+            grad_feat_E_scaled, grad_feat_Q_scaled = None, None
         assert Ei is not None
         charge_predict = None
         self.charge_predict = None
@@ -518,7 +557,72 @@ class NEP(nn.Module):
             # print("==single time: tall {} ei {} zbl ei {}".format(t2-t0, t1-t0, t2-t1))
         else:
             # t4 = time.time()
-            Force, Virial = self.calculate_force_virial(radial_Ri, radial_Ri_d, 
+            if use_analytical_nep_grad:
+                grad_feat_E_raw = grad_feat_E_scaled * self.q_scaler
+                dE_radial = None
+                dE_angular = None
+                dE_zbl = None
+                if self.train_2b:
+                    radial_seed = grad_feat_E_raw[:, :self.two_feat_num]
+                    dfeat_c2, dfeat_2b, dfeat_2b_noc = radial_context
+                    dE_radial = CalcOps.calculateNepFeatInputGrad(
+                        radial_seed,
+                        self.c_param_2.contiguous(),
+                        radial_Ri,
+                        radial_NL,
+                        dfeat_c2,
+                        dfeat_2b,
+                        dfeat_2b_noc,
+                        atom_type_map,
+                        self.multi_feat_num,
+                        int(self.input_param.nep_param.fix_cij))
+                if self.l_max_3b > 0:
+                    angular_seed = grad_feat_E_raw[:, self.two_feat_num:]
+                    dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz = angular_context
+                    dE_angular = CalcOps.calculateNepMbFeatInputGrad(
+                        angular_seed,
+                        self.c_param_3.contiguous(),
+                        Ri_angular,
+                        NL_angular,
+                        dfeat_c3,
+                        dfeat_3b,
+                        dfeat_3b_noc,
+                        sum_fxyz,
+                        atom_type_map,
+                        self.two_feat_num,
+                        self.l_max_3b,
+                        self.l_max_4b,
+                        self.l_max_5b,
+                        self.cutoff_angular,
+                        int(self.input_param.nep_param.fix_cij))
+                if ri_zbl is not None:
+                    dE_zbl = torch.autograd.grad(
+                        Etot_for_force,
+                        ri_zbl,
+                        grad_outputs=torch.ones_like(Etot_for_force),
+                        retain_graph=True,
+                        create_graph=True,
+                        allow_unused=True)[0]
+                    if dE_zbl is None:
+                        dE_zbl = torch.zeros_like(ri_zbl)
+                Force, Virial = self.calculate_force_virial_from_descriptor_grad(
+                    dE_radial,
+                    dE_angular,
+                    dE_zbl,
+                    radial_Ri,
+                    radial_Ri_d,
+                    Ri_angular,
+                    Ri_d_angular,
+                    ri_zbl,
+                    ri_d_zbl,
+                    radial_NL,
+                    NL_angular,
+                    neigh_zbl,
+                    num_atom,
+                    device,
+                    dtype)
+            else:
+                Force, Virial = self.calculate_force_virial(radial_Ri, radial_Ri_d, 
                                                         Ri_angular, Ri_d_angular, 
                                                         ri_zbl, ri_d_zbl,
                                                         Etot_for_force, natoms_sum,

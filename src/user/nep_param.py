@@ -35,6 +35,7 @@ class NepParam(object):
         self.max_NN_angular = None
         self.max_nn_from_txt = False
         self.fix_cij = False
+        self.use_analytical_nep_grad = False
         self.fix_hiddenlayer=False
         self.fix_outlayer=False
         self.charge_mode = 0
@@ -320,6 +321,7 @@ class NepParam(object):
             if not isinstance(self.neuron, list):
                 self.neuron = [self.neuron]
             self.fix_cij = get_parameter("fix_cij", model_dict["fitting_net"], False)
+            self.use_analytical_nep_grad = get_parameter("use_analytical_nep_grad", model_dict["fitting_net"], False)
             self.fix_hiddenlayer =get_parameter("fix_hiddenlayer", model_dict["fitting_net"], False)
             self.fix_outlayer =get_parameter("fix_outlayer", model_dict["fitting_net"], False)        
         else:
@@ -332,6 +334,7 @@ class NepParam(object):
         model_dict = get_parameter("model", json_dict, {})
         if "fitting_net" in model_dict.keys():
             self.fix_cij = get_parameter("fix_cij", model_dict["fitting_net"], False)
+            self.use_analytical_nep_grad = get_parameter("use_analytical_nep_grad", model_dict["fitting_net"], False)
             self.fix_hiddenlayer =get_parameter("fix_hiddenlayer", model_dict["fitting_net"], False)
             self.fix_outlayer =get_parameter("fix_outlayer", model_dict["fitting_net"], False)
 
