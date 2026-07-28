@@ -374,11 +374,12 @@ class NEP(nn.Module):
         radial_NL = NL_radial
         radial_Ri = Ri
         radial_Ri_d = Ri_d
+        need_short_range_force = bool(is_calc_f is not False and need_force is not False)
+        need_charge_bec = bool(self.charge_mode and need_bec)
         use_analytical_nep_grad = bool(
             self.use_analytical_nep_grad and
             device.type != "cpu" and
-            is_calc_f is not False and
-            need_force is not False)
+            (need_short_range_force or need_charge_bec))
         radial_context = None
         angular_context = None
 
@@ -470,17 +471,67 @@ class NEP(nn.Module):
             charge_predict, self.atomic_charge_shifted = self.shift_total_charge(charge, num_atom, charge_label)
             self.charge_predict = charge_predict
             if need_bec:
-                self.atomic_bec = self.calculate_bec(
-                    charge,
-                    self.atomic_charge_shifted,
-                    radial_Ri,
-                    radial_Ri_d,
-                    radial_NL,
-                    Ri_angular,
-                    Ri_d_angular,
-                    NL_angular,
-                    device,
-                    dtype)
+                if use_analytical_nep_grad:
+                    grad_feat_Q_raw = grad_feat_Q_scaled * self.q_scaler
+                    dQ_radial = None
+                    dQ_angular = None
+                    if self.train_2b:
+                        radial_seed = grad_feat_Q_raw[:, :self.two_feat_num]
+                        dfeat_c2, dfeat_2b, dfeat_2b_noc = radial_context
+                        dQ_radial = CalcOps.calculateNepFeatInputGrad(
+                            radial_seed,
+                            self.c_param_2.contiguous(),
+                            radial_Ri,
+                            radial_NL,
+                            dfeat_c2,
+                            dfeat_2b,
+                            dfeat_2b_noc,
+                            atom_type_map,
+                            self.multi_feat_num,
+                            int(self.input_param.nep_param.fix_cij))
+                    if self.l_max_3b > 0:
+                        angular_seed = grad_feat_Q_raw[:, self.two_feat_num:]
+                        dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz = angular_context
+                        dQ_angular = CalcOps.calculateNepMbFeatInputGrad(
+                            angular_seed,
+                            self.c_param_3.contiguous(),
+                            Ri_angular,
+                            NL_angular,
+                            dfeat_c3,
+                            dfeat_3b,
+                            dfeat_3b_noc,
+                            sum_fxyz,
+                            atom_type_map,
+                            self.two_feat_num,
+                            self.l_max_3b,
+                            self.l_max_4b,
+                            self.l_max_5b,
+                            self.cutoff_angular,
+                            int(self.input_param.nep_param.fix_cij))
+                    self.atomic_bec = self.calculate_bec_from_descriptor_grad(
+                        self.atomic_charge_shifted,
+                        dQ_radial,
+                        radial_Ri,
+                        radial_Ri_d,
+                        radial_NL,
+                        dQ_angular,
+                        Ri_angular,
+                        Ri_d_angular,
+                        NL_angular,
+                        device,
+                        dtype)
+                else:
+                    self.atomic_bec = self.calculate_bec(
+                        charge,
+                        self.atomic_charge_shifted,
+                        radial_Ri,
+                        radial_Ri_d,
+                        radial_NL,
+                        Ri_angular,
+                        Ri_d_angular,
+                        NL_angular,
+                        device,
+                        dtype)
 
         charge_energy = None
         charge_virial = None
@@ -647,6 +698,51 @@ class NEP(nn.Module):
             # print("==single time: t1 {} t2 {} t3 {} t4 {} t5 {} t6 {} t7 {}".format(t1-t0, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6))
             # check_cuda_memory(-1, -1, "FORWAR calculate_force")
         return Etot, Ei, Force, Egroup, Virial, charge_predict, self.atomic_bec
+
+    def calculate_bec_from_descriptor_grad(
+        self,
+        charge_shifted: torch.Tensor,
+        dQ_radial: Optional[torch.Tensor],
+        Ri: Optional[torch.Tensor],
+        Ri_d: Optional[torch.Tensor],
+        NL_radial: Optional[torch.Tensor],
+        dQ_angular: Optional[torch.Tensor],
+        Ri_angular: Optional[torch.Tensor],
+        Ri_d_angular: Optional[torch.Tensor],
+        NL_angular: Optional[torch.Tensor],
+        device: torch.device,
+        dtype: torch.dtype) -> torch.Tensor:
+        atom_num = charge_shifted.shape[0]
+        identity = torch.eye(3, dtype=dtype, device=device)
+        bec = charge_shifted.reshape(-1, 1, 1) * identity.reshape(1, 3, 3)
+
+        def add_descriptor_bec(
+            bec_value: torch.Tensor,
+            grad_value: Optional[torch.Tensor],
+            descriptor: Optional[torch.Tensor],
+            descriptor_d: Optional[torch.Tensor],
+            neigh: Optional[torch.Tensor],
+            center: int) -> torch.Tensor:
+            if grad_value is None or descriptor is None or descriptor_d is None or neigh is None:
+                return bec_value
+            valid = neigh[center] >= 0
+            if not valid.any():
+                return bec_value
+            neigh_index = neigh[center][valid].to(torch.int64)
+            r12 = descriptor[center, valid, 1:4]
+            f12 = torch.mul(grad_value[center, valid].unsqueeze(-1), descriptor_d[center, valid]).sum(dim=-2)
+            contribution = 0.5 * r12.unsqueeze(-1) * f12.unsqueeze(-2)
+            center_update = torch.zeros_like(bec_value)
+            neighbor_update = torch.zeros_like(bec_value)
+            center_update[center] = contribution.sum(dim=0)
+            neighbor_update.index_add_(0, neigh_index, -contribution)
+            return bec_value + center_update + neighbor_update
+
+        for center in range(atom_num):
+            bec = add_descriptor_bec(bec, dQ_radial, Ri, Ri_d, NL_radial, center)
+            bec = add_descriptor_bec(bec, dQ_angular, Ri_angular, Ri_d_angular, NL_angular, center)
+
+        return (bec * self.sqrt_epsilon_inf.to(dtype=dtype, device=device)).reshape(atom_num, 9)
 
     def calculate_bec(
         self,
