@@ -376,6 +376,8 @@ class NEP(nn.Module):
         radial_Ri_d = Ri_d
         need_short_range_force = bool(is_calc_f is not False and need_force is not False)
         need_charge_bec = bool(self.charge_mode and need_bec)
+        # Experimental descriptor-VJP path. It stays opt-in so the default
+        # training trajectory remains bitwise aligned with the autograd path.
         use_analytical_nep_grad = bool(
             self.use_analytical_nep_grad and
             device.type != "cpu" and
@@ -1243,6 +1245,8 @@ class NEP(nn.Module):
             grad_inputs.append(Ri_zbl)
             grad_names.append("zbl")
 
+        # Autograd computes descriptor gradients; force/virial aggregation is
+        # shared with the analytical path to keep signs and CUDA behavior in one place.
         grads = torch.autograd.grad(
             Etot,
             grad_inputs,
@@ -1279,126 +1283,6 @@ class NEP(nn.Module):
             num_atom,
             device,
             dtype)
-        # t8 = time.time()
-        '''
-        # this result is same as the above code
-        mask: List[Optional[torch.Tensor]] = [torch.ones_like(Ei)]
-        dE = torch.autograd.grad([Ei], [Ri], grad_outputs=mask, retain_graph=True, create_graph=True)[0]
-        '''
-        if device.type == "cpu": #True: 
-            batch_size = num_atom.shape[0]
-            image_atom_index = torch.cumsum(num_atom, dim=0).squeeze(-1)
-            image_atom_index = torch.cat((torch.tensor([0], device=device), image_atom_index), dim=0)
-            if self.train_2b:
-                dE = torch.unsqueeze(dE, dim=-1)
-                dE_Rid = torch.mul(dE, Ri_d).sum(dim=-2)
-                Force = torch.zeros((natoms_sum + 1, 3), device=device, dtype=dtype)
-                Force[1:natoms_sum + 1, :] = -1 * dE_Rid.sum(dim=-2)
-                Virial = torch.zeros((batch_size, 9), device=device, dtype=dtype)
-                indice = (list_neigh+1).flatten().unsqueeze(-1).expand(-1, 3).to(torch.int64) # list_neigh's index start from 1, so the Force's dimension should be natoms_sum + 1
-                values = dE_Rid.view(-1, 3)
-                Force.scatter_add_(0, indice, values).view(natoms_sum + 1, 3)
-                
-                for i in range(0, batch_size):
-                    Virial[i, 0] = (Ri[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid[image_atom_index[i]:image_atom_index[i+1], :, 0]).flatten().sum(dim=0) # xx
-                    Virial[i, 1] = (Ri[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid[image_atom_index[i]:image_atom_index[i+1], :, 1]).flatten().sum(dim=0) # xy
-                    Virial[i, 2] = (Ri[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # xz
-                    Virial[i, 4] = (Ri[image_atom_index[i]:image_atom_index[i+1], :, 2] * dE_Rid[image_atom_index[i]:image_atom_index[i+1], :, 1]).flatten().sum(dim=0) # yy
-                    Virial[i, 5] = (Ri[image_atom_index[i]:image_atom_index[i+1], :, 2] * dE_Rid[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # yz
-                    Virial[i, 8] = (Ri[image_atom_index[i]:image_atom_index[i+1], :, 3] * dE_Rid[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # zz
-                    Virial[i, 3] = Virial[i, 1]
-                    Virial[i, 6] = Virial[i, 2]
-                    Virial[i, 7] = Virial[i, 5]
-                Force = Force[1:, :]
-            if self.l_max_3b > 0:
-                dE_angular = torch.unsqueeze(dE_angular, dim=-1)
-                dE_Rid_angular = torch.mul(dE_angular, Ri_d_angular).sum(dim=-2)
-                Force_angular = torch.zeros((natoms_sum + 1, 3), device=device, dtype=dtype)
-                Force_angular[1:natoms_sum + 1, :] = -1 * dE_Rid_angular.sum(dim=-2)
-                Virial_angular = torch.zeros((batch_size, 9), device=device, dtype=dtype)
-                indice = (list_neigh_angular+1).flatten().unsqueeze(-1).expand(-1, 3).to(torch.int64) # list_neigh's index start from 1, so the Force's dimension should be natoms_sum + 1
-                values = dE_Rid_angular.view(-1, 3)
-                Force_angular.scatter_add_(0, indice, values).view(natoms_sum + 1, 3)
-
-                for i in range(0, batch_size):
-                    Virial_angular[i, 0] = (Ri_angular[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid_angular[image_atom_index[i]:image_atom_index[i+1], :, 0]).flatten().sum(dim=0) # xx
-                    Virial_angular[i, 1] = (Ri_angular[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid_angular[image_atom_index[i]:image_atom_index[i+1], :, 1]).flatten().sum(dim=0) # xy
-                    Virial_angular[i, 2] = (Ri_angular[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid_angular[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # xz
-                    Virial_angular[i, 4] = (Ri_angular[image_atom_index[i]:image_atom_index[i+1], :, 2] * dE_Rid_angular[image_atom_index[i]:image_atom_index[i+1], :, 1]).flatten().sum(dim=0) # yy
-                    Virial_angular[i, 5] = (Ri_angular[image_atom_index[i]:image_atom_index[i+1], :, 2] * dE_Rid_angular[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # yz
-                    Virial_angular[i, 8] = (Ri_angular[image_atom_index[i]:image_atom_index[i+1], :, 3] * dE_Rid_angular[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # zz
-                    Virial_angular[i, 3] = Virial_angular[i, 1]
-                    Virial_angular[i, 6] = Virial_angular[i, 2]
-                    Virial_angular[i, 7] = Virial_angular[i, 5]
-                Force_angular = Force_angular[1:, :]
-
-            if Ri_zbl is not None:
-                dE_zbl = torch.unsqueeze(dE_zbl, dim=-1)
-                dE_Rid_zbl = torch.mul(dE_zbl, Ri_d_zbl).sum(dim=-2)
-                Force_zbl = torch.zeros((natoms_sum + 1, 3), device=device, dtype=dtype)
-                Force_zbl[1:natoms_sum + 1, :] = -1 * dE_Rid_zbl.sum(dim=-2)
-                Virial_zbl = torch.zeros((batch_size, 9), device=device, dtype=dtype)
-                indice = (list_neigh_zbl+1).flatten().unsqueeze(-1).expand(-1, 3).to(torch.int64)
-                values = dE_Rid_zbl.view(-1, 3)
-                Force_zbl.scatter_add_(0, indice, values).view(natoms_sum + 1, 3)
-
-                for i in range(0, batch_size):
-                    Virial_zbl[i, 0] = (Ri_zbl[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid_zbl[image_atom_index[i]:image_atom_index[i+1], :, 0]).flatten().sum(dim=0) # xx
-                    Virial_zbl[i, 1] = (Ri_zbl[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid_zbl[image_atom_index[i]:image_atom_index[i+1], :, 1]).flatten().sum(dim=0) # xy
-                    Virial_zbl[i, 2] = (Ri_zbl[image_atom_index[i]:image_atom_index[i+1], :, 1] * dE_Rid_zbl[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # xz
-                    Virial_zbl[i, 4] = (Ri_zbl[image_atom_index[i]:image_atom_index[i+1], :, 2] * dE_Rid_zbl[image_atom_index[i]:image_atom_index[i+1], :, 1]).flatten().sum(dim=0) # yy
-                    Virial_zbl[i, 5] = (Ri_zbl[image_atom_index[i]:image_atom_index[i+1], :, 2] * dE_Rid_zbl[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # yz
-                    Virial_zbl[i, 8] = (Ri_zbl[image_atom_index[i]:image_atom_index[i+1], :, 3] * dE_Rid_zbl[image_atom_index[i]:image_atom_index[i+1], :, 2]).flatten().sum(dim=0) # zz
-                    Virial_zbl[i, 3] = Virial_zbl[i, 1]
-                    Virial_zbl[i, 6] = Virial_zbl[i, 2]
-                    Virial_zbl[i, 7] = Virial_zbl[i, 5]
-                Force_zbl = Force_zbl[1:, :]
-        else: # gpu code
-            if self.train_2b:
-                Ri_d = Ri_d.view(natoms_sum, -1, 3)
-                dE_tmp = dE.view(natoms_sum, 1, -1)
-                Force = -1 * torch.matmul(dE_tmp, Ri_d).squeeze(-2)
-                ImageDR = Ri[:,:,1:].clone()
-                # tmp_list_neigh = torch.unsqueeze(list_neigh,2)
-                # tmp_list_neigh = (tmp_list_neigh - 1).type(torch.int)
-                Force = CalcOps.calculateNepForce(list_neigh, dE, Ri_d, Force)[0] # the save order in memory of dE and dE_tmp are in the same
-                Virial,atom_virial = CalcOps.calculateNepVirial(list_neigh, dE, ImageDR, Ri_d, num_atom)
-            if self.l_max_3b > 0:
-                Ri_d_angular = Ri_d_angular.view(natoms_sum, -1, 3)
-                dE_angular_tmp = dE_angular.view(natoms_sum, 1, -1)
-                Force_angular = -1 * torch.matmul(dE_angular_tmp, Ri_d_angular).squeeze(-2)
-                ImageDR_angular = Ri_angular[:,:,1:].clone()
-                # tmp_list_neigh_angular = torch.unsqueeze(list_neigh_angular,2)
-                # tmp_list_neigh_angular = (tmp_list_neigh_angular - 1).type(torch.int)
-                Force_angular = CalcOps.calculateNepForce(list_neigh_angular, dE_angular, Ri_d_angular, Force_angular)[0]
-                Virial_angular = CalcOps.calculateNepVirial(list_neigh_angular, dE_angular, ImageDR_angular, Ri_d_angular, num_atom)[0]
-            if Ri_zbl is not None:
-                Ri_d_zbl = Ri_d_zbl.view(natoms_sum, -1, 3)
-                dE_zbl_tmp = dE_zbl.view(natoms_sum, 1, -1)
-                Force_zbl = -1 * torch.matmul(dE_zbl_tmp, Ri_d_zbl).squeeze(-2)
-                ImageDR_zbl = Ri_zbl[:,:,1:].clone()
-                # list_neigh_zbl = torch.unsqueeze(list_neigh_zbl,2)
-                # list_neigh_zbl = (list_neigh_zbl - 1).type(torch.int)
-                Force_zbl = CalcOps.calculateNepForce(list_neigh_zbl, dE_zbl, Ri_d_zbl, Force_zbl)[0]
-                Virial_zbl = CalcOps.calculateNepVirial(list_neigh_zbl, dE_zbl, ImageDR_zbl, Ri_d_zbl, num_atom)[0]                
-        # t9 = time.time()
-        # print("t8 {} t9 {}".format(t8-t7, t9-t8))
-        # del dE ???
-        # print(-Force)
-        if Ri_zbl is not None:
-            if self.train_2b and self.l_max_3b > 0:
-                return -(Force + Force_angular + Force_zbl), -(Virial + Virial_angular + Virial_zbl)
-            elif self.l_max_3b > 0:
-                return -(Force_angular + Force_zbl), -(Virial_angular + Virial_zbl)
-            else:
-                return -(Force + Force_zbl), -(Virial + Virial_zbl)
-        else:
-            if self.train_2b and self.l_max_3b > 0:
-                return -(Force + Force_angular), -(Virial + Virial_angular)
-            elif self.l_max_3b > 0:
-                return -Force_angular, -Virial_angular
-            return -Force, -Virial
-
 
     def calculate_qn(self,
                      Imagetype_map: torch.Tensor,
