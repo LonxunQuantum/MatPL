@@ -37,27 +37,35 @@ def _get_fragment_charge_loss(atomic_charge, sample, criterion):
 
     dtype = atomic_charge.dtype
     device = atomic_charge.device
-    num_atom = sample["num_atom"].reshape(-1).tolist()
-    fragment_per_image = sample["fragment"].reshape(-1).to(device=device).split(num_atom)
-    label_per_image = sample["fragment_charge"].reshape(-1).to(dtype=dtype, device=device).split(num_atom)
-    charge_per_image = atomic_charge.reshape(-1).split(num_atom)
+    num_atom = sample["num_atom"].reshape(-1).to(device=device, dtype=torch.int64)
+    fragment = sample["fragment"].reshape(-1).to(device=device, dtype=torch.int64)
+    label = sample["fragment_charge"].reshape(-1).to(dtype=dtype, device=device)
+    charge = atomic_charge.reshape(-1)
 
-    pred_fragments = []
-    label_fragments = []
-    for image_charge, image_fragment, image_label in zip(charge_per_image, fragment_per_image, label_per_image):
-        valid = (~torch.isnan(image_label)) & (image_fragment >= 0)
-        if not valid.any().item():
-            continue
-        for frag_id in torch.unique(image_fragment[valid]):
-            frag_mask = valid & (image_fragment == frag_id)
-            pred_fragments.append(image_charge[frag_mask].sum())
-            label_fragments.append(image_label[frag_mask][0])
-
-    if not pred_fragments:
+    valid = (~torch.isnan(label)) & (fragment >= 0)
+    if not valid.any().item():
         return None
-    pred = torch.stack(pred_fragments).reshape(-1, 1)
-    label = torch.stack(label_fragments).reshape(-1, 1)
-    return criterion(pred, label)
+
+    image_index = torch.repeat_interleave(
+        torch.arange(num_atom.numel(), device=device, dtype=torch.int64),
+        num_atom)
+    max_fragment = torch.clamp(fragment[valid].max(), min=0) + 1
+    global_fragment = image_index[valid] * max_fragment + fragment[valid]
+    unique_fragment, inverse = torch.unique(global_fragment, sorted=True, return_inverse=True)
+
+    pred = torch.zeros(unique_fragment.numel(), dtype=dtype, device=device)
+    pred.index_add_(0, inverse, charge[valid])
+
+    label_index = torch.full((unique_fragment.numel(),), label.numel(), dtype=torch.int64, device=device)
+    atom_index = torch.arange(label.numel(), device=device, dtype=torch.int64)[valid]
+    if hasattr(label_index, "scatter_reduce_"):
+        label_index.scatter_reduce_(0, inverse, atom_index, reduce="amin", include_self=True)
+    else:
+        for idx, atom_idx in zip(inverse.tolist(), atom_index.tolist()):
+            if atom_idx < label_index[idx]:
+                label_index[idx] = atom_idx
+    target = label[label_index]
+    return criterion(pred.reshape(-1, 1), target.reshape(-1, 1))
 
 
 def get_charge_loss(charge_predict, sample, criterion, args:InputParam, atomic_charge=None):
@@ -105,6 +113,21 @@ def get_bec_loss(bec_predict, sample, criterion, args:InputParam):
     if not bec_mask.any().item():
         return None, None
     return criterion(bec_predict[bec_mask], bec_label[bec_mask]), bec_mask
+
+
+def _get_model_output_requests(sample, args: InputParam, train_virial: bool):
+    need_force = bool(getattr(args.optimizer_param, "train_force", True))
+    need_bec = has_bec_label(sample, args)
+    need_charge_energy = bool(
+        getattr(args.optimizer_param, "train_energy", True) or
+        need_force or
+        train_virial)
+    return {
+        "need_force": need_force,
+        "need_bec": need_bec,
+        "need_charge_virial": train_virial,
+        "need_charge_energy": need_charge_energy,
+    }
 
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam):
@@ -247,7 +270,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         learning_rate.update(real_lr)
         data_mask = Virial_label[:, 0] > -1e6
         train_virial = args.optimizer_param.train_virial and data_mask.any().item()
-        batch_has_bec_label = has_bec_label(sample, args)
+        output_requests = _get_model_output_requests(sample, args, train_virial)
         # check_cuda_memory(epoch, -1, f"before forword atomnums {Force_label.shape[0]}", False, args.rank)
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
             NN_radial, NL_radial, Ri_radial,
@@ -257,15 +280,15 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             position=sample.get("position"),
             box_original=sample.get("box_original"),
             volume=sample.get("volume"),
-            need_force=True,
-            need_bec=batch_has_bec_label,
-            need_charge_virial=train_virial,
-            need_charge_energy=True
+            **output_requests
         )
         # check_cuda_memory(epoch, -1, "end forword", False, args.rank)
         optimizer.zero_grad()
-        loss_F_val = criterion(Force_predict, Force_label)
         loss_Etot_val = criterion(Etot_predict, Etot_label)
+        if args.optimizer_param.train_force:
+            loss_F_val = criterion(Force_predict, Force_label)
+        else:
+            loss_F_val = torch.zeros_like(loss_Etot_val)
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         atomic_charge_for_loss = getattr(module, "atomic_charge_shifted", None)
@@ -331,7 +354,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss_Charge.update(loss_Charge_per_atom_val.item(), batch_size)
         if loss_BEC_val is not None:
             loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
-        loss_Force.update(loss_F_val.item(), batch_size)
+        if args.optimizer_param.train_force:
+            loss_Force.update(loss_F_val.item(), batch_size)
 
         batch_time.update(time.time() - end)
         end = time.time()
