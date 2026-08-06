@@ -682,7 +682,11 @@ void NEP::inference(
       nep_data.sum_fxyz.data());
     CUDA_CHECK_KERNEL
 
-    shift_total_charge<<<1, 1024>>>(N, nep_data.charge.data(), static_cast<float>(total_charge));
+    shift_total_charge<<<1, 1024>>>(
+      N,
+      nep_data.charge.data(),
+      static_cast<float>(total_charge),
+      annmb.sqrt_epsilon_inf);
     CUDA_CHECK_KERNEL
 
     find_bec_diagonal<<<grid_size, BLOCK_SIZE>>>(

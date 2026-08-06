@@ -3130,7 +3130,8 @@ void NEP_CPU::compute(
     std::fill(bec.begin(), bec.begin() + N * 9, 0.0);
     std::fill(D_real.begin(), D_real.begin() + N, 0.0);
     std::vector<double> charge_shifted(charge.begin(), charge.begin() + N);
-    shift_total_charge(N, charge_shifted, total_charge);
+    const double screened_total_charge = total_charge / annmb.sqrt_epsilon_inf[0];
+    shift_total_charge(N, charge_shifted, screened_total_charge);
     charge = charge_shifted;
     find_bec_diagonal(N, charge_shifted, bec);
     find_bec_radial(

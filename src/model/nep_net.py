@@ -611,7 +611,19 @@ class NEP(nn.Module):
         else:
             # t4 = time.time()
             if use_analytical_nep_grad:
-                grad_feat_E_raw = grad_feat_E_scaled * self.q_scaler
+                grad_feat_total_scaled = grad_feat_E_scaled
+                # Etot_for_force includes reciprocal charge energy. The analytical
+                # descriptor VJP must include dE_charge/dq * dq/dfeat, matching autograd.
+                if charge_energy is not None and charge is not None and grad_feat_Q_scaled is not None:
+                    grad_charge_energy = torch.autograd.grad(
+                        charge_energy.sum(),
+                        charge,
+                        retain_graph=True,
+                        create_graph=True,
+                        allow_unused=True)[0]
+                    if grad_charge_energy is not None:
+                        grad_feat_total_scaled = grad_feat_total_scaled + grad_charge_energy.reshape(-1, 1) * grad_feat_Q_scaled
+                grad_feat_E_raw = grad_feat_total_scaled * self.q_scaler
                 dE_radial = None
                 dE_angular = None
                 dE_zbl = None
@@ -718,31 +730,38 @@ class NEP(nn.Module):
         identity = torch.eye(3, dtype=dtype, device=device)
         bec = charge_shifted.reshape(-1, 1, 1) * identity.reshape(1, 3, 3)
 
-        def add_descriptor_bec(
+        def add_descriptor_bec_vectorized(
             bec_value: torch.Tensor,
             grad_value: Optional[torch.Tensor],
             descriptor: Optional[torch.Tensor],
             descriptor_d: Optional[torch.Tensor],
-            neigh: Optional[torch.Tensor],
-            center: int) -> torch.Tensor:
+            neigh: Optional[torch.Tensor]) -> torch.Tensor:
             if grad_value is None or descriptor is None or descriptor_d is None or neigh is None:
                 return bec_value
-            valid = neigh[center] >= 0
+            valid = neigh >= 0
             if not valid.any():
                 return bec_value
-            neigh_index = neigh[center][valid].to(torch.int64)
-            r12 = descriptor[center, valid, 1:4]
-            f12 = torch.mul(grad_value[center, valid].unsqueeze(-1), descriptor_d[center, valid]).sum(dim=-2)
+
+            max_neigh = neigh.shape[1]
+            center_index = torch.arange(atom_num, device=device, dtype=torch.int64).repeat_interleave(max_neigh)
+            valid_flat = valid.reshape(-1)
+            center_index = center_index[valid_flat]
+            neigh_index = neigh.reshape(-1)[valid_flat].to(torch.int64)
+
+            r12 = descriptor.reshape(-1, descriptor.shape[-1])[valid_flat, 1:4]
+            grad_pair = grad_value.reshape(-1, grad_value.shape[-1])[valid_flat]
+            descriptor_d_pair = descriptor_d.reshape(-1, descriptor_d.shape[-2], descriptor_d.shape[-1])[valid_flat]
+            f12 = torch.mul(grad_pair.unsqueeze(-1), descriptor_d_pair).sum(dim=-2)
             contribution = 0.5 * r12.unsqueeze(-1) * f12.unsqueeze(-2)
+
             center_update = torch.zeros_like(bec_value)
             neighbor_update = torch.zeros_like(bec_value)
-            center_update[center] = contribution.sum(dim=0)
+            center_update.index_add_(0, center_index, contribution)
             neighbor_update.index_add_(0, neigh_index, -contribution)
             return bec_value + center_update + neighbor_update
 
-        for center in range(atom_num):
-            bec = add_descriptor_bec(bec, dQ_radial, Ri, Ri_d, NL_radial, center)
-            bec = add_descriptor_bec(bec, dQ_angular, Ri_angular, Ri_d_angular, NL_angular, center)
+        bec = add_descriptor_bec_vectorized(bec, dQ_radial, Ri, Ri_d, NL_radial)
+        bec = add_descriptor_bec_vectorized(bec, dQ_angular, Ri_angular, Ri_d_angular, NL_angular)
 
         return (bec * self.sqrt_epsilon_inf.to(dtype=dtype, device=device)).reshape(atom_num, 9)
 
@@ -1025,15 +1044,21 @@ class NEP(nn.Module):
         split_sizes = num_atom.reshape(-1).tolist()
         charge_per_image = charge.split(split_sizes)
         charge_sum = torch.stack([x.sum() for x in charge_per_image]).reshape(-1, 1)
+        sqrt_epsilon_inf = self.sqrt_epsilon_inf.to(
+            dtype=charge.dtype, device=charge.device)
+        physical_charge_sum = charge_sum * sqrt_epsilon_inf
         if charge_label is None:
-            charge_label = torch.zeros_like(charge_sum)
+            physical_charge_label = torch.zeros_like(physical_charge_sum)
         else:
-            charge_label = charge_label.reshape(-1, 1).to(dtype=charge.dtype, device=charge.device)
-        correction = (charge_label - charge_sum) / num_atom.reshape(-1, 1).to(dtype=charge.dtype)
+            physical_charge_label = charge_label.reshape(-1, 1).to(
+                dtype=charge.dtype, device=charge.device)
+        screened_charge_target = physical_charge_label / sqrt_epsilon_inf
+        correction = (screened_charge_target - charge_sum) / \
+            num_atom.reshape(-1, 1).to(dtype=charge.dtype)
         shifted = []
         for image_charge, image_correction in zip(charge_per_image, correction):
             shifted.append(image_charge + image_correction)
-        return charge_sum, torch.cat(shifted, dim=0)
+        return physical_charge_sum, torch.cat(shifted, dim=0)
 
     def calculate_Ri(self,
                      ImagedR: torch.Tensor, 

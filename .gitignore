@@ -1,4 +1,5 @@
 # Generated files
+src/test/dev_gpu_nep_dp
 train*
 datas
 datas/*

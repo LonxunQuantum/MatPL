@@ -19,10 +19,18 @@ else:
     torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
     CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
 
-# 无 bec 标签的结构中，Li/Na/K(+1)、Mg/Ca(+2) 金属离子的 BEC 按物理意义设为单位矩阵
-# 参与训练；其余原子（非金属及 Fe/Zn 过渡金属）保持 -1e6 掩码，不参与 bec 训练
-BEC_DEFAULT_METAL_TYPES = (3, 11, 12, 19, 20)  # Li Na Mg K Ca 的原子序数
-BEC_DEFAULT_VALUE = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # xx xy xz yx yy yz zx zy zz
+# 无 BEC 标签时，可为指定离子生成价态对角张量；其他原子保持 -1e6 掩码。
+BEC_MONOVALENT_ION_TYPES = (3, 11, 19)  # Li, Na, K
+BEC_DIVALENT_ION_TYPES = (12, 20)  # Mg, Ca
+
+
+def _build_default_ion_bec(atom_z):
+    atom_z = np.asarray(atom_z).reshape(-1)
+    bec = np.full((atom_z.size, 9), -1e6, dtype=float)
+    identity = np.eye(3, dtype=float).reshape(9)
+    bec[np.isin(atom_z, BEC_MONOVALENT_ION_TYPES)] = identity
+    bec[np.isin(atom_z, BEC_DIVALENT_ION_TYPES)] = 2.0 * identity
+    return bec
 
 def get_det(box: np.array):
     matrix = box.reshape((3, 3))
@@ -310,8 +318,7 @@ class UniDataset(Dataset):
             bec_array = np.ones([len(data["atom_type_map"]), 9]) * -1e6
             if self.fill_metal_bec:
                 atom_z = np.asarray(self.image_list[index].atom_types_image)
-                metal_mask = np.isin(atom_z, BEC_DEFAULT_METAL_TYPES)
-                bec_array[metal_mask] = np.array(BEC_DEFAULT_VALUE, dtype=float)
+                bec_array = _build_default_ion_bec(atom_z)
             data["bec"] = torch.from_numpy(bec_array).to(self.dtype)
         return data
         # for key in list(data.keys()):

@@ -268,13 +268,19 @@ class nep_network:
         self.criterion = nn.MSELoss().to(self.device)
 
     def load_data(self):
+        fill_ion_bec = (
+            self.input_param.optimizer_param.train_bec
+            and getattr(
+                self.input_param.optimizer_param, "train_bec_ion", False)
+        )
         if self.input_param.inference:# 只在debug ckpt 推理时启用
             test_dataset = UniDataset(self.input_param.file_paths.test_data_path, 
                                             self.input_param.file_paths.format, 
                                             self.input_param.atom_type,
                                             cutoff_radial = self.input_param.nep_param.cutoff[0],
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
-                                            cal_energy=False)
+                                            cal_energy=False,
+                                            fill_metal_bec=fill_ion_bec)
 
             test_sampler = torch.utils.data.distributed.DistributedSampler(
                 test_dataset,
@@ -319,7 +325,7 @@ class nep_network:
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
                                             batch_max_types=self.input_param.max_allow_atom_type,
                                             cal_energy=True,
-                                            fill_metal_bec=self.input_param.optimizer_param.train_bec)
+                                            fill_metal_bec=fill_ion_bec)
 
             valid_dataset = UniDataset(self.input_param.file_paths.valid_data_path, 
                                             self.input_param.file_paths.format, 
@@ -327,7 +333,7 @@ class nep_network:
                                             cutoff_radial = self.input_param.nep_param.cutoff[0],
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
                                             cal_energy=False,
-                                            fill_metal_bec=self.input_param.optimizer_param.train_bec
+                                            fill_metal_bec=fill_ion_bec
                                             )
             energy_shift = train_dataset.get_energy_shift()
             # 使用 DistributedSampler
@@ -1002,8 +1008,11 @@ class nep_network:
 
 
         start = time.time()
-        res_pd, etot_label_list, etot_predict_list, ei_label_list, ei_predict_list, force_label_list, force_predict_list, virial_label_list, virial_predict_list\
-        = predict(train_loader, model, self.criterion, self.device, self.input_param)
+        (
+            res_pd, etot_label_list, etot_predict_list, ei_label_list, ei_predict_list,
+            force_label_list, force_predict_list, virial_label_list, virial_predict_list,
+            charge_label_list, charge_predict_list, charge_rmse_list, bec_label_list, bec_predict_list
+        ) = predict(train_loader, model, self.criterion, self.device, self.input_param)
         end = time.time()
         print("fitting time:", end - start, 's')
 
@@ -1022,16 +1031,29 @@ class nep_network:
 
         write_arrays_to_file(os.path.join(inference_path, "dft_virial.txt"), virial_label_list, head_line="#\txx\txy\txz\tyy\tyz\tzz")
         write_arrays_to_file(os.path.join(inference_path, "inference_virial.txt"), virial_predict_list, head_line="#\txx\txy\txz\tyy\tyz\tzz")
+        has_charge = any(np.asarray(charge_predict).size for charge_predict in charge_predict_list)
+        has_bec = any(np.asarray(bec_predict).size for bec_predict in bec_predict_list)
+        if has_charge:
+            write_arrays_to_file(os.path.join(inference_path, "dft_charge.txt"), charge_label_list)
+            write_arrays_to_file(os.path.join(inference_path, "inference_charge.txt"), charge_predict_list)
+        if has_bec:
+            write_arrays_to_file(os.path.join(inference_path, "dft_bec.txt"), bec_label_list, head_line="#\txx\txy\txz\tyx\tyy\tyz\tzx\tzy\tzz")
+            write_arrays_to_file(os.path.join(inference_path, "inference_bec.txt"), bec_predict_list, head_line="#\txx\txy\txz\tyx\tyy\tyz\tzx\tzy\tzz")
 
         # res_pd.to_csv(os.path.join(inference_path, "inference_loss.csv"))
 
-        rmse_E, rmse_F, rmse_V, e_r2, f_r2, v_r2 = inference_plot(inference_path)
+        rmse_E, rmse_F, rmse_V, e_r2, f_r2, v_r2, plot_rmse_charge, charge_r2, rmse_bec, bec_r2 = inference_plot(inference_path, return_extra=True)
+        rmse_charge = np.mean(charge_rmse_list) if len(charge_rmse_list) else plot_rmse_charge
 
         inference_cout = ""
         inference_cout += "For {} images: \n".format(res_pd.shape[0])
-        inference_cout += "Average RMSE of Etot per atom: {} \n".format(rmse_E)
-        inference_cout += "Average RMSE of Force: {} \n".format(rmse_F)
-        inference_cout += "Average RMSE of Virial per atom: {} \n".format(rmse_V)
+        inference_cout += "Average RMSE of Etot per atom: {} R2: {}\n".format(rmse_E, e_r2)
+        inference_cout += "Average RMSE of Force: {} R2: {}\n".format(rmse_F, f_r2)
+        if rmse_charge is not None:
+            inference_cout += "Average RMSE of Charge: {} R2: {}\n".format(rmse_charge, charge_r2)
+        if rmse_bec is not None:
+            inference_cout += "Average RMSE of BEC: {} R2: {}\n".format(rmse_bec, bec_r2)
+        inference_cout += "Average RMSE of Virial per atom: {} R2: {}\n".format(rmse_V, v_r2)
         inference_cout += "\nMore details can be found under the file directory:\n{}\n".format(os.path.realpath(self.input_param.file_paths.test_dir))
         print(inference_cout)
         with open(os.path.join(inference_path, "inference_summary.txt"), 'w') as wf:

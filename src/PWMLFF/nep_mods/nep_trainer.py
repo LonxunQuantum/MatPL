@@ -31,9 +31,11 @@ def get_model_module(model, args:InputParam):
     return model.module if getattr(args, "world_size", 1) > 1 else model
 
 
-def _get_fragment_charge_loss(atomic_charge, sample, criterion):
+def _get_fragment_charge_loss_and_count(
+        atomic_charge, sample, criterion, train_charge_ion=True,
+        charge_scale=None):
     if atomic_charge is None or "fragment" not in sample or "fragment_charge" not in sample:
-        return None
+        return None, 0, False
 
     dtype = atomic_charge.dtype
     device = atomic_charge.device
@@ -44,7 +46,7 @@ def _get_fragment_charge_loss(atomic_charge, sample, criterion):
 
     valid = (~torch.isnan(label)) & (fragment >= 0)
     if not valid.any().item():
-        return None
+        return None, 0, False
 
     image_index = torch.repeat_interleave(
         torch.arange(num_atom.numel(), device=device, dtype=torch.int64),
@@ -65,36 +67,74 @@ def _get_fragment_charge_loss(atomic_charge, sample, criterion):
             if atom_idx < label_index[idx]:
                 label_index[idx] = atom_idx
     target = label[label_index]
-    return criterion(pred.reshape(-1, 1), target.reshape(-1, 1))
+    if train_charge_ion:
+        if charge_scale is not None:
+            pred = pred * charge_scale.to(dtype=dtype, device=device)
+    else:
+        neutral = torch.isclose(
+            target, torch.zeros_like(target), rtol=0.0, atol=1e-8)
+        if not neutral.any().item():
+            return None, 0, True
+        pred = pred[neutral]
+        target = target[neutral]
+
+    loss = criterion(pred.reshape(-1, 1), target.reshape(-1, 1))
+    return loss, target.numel(), True
 
 
-def get_charge_loss(charge_predict, sample, criterion, args:InputParam, atomic_charge=None):
+def _get_fragment_charge_loss(atomic_charge, sample, criterion):
+    loss, _, _ = _get_fragment_charge_loss_and_count(
+        atomic_charge, sample, criterion, train_charge_ion=True)
+    return loss
+
+
+def get_charge_loss_stats(
+        charge_predict, sample, criterion, args:InputParam,
+        atomic_charge=None, charge_scale=None):
+    """Return optimizer loss, log loss, and the number of charge targets."""
     if not getattr(args.optimizer_param, "train_charge", False):
-        return None
+        return None, None, 0
 
-    fragment_loss = _get_fragment_charge_loss(atomic_charge, sample, criterion)
+    fragment_loss, fragment_count, has_fragment_labels = \
+        _get_fragment_charge_loss_and_count(
+            atomic_charge,
+            sample,
+            criterion,
+            train_charge_ion=getattr(
+                args.optimizer_param, "train_charge_ion", False),
+            charge_scale=charge_scale,
+        )
     if fragment_loss is not None:
-        return fragment_loss
+        return fragment_loss, fragment_loss, fragment_count
+    if has_fragment_labels:
+        return None, None, 0
 
     if charge_predict is None or "charge" not in sample:
-        return None
-    charge_label = sample["charge"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
-    return criterion(charge_predict, charge_label)
+        return None, None, 0
+
+    charge_label = sample["charge"].reshape(-1, 1).to(
+        dtype=charge_predict.dtype, device=charge_predict.device)
+    optimizer_loss = criterion(charge_predict, charge_label)
+    num_atom = sample["num_atom"].reshape(-1, 1).to(
+        dtype=charge_predict.dtype, device=charge_predict.device)
+    log_loss = criterion(charge_predict / num_atom, charge_label / num_atom)
+    return optimizer_loss, log_loss, charge_label.numel()
 
 
-def get_charge_loss_per_atom(charge_predict, sample, criterion, args:InputParam, atomic_charge=None):
-    if not getattr(args.optimizer_param, "train_charge", False):
-        return None
+def get_charge_loss(
+        charge_predict, sample, criterion, args:InputParam,
+        atomic_charge=None, charge_scale=None):
+    optimizer_loss, _, _ = get_charge_loss_stats(
+        charge_predict, sample, criterion, args, atomic_charge, charge_scale)
+    return optimizer_loss
 
-    fragment_loss = _get_fragment_charge_loss(atomic_charge, sample, criterion)
-    if fragment_loss is not None:
-        return fragment_loss
 
-    if charge_predict is None or "charge" not in sample:
-        return None
-    charge_label = sample["charge"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
-    num_atom = sample["num_atom"].reshape(-1, 1).to(dtype=charge_predict.dtype, device=charge_predict.device)
-    return criterion(charge_predict / num_atom, charge_label / num_atom)
+def get_charge_loss_per_atom(
+        charge_predict, sample, criterion, args:InputParam,
+        atomic_charge=None, charge_scale=None):
+    _, log_loss, _ = get_charge_loss_stats(
+        charge_predict, sample, criterion, args, atomic_charge, charge_scale)
+    return log_loss
 
 
 def has_bec_label(sample, args:InputParam):
@@ -115,6 +155,140 @@ def get_bec_loss(bec_predict, sample, criterion, args:InputParam):
     return criterion(bec_predict[bec_mask], bec_label[bec_mask]), bec_mask
 
 
+def _has_bec_label_for_inference(sample):
+    if "bec" not in sample:
+        return False
+    return (sample["bec"][:, 0] > -1e6).any().item()
+
+
+def _split_tensor_by_num_atom(tensor, num_atom):
+    if tensor is None:
+        return []
+    tensor = tensor.reshape(-1, *tensor.shape[1:])
+    num_atom_list = num_atom.reshape(-1).detach().cpu().numpy().astype(int).tolist()
+    chunks = torch.split(tensor, num_atom_list, dim=0)
+    return [chunk.detach().cpu().numpy() for chunk in chunks]
+
+
+def _charge_mode_enabled(model, args):
+    module = get_model_module(model, args)
+    return bool(getattr(module, "charge_mode", 0))
+
+
+def _metric_value(loss, take_root=False):
+    if loss is None:
+        return np.nan
+    value = loss ** 0.5 if take_root else loss
+    return float(value)
+
+
+def _build_predict_metric_row(
+        image_index, etot_rmse, etot_atom_rmse, ei_rmse, force_rmse, args,
+        charge_loss=None, bec_loss=None, egroup_loss=None,
+        virial_loss=None, virial_per_atom_loss=None):
+    row = {
+        "img_idx": image_index,
+        "RMSE_Etot": float(etot_rmse),
+        "RMSE_Etot_per_atom": float(etot_atom_rmse),
+        "RMSE_Ei": float(ei_rmse),
+        "RMSE_F": float(force_rmse),
+    }
+    if args.optimizer_param.train_charge:
+        row["RMSE_charge"] = _metric_value(charge_loss, take_root=True)
+    if args.optimizer_param.train_bec:
+        row["RMSE_BEC"] = _metric_value(bec_loss, take_root=True)
+    if args.optimizer_param.train_egroup:
+        row["RMSE_Egroup"] = _metric_value(egroup_loss)
+    if args.optimizer_param.train_virial:
+        row["RMSE_virial"] = _metric_value(virial_loss)
+        row["RMSE_virial_per_atom"] = _metric_value(virial_per_atom_loss)
+    return row
+
+
+def _collect_charge_outputs_for_inference(
+        atomic_charge, total_charge_predict, sample, train_charge_ion=False,
+        charge_scale=None):
+    if atomic_charge is None:
+        return [], [], []
+
+    num_atom = sample["num_atom"].reshape(-1).detach().cpu().numpy().astype(int).tolist()
+    charge_predict_chunks = [
+        chunk.detach().cpu().numpy().reshape(-1)
+        for chunk in torch.split(atomic_charge.reshape(-1), num_atom, dim=0)
+    ]
+    charge_label_chunks = []
+    charge_rmse_list = []
+    scale = None
+    if charge_scale is not None:
+        scale = float(charge_scale.detach().cpu().reshape(-1)[0])
+
+    if "fragment_charge" in sample and "fragment" in sample:
+        fragment_charge_chunks = _split_tensor_by_num_atom(sample["fragment_charge"], sample["num_atom"])
+        fragment_chunks = _split_tensor_by_num_atom(sample["fragment"], sample["num_atom"])
+        for charge_predict, charge_label, fragment in zip(charge_predict_chunks, fragment_charge_chunks, fragment_chunks):
+            charge_label = charge_label.reshape(-1)
+            fragment = fragment.reshape(-1)
+            valid = (fragment >= 0) & np.isfinite(charge_label)
+            if not valid.any():
+                charge_label_chunks.append(charge_label)
+                continue
+
+            pred_frag_charge = []
+            label_frag_charge = []
+            for frag in np.unique(fragment[valid]):
+                frag_mask = fragment == frag
+                valid_frag_mask = frag_mask & valid
+                if not valid_frag_mask.any():
+                    continue
+                pred_frag_charge.append(np.sum(charge_predict[frag_mask]))
+                label_frag_charge.append(charge_label[valid_frag_mask][0])
+            if pred_frag_charge:
+                pred_frag_charge = np.asarray(pred_frag_charge)
+                label_frag_charge = np.asarray(label_frag_charge)
+                if train_charge_ion:
+                    if scale is not None:
+                        pred_frag_charge = pred_frag_charge * scale
+                else:
+                    neutral = np.isclose(label_frag_charge, 0.0, rtol=0.0, atol=1e-8)
+                    pred_frag_charge = pred_frag_charge[neutral]
+                    label_frag_charge = label_frag_charge[neutral]
+                if pred_frag_charge.size == 0:
+                    charge_label_chunks.append(np.array([]))
+                    continue
+                charge_rmse_list.append(np.sqrt(np.mean((pred_frag_charge - label_frag_charge) ** 2)))
+                charge_label_chunks.append(label_frag_charge)
+            else:
+                charge_label_chunks.append(charge_label)
+    elif "charge" in sample:
+        charge_label = sample["charge"].reshape(-1).detach().cpu().numpy()
+        if total_charge_predict is not None:
+            total_charge_predictions = total_charge_predict.reshape(-1).detach().cpu().numpy()
+        else:
+            physical_scale = 1.0 if scale is None else scale
+            total_charge_predictions = np.asarray([
+                np.sum(charge_predict) * physical_scale
+                for charge_predict in charge_predict_chunks
+            ])
+        for charge_predict, total_charge, predicted_total_charge in zip(
+                charge_predict_chunks, charge_label, total_charge_predictions):
+            charge_label_chunks.append(np.asarray([total_charge]))
+            charge_rmse_list.append(np.abs(predicted_total_charge - total_charge))
+    else:
+        charge_label_chunks = [np.array([]) for _ in charge_predict_chunks]
+
+    return charge_label_chunks, charge_predict_chunks, charge_rmse_list
+
+
+def _collect_bec_outputs_for_inference(bec_predict, sample):
+    if bec_predict is None:
+        return [], []
+
+    bec_predict_chunks = _split_tensor_by_num_atom(bec_predict, sample["num_atom"])
+    if "bec" in sample:
+        bec_label_chunks = _split_tensor_by_num_atom(sample["bec"], sample["num_atom"])
+    else:
+        bec_label_chunks = [np.ones_like(bec_predict) * (-1e6) for bec_predict in bec_predict_chunks]
+    return bec_label_chunks, bec_predict_chunks
 def _get_model_output_requests(sample, args: InputParam, train_virial: bool):
     need_force = bool(getattr(args.optimizer_param, "train_force", True))
     need_bec = has_bec_label(sample, args)
@@ -292,8 +466,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Etot_per_atom_val = criterion(Etot_predict / sample["num_atom"], Etot_label / sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         atomic_charge_for_loss = getattr(module, "atomic_charge_shifted", None)
-        loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args, atomic_charge_for_loss)
-        loss_Charge_per_atom_val = get_charge_loss_per_atom(Charge_predict, sample, criterion, args, atomic_charge_for_loss)
+        charge_scale_for_loss = getattr(module, "sqrt_epsilon_inf", None)
+        loss_Charge_val, loss_Charge_per_atom_val, charge_target_count = get_charge_loss_stats(
+            Charge_predict, sample, criterion, args,
+            atomic_charge_for_loss, charge_scale_for_loss)
         loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         loss_Egroup_val = None
         loss_Virial_val = None
@@ -351,7 +527,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         if args.optimizer_param.train_egroup:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
         if loss_Charge_per_atom_val is not None:
-            loss_Charge.update(loss_Charge_per_atom_val.item(), batch_size)
+            loss_Charge.update(loss_Charge_per_atom_val.item(), charge_target_count)
         if loss_BEC_val is not None:
             loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
         if args.optimizer_param.train_force:
@@ -535,8 +711,8 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
 
         loss_Ei_val = criterion(Ei_predict, Ei_label)
-        loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args)
-        loss_Charge_per_atom_val = get_charge_loss_per_atom(Charge_predict, sample, criterion, args)
+        loss_Charge_val, loss_Charge_per_atom_val, charge_target_count = get_charge_loss_stats(
+            Charge_predict, sample, criterion, args)
         loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
@@ -574,7 +750,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         if args.optimizer_param.train_egroup is True:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
         if loss_Charge_per_atom_val is not None:
-            loss_Charge.update(loss_Charge_per_atom_val.item(), batch_size)
+            loss_Charge.update(loss_Charge_per_atom_val.item(), charge_target_count)
         if loss_BEC_val is not None:
             loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
         loss_Force.update(loss_F_val.item(), batch_size)
@@ -679,7 +855,10 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
             loss_Ei_val = criterion(Ei_predict, Ei_label)
             atomic_charge_for_loss = getattr(module, "atomic_charge_shifted", None)
-            loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args, atomic_charge_for_loss)
+            charge_scale_for_loss = getattr(module, "sqrt_epsilon_inf", None)
+            loss_Charge_val, loss_Charge_log_val, charge_target_count = get_charge_loss_stats(
+                Charge_predict, sample, criterion, args,
+                atomic_charge_for_loss, charge_scale_for_loss)
             loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
@@ -714,7 +893,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
             if args.optimizer_param.train_egroup is True:
                 loss_Egroup.update(loss_Egroup_val.item(), batch_size)
             if loss_Charge_val is not None:
-                loss_Charge.update(loss_Charge_val.item(), batch_size)
+                loss_Charge.update(loss_Charge_log_val.item(), charge_target_count)
             if loss_BEC_val is not None:
                 loss_BEC.update(loss_BEC_val.item(), int(bec_mask.sum().item()))
             loss_Force.update(loss_F_val.item(), batch_size)
@@ -834,6 +1013,11 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
     etot_predict_list = []
     virial_label_list = []
     virial_predict_list = []
+    charge_label_list = []
+    charge_predict_list = []
+    charge_rmse_list = []
+    bec_label_list = []
+    bec_predict_list = []
     model.eval()
     virial_index = [0, 1, 2, 4, 5, 8]
     for i, sample in enumerate(val_loader):
@@ -863,7 +1047,10 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         # measure data loading time
         data_mask = Virial_label[:, 0] > -1e6
         need_charge_virial = args.optimizer_param.train_virial and data_mask.any().item()
-        batch_has_bec_label = has_bec_label(sample, args)
+        inference_mode = getattr(args, "inference", False)
+        batch_has_bec_label = (
+            has_bec_label(sample, args) or
+            (inference_mode and (_has_bec_label_for_inference(sample) or _charge_mode_enabled(model, args))))
         Etot_predict, Ei_predict, Force_predict, Egroup_predict, Virial_predict, Charge_predict, Bec_predict = model(
                 NN_radial, NL_radial, Ri_radial,
                     NN_angular, NL_angular, Ri_angular,
@@ -883,8 +1070,14 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         loss_Etot_per_atom_val = criterion(Etot_predict/sample["num_atom"], Etot_label/sample["num_atom"])
         loss_Ei_val = criterion(Ei_predict, Ei_label)
         atomic_charge_for_loss = getattr(model, "atomic_charge_shifted", None)
-        loss_Charge_val = get_charge_loss(Charge_predict, sample, criterion, args, atomic_charge_for_loss)
+        charge_scale_for_loss = getattr(model, "sqrt_epsilon_inf", None)
+        loss_Charge_val = get_charge_loss(
+            Charge_predict, sample, criterion, args,
+            atomic_charge_for_loss, charge_scale_for_loss)
         loss_BEC_val, _ = get_bec_loss(Bec_predict, sample, criterion, args)
+        loss_Egroup_val = None
+        loss_Virial_val = None
+        loss_Virial_per_atom_val = None
         if args.optimizer_param.train_egroup is True:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
@@ -908,17 +1101,19 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         Ei_rmse = loss_Ei_val ** 0.5
         F_rmse = loss_F_val ** 0.5
 
-        res_list = [i, float(Etot_rmse), float(etot_atom_rmse), float(Ei_rmse), float(F_rmse)]
-        if loss_Charge_val is not None:
-            res_list.append(float(loss_Charge_val ** 0.5))
-        if args.optimizer_param.train_bec:
-            res_list.append(float(loss_BEC_val ** 0.5) if loss_BEC_val is not None else np.nan)
-        #float(Etot_predict), float(Ei_label.abs().mean()), float(Ei_predict.abs().mean()), float(Force_label.abs().mean()), float(Force_predict.abs().mean()),\
-        if args.optimizer_param.train_egroup:
-            res_list.append(float(loss_Egroup_val))
-        if args.optimizer_param.train_virial:
-            res_list.append(float(loss_Virial_val))
-            res_list.append(float(loss_Virial_per_atom_val))
+        res_row = _build_predict_metric_row(
+            image_index=i,
+            etot_rmse=Etot_rmse,
+            etot_atom_rmse=etot_atom_rmse,
+            ei_rmse=Ei_rmse,
+            force_rmse=F_rmse,
+            args=args,
+            charge_loss=loss_Charge_val,
+            bec_loss=loss_BEC_val,
+            egroup_loss=loss_Egroup_val,
+            virial_loss=loss_Virial_val,
+            virial_per_atom_loss=loss_Virial_per_atom_val,
+        )
 
         force_label_list.append(Force_label.flatten().cpu().numpy())
         force_predict_list.append(Force_predict.flatten().detach().cpu().numpy())
@@ -926,10 +1121,31 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
         ei_predict_list.append(Ei_predict.flatten().detach().cpu().numpy())
         etot_label_list.append(float(Etot_label))
         etot_predict_list.append(float(Etot_predict))
-        res_pd.loc[res_pd.shape[0]] = res_list
+        res_pd.loc[res_pd.shape[0]] = res_row
         virial_label_list.append(Virial_label[:,virial_index].flatten().detach().cpu().numpy())
         virial_predict_list.append(Virial_predict[:,virial_index].flatten().detach().cpu().numpy())
-    return res_pd, etot_label_list, etot_predict_list, ei_label_list, ei_predict_list, force_label_list, force_predict_list, virial_label_list, virial_predict_list
+        if inference_mode:
+            module = get_model_module(model, args)
+            atomic_charge_for_output = getattr(module, "atomic_charge_shifted", None)
+            charge_labels, charge_predicts, charge_rmses = _collect_charge_outputs_for_inference(
+                atomic_charge_for_output,
+                Charge_predict,
+                sample,
+                train_charge_ion=getattr(
+                    args.optimizer_param, "train_charge_ion", False),
+                charge_scale=getattr(module, "sqrt_epsilon_inf", None),
+            )
+            charge_label_list.extend(charge_labels)
+            charge_predict_list.extend(charge_predicts)
+            charge_rmse_list.extend(charge_rmses)
+            if Bec_predict is not None:
+                bec_labels, bec_predicts = _collect_bec_outputs_for_inference(Bec_predict, sample)
+                bec_label_list.extend(bec_labels)
+                bec_predict_list.extend(bec_predicts)
+    return (
+        res_pd, etot_label_list, etot_predict_list, ei_label_list, ei_predict_list,
+        force_label_list, force_predict_list, virial_label_list, virial_predict_list,
+        charge_label_list, charge_predict_list, charge_rmse_list, bec_label_list, bec_predict_list)
 
 
 def save_step_checkpoint(state, save_dir:str, epoch:int, iter:int, max_save_num:int=10):

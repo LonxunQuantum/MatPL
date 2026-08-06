@@ -81,7 +81,9 @@ class OptimizerParam(object):
         self.train_virial = get_parameter("train_virial", optimizer_dict, False)
         self.train_egroup = get_parameter("train_egroup", optimizer_dict, False)
         self.train_charge = get_parameter("train_charge", optimizer_dict, False)
+        self.train_charge_ion = get_parameter("train_charge_ion", optimizer_dict, False)
         self.train_bec = get_parameter("train_bec", optimizer_dict, False)
+        self.train_bec_ion = get_parameter("train_bec_ion", optimizer_dict, False)
 
         self.force_delta = None
         self.population = None
@@ -125,7 +127,9 @@ class OptimizerParam(object):
         opt_dict["train_energy"] = self.train_energy
         opt_dict["train_force"] = self.train_force
         opt_dict["train_charge"] = self.train_charge
+        opt_dict["train_charge_ion"] = self.train_charge_ion
         opt_dict["train_bec"] = self.train_bec
+        opt_dict["train_bec_ion"] = self.train_bec_ion
         # opt_dict["train_ei"] = self.train_ei
         opt_dict["pre_fac_force"] = self.pre_fac_force
         opt_dict["pre_fac_etot"] = self.pre_fac_etot
@@ -153,7 +157,9 @@ class OptimizerParam(object):
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force
             opt_dict["train_charge"] = self.train_charge
+            opt_dict["train_charge_ion"] = self.train_charge_ion
             opt_dict["train_bec"] = self.train_bec
+            opt_dict["train_bec_ion"] = self.train_bec_ion
             # opt_dict["train_ei"] = self.train_ei
             opt_dict["train_virial"] = self.train_virial
             # opt_dict["train_egroup"] = self.train_egroup
@@ -181,7 +187,9 @@ class OptimizerParam(object):
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force
             opt_dict["train_charge"] = self.train_charge
+            opt_dict["train_charge_ion"] = self.train_charge_ion
             opt_dict["train_bec"] = self.train_bec
+            opt_dict["train_bec_ion"] = self.train_bec_ion
             # opt_dict["train_ei"] = self.train_ei
             opt_dict["train_virial"] = self.train_virial
             # opt_dict["train_egroup"] = self.train_egroup
