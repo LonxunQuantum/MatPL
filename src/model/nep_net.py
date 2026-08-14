@@ -24,6 +24,107 @@ else:
     CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
    
 class NEP(nn.Module):
+    _SQRT_EPSILON_INF_MIN = 1.0
+
+    @staticmethod
+    def _sqrt_epsilon_inf_to_raw(value: torch.Tensor) -> torch.Tensor:
+        if not torch.isfinite(value).all().item() or \
+                not (value > NEP._SQRT_EPSILON_INF_MIN).all().item():
+            raise ValueError("sqrt_epsilon_inf must be finite and greater than 1")
+        return torch.log(torch.expm1(value - NEP._SQRT_EPSILON_INF_MIN))
+
+    def _set_sqrt_epsilon_inf(self, value, dtype=None, device=None):
+        if torch.is_tensor(value):
+            physical_value = value.detach().clone()
+            if dtype is not None or device is not None:
+                physical_value = physical_value.to(dtype=dtype, device=device)
+        else:
+            if dtype is None:
+                dtype = getattr(self, "dtype", None) or torch.get_default_dtype()
+            if device is None:
+                device = getattr(self, "device", None)
+            physical_value = torch.tensor(value, dtype=dtype, device=device)
+        raw_value = self._sqrt_epsilon_inf_to_raw(physical_value)
+        self.raw_sqrt_epsilon_inf = torch.nn.Parameter(
+            raw_value, requires_grad=True)
+
+    @staticmethod
+    def _validate_fixed_sqrt_epsilon_inf(value: torch.Tensor):
+        if value.numel() != 1 or not torch.isfinite(value).all().item() or \
+                not (value >= NEP._SQRT_EPSILON_INF_MIN).all().item():
+            raise ValueError(
+                "fixed_sqrt_epsilon_inf must be a finite scalar greater "
+                "than or equal to 1")
+
+    def _set_fixed_sqrt_epsilon_inf(self, value, dtype=None, device=None):
+        if torch.is_tensor(value):
+            fixed_value = value.detach().clone()
+            if dtype is not None or device is not None:
+                fixed_value = fixed_value.to(dtype=dtype, device=device)
+        else:
+            if dtype is None:
+                dtype = getattr(self, "dtype", None) or torch.get_default_dtype()
+            if device is None:
+                device = getattr(self, "device", None)
+            fixed_value = torch.tensor(value, dtype=dtype, device=device)
+        self._validate_fixed_sqrt_epsilon_inf(fixed_value)
+        self.raw_sqrt_epsilon_inf = None
+        self._fixed_sqrt_epsilon_inf = fixed_value
+
+    def _configure_sqrt_epsilon_inf(
+            self, initial_value, fixed_sqrt_epsilon_inf=None,
+            dtype=None, device=None):
+        if fixed_sqrt_epsilon_inf is None:
+            self._fixed_sqrt_epsilon_inf = None
+            self._set_sqrt_epsilon_inf(
+                initial_value, dtype=dtype, device=device)
+        else:
+            self._set_fixed_sqrt_epsilon_inf(
+                fixed_sqrt_epsilon_inf, dtype=dtype, device=device)
+
+    @property
+    def sqrt_epsilon_inf(self):
+        fixed_value = getattr(self, "_fixed_sqrt_epsilon_inf", None)
+        if fixed_value is not None:
+            return fixed_value
+        raw_value = self.raw_sqrt_epsilon_inf
+        if raw_value is None:
+            return None
+        return self._SQRT_EPSILON_INF_MIN + F.softplus(raw_value)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        physical_value = self.sqrt_epsilon_inf
+        if physical_value is not None:
+            if not keep_vars:
+                physical_value = physical_value.detach()
+            destination[prefix + "sqrt_epsilon_inf"] = physical_value
+
+    def _load_from_state_dict(
+            self, state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs):
+        physical_key = prefix + "sqrt_epsilon_inf"
+        raw_key = prefix + "raw_sqrt_epsilon_inf"
+        physical_value = state_dict.pop(physical_key, None)
+        fixed_value = getattr(self, "_fixed_sqrt_epsilon_inf", None)
+        if fixed_value is not None:
+            # The current JSON configuration has highest priority.  Ignore
+            # both legacy physical and current raw checkpoint values.
+            state_dict.pop(raw_key, None)
+        elif raw_key not in state_dict and physical_value is not None and \
+                self.raw_sqrt_epsilon_inf is not None:
+            try:
+                state_dict[raw_key] = self._sqrt_epsilon_inf_to_raw(
+                    physical_value.to(
+                        dtype=self.raw_sqrt_epsilon_inf.dtype,
+                        device=self.raw_sqrt_epsilon_inf.device))
+            except ValueError as exc:
+                error_msgs.append(f"While loading {physical_key}: {exc}")
+                state_dict[raw_key] = self.raw_sqrt_epsilon_inf.detach().clone()
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
+
     def __init__(self, input_param:InputParam=None, energy_shift=None, rank=0, q_scaler = None, max_NN_radial = -1, max_NN_angular = -1, dtype=None, device=None):
         super(NEP, self).__init__()
         self.input_param = input_param
@@ -61,6 +162,9 @@ class NEP(nn.Module):
         self.register_buffer('atom_type_device', None)
         self.register_buffer('max_NN_radial', torch.tensor(max_NN_radial, dtype=torch.int64))
         self.register_buffer('max_NN_angular', torch.tensor(max_NN_angular, dtype=torch.int64))
+        self.register_buffer(
+            '_fixed_sqrt_epsilon_inf', None, persistent=False)
+        self.register_parameter('raw_sqrt_epsilon_inf', None)
 
         # 初始化缓冲区
         self._initialize_buffers(q_scaler = q_scaler)
@@ -84,9 +188,12 @@ class NEP(nn.Module):
                 if getattr(input_param.nep_param, "sqrt_epsilon_inf", None) is not None:
                     sqrt_epsilon_inf_value = float(input_param.nep_param.sqrt_epsilon_inf)
             self.common_bias = torch.nn.Parameter(torch.tensor(common_bias_value, dtype=self.dtype), requires_grad=True)
-            self.sqrt_epsilon_inf = torch.nn.Parameter(torch.tensor(sqrt_epsilon_inf_value, dtype=self.dtype), requires_grad=True)
-        else:
-            self.sqrt_epsilon_inf = None
+            self._configure_sqrt_epsilon_inf(
+                sqrt_epsilon_inf_value,
+                fixed_sqrt_epsilon_inf=getattr(
+                    input_param.nep_param, "fixed_sqrt_epsilon_inf", None),
+                dtype=self.dtype,
+                device=self.device)
 
         for i in range(self.ntypes):
             nep_txt_param = None

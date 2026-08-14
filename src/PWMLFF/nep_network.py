@@ -2,6 +2,8 @@ import os
 import sys
 import pathlib
 import random
+import glob
+import re
 import torch
 import time
 import torch.nn as nn
@@ -34,6 +36,122 @@ sys.path.append(codepath + '/../model')
 sys.path.append(codepath + '/..')
 sys.path.append(codepath + '/../aux')
 sys.path.append(codepath + '/../..')
+
+
+def _periodic_nep_checkpoint_paths(primary_path):
+    directory = os.path.dirname(primary_path)
+    model_name = os.path.basename(primary_path)
+    pattern = os.path.join(directory, f"epoch_*_{model_name}")
+    candidates = []
+    for path in glob.glob(pattern):
+        match = re.match(
+            rf"^epoch_(\d+)_{re.escape(model_name)}$",
+            os.path.basename(path))
+        if match is not None:
+            candidates.append((int(match.group(1)), path))
+    return [path for _, path in sorted(candidates, reverse=True)]
+
+
+def _load_nep_checkpoint(path, map_location):
+    try:
+        checkpoint = torch.load(
+            path, map_location=map_location, weights_only=False)
+    except Exception as exc:
+        raise RuntimeError(
+            f"'{path}' is not a valid PyTorch NEP checkpoint. "
+            "It may be a nep.txt model or an incomplete/corrupted file."
+        ) from exc
+    if not isinstance(checkpoint, dict) or \
+            not isinstance(checkpoint.get("state_dict"), dict):
+        raise RuntimeError(
+            f"'{path}' is not a valid PyTorch NEP checkpoint: "
+            "missing the state_dict mapping.")
+    return checkpoint
+
+
+def load_nep_checkpoint_with_fallback(
+        primary_path, map_location, allow_periodic_fallback=False):
+    """Load a NEP checkpoint, optionally recovering from periodic snapshots."""
+    try:
+        return _load_nep_checkpoint(primary_path, map_location), primary_path
+    except RuntimeError as primary_error:
+        if not allow_periodic_fallback:
+            raise
+        fallback_errors = []
+        for fallback_path in _periodic_nep_checkpoint_paths(primary_path):
+            try:
+                checkpoint = _load_nep_checkpoint(
+                    fallback_path, map_location)
+                print(
+                    f"WARNING: Cannot load primary NEP checkpoint "
+                    f"'{primary_path}'. Recovering from periodic checkpoint "
+                    f"'{fallback_path}'.")
+                return checkpoint, fallback_path
+            except RuntimeError as fallback_error:
+                fallback_errors.append(str(fallback_error))
+        details = "\n".join(fallback_errors)
+        if details:
+            details = f" Periodic checkpoint errors:\n{details}"
+        raise RuntimeError(
+            f"Cannot recover NEP training from '{primary_path}' and no "
+            f"valid periodic checkpoint was found.{details}"
+        ) from primary_error
+
+
+def restore_nep_training_state(
+        checkpoint, optimizer, scheduler, reset_epoch,
+        allow_optimizer_param_group_mismatch=False):
+    """Restore optional NEP optimizer/scheduler state for a true resume."""
+    if checkpoint is None or reset_epoch:
+        return False, False
+
+    optimizer_restored = False
+    optimizer_state = checkpoint.get("optimizer")
+    if optimizer_state is not None:
+        checkpoint_group_sizes = [
+            len(group.get("params", []))
+            for group in optimizer_state.get("param_groups", [])
+        ]
+        current_group_sizes = [
+            len(group.get("params", []))
+            for group in optimizer.state_dict().get("param_groups", [])
+        ]
+        optimizer_layout_mismatch = \
+            checkpoint_group_sizes != current_group_sizes
+        if not (allow_optimizer_param_group_mismatch and
+                optimizer_layout_mismatch):
+            try:
+                optimizer.load_state_dict(optimizer_state)
+            except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+                raise RuntimeError(
+                    "Failed to restore the NEP optimizer state from checkpoint"
+                ) from exc
+            optimizer_restored = True
+
+    scheduler_restored = False
+    scheduler_state = checkpoint.get("scheduler")
+    if scheduler is not None and scheduler_state is not None:
+        try:
+            scheduler.load_state_dict(scheduler_state)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                "Failed to restore the NEP scheduler state from checkpoint"
+            ) from exc
+        scheduler_restored = True
+
+    return optimizer_restored, scheduler_restored
+
+
+def build_nep_checkpoint(json_file, epoch, model, optimizer, scheduler):
+    """Build a NEP checkpoint with the state required for true resume."""
+    return {
+        "json_file": json_file,
+        "epoch": epoch,
+        "state_dict": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+    }
+
 
 def _get_image_total_charge(image, default_total_charge=0.0):
     charge = getattr(image, "charge", None)
@@ -442,6 +560,7 @@ class nep_network:
                                             find_unused_parameters=True)
         checkpoint = None
         model_path = None
+        allow_periodic_checkpoint_fallback = False
         # inference 用于debug，直接走的nepcpu or nepgpu
         if self.input_param.inference:
             model_path = self.input_param.file_paths.model_load_path
@@ -456,12 +575,19 @@ class nep_network:
                     model_path = self.input_param.file_paths.model_load_path
                 else:
                     model_path = self.input_param.file_paths.model_save_path
+                    allow_periodic_checkpoint_fallback = bool(
+                        self.input_param.recover_train)
             else:
                 model_path = None
 
         module = 'module.' if self.input_param.world_size > 1 else ''
         if model_path and os.path.isfile(model_path):
-            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            checkpoint, loaded_model_path = load_nep_checkpoint_with_fallback(
+                model_path,
+                map_location=self.device,
+                allow_periodic_fallback=allow_periodic_checkpoint_fallback,
+            )
+            model_path = loaded_model_path
             checkpoint = _adjust_ckpt_keys(checkpoint, model) # 适配旧版本以及单卡多卡版本
             model.load_state_dict(checkpoint["state_dict"])
             if "epoch" in checkpoint:
@@ -527,6 +653,27 @@ class nep_network:
             )
         else:
             raise Exception("Error: Unsupported optimizer!")
+
+        if checkpoint is not None and not self.input_param.inference:
+            optimizer_restored, scheduler_restored = restore_nep_training_state(
+                checkpoint,
+                optimizer,
+                scheduler,
+                self.input_param.optimizer_param.reset_epoch,
+                allow_optimizer_param_group_mismatch=getattr(
+                    self.input_param.nep_param,
+                    "fixed_sqrt_epsilon_inf",
+                    None) is not None,
+            )
+            if self.is_rank_0:
+                if self.input_param.optimizer_param.reset_epoch:
+                    print("reset_epoch=true: using a fresh optimizer and scheduler")
+                else:
+                    optimizer_message = "restored" if optimizer_restored else "not found; using a fresh optimizer"
+                    scheduler_message = "restored" if scheduler_restored else "not found; using a fresh scheduler"
+                    print(f"NEP optimizer state: {optimizer_message}")
+                    if scheduler is not None:
+                        print(f"NEP scheduler state: {scheduler_message}")
 
         return model, optimizer, scheduler
 
@@ -779,17 +926,13 @@ class nep_network:
                         f_valid_log.write(f"{valid_log_line}\n")
             # 保存检查点
             if self.is_rank_0:
-                checkpoint_dict = {
-                    "json_file": self.input_param.to_dict(),
-                    "epoch": epoch,
-                    "state_dict": model.state_dict()
-                    # "energy_shift": energy_shift,
-                    # "max_neighbor": [model.module.max_NN_radial, model.module.max_NN_angular],
-                    # "atom_type_order": self.input_param.atom_type
-                    # "q_scaler": model.module.get_q_scaler(),
-                }
-                if self.input_param.optimizer_param.opt_name in ["LKF", "GKF"] and self.input_param.file_paths.save_p_matrix:
-                    checkpoint_dict["optimizer"] = optimizer.state_dict()
+                checkpoint_dict = build_nep_checkpoint(
+                    self.input_param.to_dict(),
+                    epoch,
+                    model,
+                    optimizer,
+                    scheduler,
+                )
                 save_checkpoint(
                     checkpoint_dict,
                     self.input_param.file_paths.model_name,

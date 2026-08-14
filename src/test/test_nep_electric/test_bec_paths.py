@@ -14,7 +14,7 @@ def _make_charge_nep():
     model.gpumd_nep4 = False
     model.two_feat_num = 2
     model.multi_feat_num = 0
-    model.sqrt_epsilon_inf = torch.nn.Parameter(torch.tensor(1.7, dtype=torch.float64))
+    model._set_sqrt_epsilon_inf(torch.tensor(1.7, dtype=torch.float64))
     return model
 
 
@@ -121,7 +121,7 @@ def test_radial_analytical_bec_matches_autograd_on_cuda():
     ]
     grads = torch.autograd.grad(
         loss,
-        checked_params + [model.c_param_2, model.sqrt_epsilon_inf],
+        checked_params + [model.c_param_2, model.raw_sqrt_epsilon_inf],
         allow_unused=False,
     )
     for grad in grads:
@@ -145,7 +145,7 @@ def test_angular_analytical_bec_parameter_grad_matches_autograd_on_cuda():
     model.gpumd_nep4 = False
     model.two_feat_num = 0
     model.multi_feat_num = 30
-    model.sqrt_epsilon_inf = torch.nn.Parameter(torch.tensor(1.3, dtype=dtype, device=device))
+    model._set_sqrt_epsilon_inf(torch.tensor(1.3, dtype=dtype, device=device))
     model.q_scaler = torch.linspace(0.7, 1.3, model.multi_feat_num, dtype=dtype, device=device)
     model.input_param = type("InputParamStub", (), {})()
     model.input_param.nep_param = type("NepParamStub", (), {"fix_cij": False})()
@@ -232,7 +232,7 @@ def test_angular_analytical_bec_parameter_grad_matches_autograd_on_cuda():
     torch.testing.assert_close(bec, bec_ref, rtol=1e-7, atol=1e-7)
 
     params = [p for n, p in model.fitting_net.named_parameters() if not n.startswith("0.energy_head.")]
-    params = params + [model.c_param_3, model.sqrt_epsilon_inf]
+    params = params + [model.c_param_3, model.raw_sqrt_epsilon_inf]
     ref_grads = torch.autograd.grad(bec_ref.square().sum(), params, retain_graph=True)
     new_grads = torch.autograd.grad(bec.square().sum(), params)
     for new_grad, ref_grad in zip(new_grads, ref_grads):
