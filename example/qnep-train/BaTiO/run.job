@@ -31,9 +31,8 @@ MASTER_PORT=$(get_free_port)
 export MASTER_ADDR=$MASTER_ADDR
 export MASTER_PORT=$MASTER_PORT
 
-
-MATPL train train.json  # 您的训练命令
-
+# 处于测试阶段，暂不对外提供
+MATPL train train.json
 
 echo "Job $SLURM_JOB_ID done at " `date`
 

@@ -1,4 +1,8 @@
 # 1. 包含包
+# PyTorch's Caffe2 CMake config opportunistically discovers external MKL.
+# The PyTorch wheel already contains its CPU backend, so keep a separately
+# installed pip MKL runtime from becoming a link dependency of CalcOps_cuda.
+set(CMAKE_DISABLE_FIND_PACKAGE_MKL TRUE)
 find_package(Torch REQUIRED)
 enable_language(CUDA)  # 使用现代CMake方式启用CUDA
 

@@ -10,9 +10,9 @@ echo "SLURM_SUBMIT_DIR is $SLURM_SUBMIT_DIR"
 echo "Starting job $SLURM_JOB_ID at " `date`
 
 echo "Running on nodes: $SLURM_NODELIST"
-module load intel/2020 cuda/11.8
 
-source /share/app/MATPL/MatPL-2025.3/matpl-env.sh
+# 替换为自己的安装路径
+source /share/app/MATPL/MatPL-2026.3/env.sh
 
 mpirun -np 4 lmp_mpi -in in.lammps
 

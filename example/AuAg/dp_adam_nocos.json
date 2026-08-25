@@ -33,14 +33,13 @@
 
     "optimizer": {
         "optimizer": "ADAM",
-        "epochs": 1,
-        "batch_size": 8,
+        "epochs": 30,
+        "batch_size": 1,
         "print_freq": 10,
         "train_energy": true,
         "train_force": true,
         "max_norm":0.5,
-        "norm_type":2,
-        "_clip_value":1.0
+        "norm_type":2
     },
     "format":"pwmlff/npy",
     "train_data": [

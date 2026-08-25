@@ -1,12 +1,23 @@
 import math
+import importlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
+from src.loss.loss import get_adam_loss_prefactor_from_progress, get_loss
+from src.PWMLFF.dp_network import (
+    build_dp_checkpoint,
+    create_dp_adam_optimizer_and_scheduler,
+    dp_network,
+    restore_dp_training_state,
+)
+from src.PWMLFF.dp_mods.dp_trainer import resolve_dp_step_lr
 from src.PWMLFF.nep_network import (
     build_nep_checkpoint,
     load_nep_checkpoint_with_fallback,
+    nep_network,
     restore_nep_training_state,
 )
 from src.PWMLFF.nep_mods.nep_trainer import (
@@ -20,12 +31,65 @@ from src.model.nep_net import NEP
 from src.pre_data.nep_data_loader import _build_default_ion_bec
 from src.user.optimizer_param import OptimizerParam
 from src.user.nep_work import _prepare_nep_test_ckpt_json
+from src.utils.learning_rate import (
+    calculate_loss_weight_progress,
+    calculate_lr_scale,
+    calculate_warmup_lr,
+    optimizer_update_step,
+    resolve_optimizer_peak_lr,
+)
 from src.utils.train_log import AverageMeter, Summary
 
 
 class _Args:
     def __init__(self):
         self.optimizer_param = type("OptimizerParamStub", (), {})()
+
+
+def test_dp_recover_without_explicit_load_uses_default_checkpoint(
+        monkeypatch, tmp_path, capsys):
+    dp_network_module = importlib.import_module("src.PWMLFF.dp_network")
+    checkpoint_path = tmp_path / "model_record" / "dp_model.ckpt"
+    checkpoint_path.parent.mkdir()
+    checkpoint_model = torch.nn.Linear(1, 1, dtype=torch.float64)
+    torch.save(
+        {
+            "epoch": 4,
+            "state_dict": checkpoint_model.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    monkeypatch.setattr(
+        dp_network_module,
+        "DP",
+        lambda config, davg, dstd, energy_shift: torch.nn.Linear(
+            1, 1, dtype=torch.float64),
+    )
+    trainer = object.__new__(dp_network)
+    trainer.config = {}
+    trainer.training_type = torch.float64
+    trainer.device = torch.device("cpu")
+    trainer.dp_params = SimpleNamespace(
+        descriptor=SimpleNamespace(type_embedding=False),
+        recover_train=True,
+        inference=False,
+        file_paths=SimpleNamespace(
+            model_load_path=" ",
+            model_save_path=str(checkpoint_path),
+        ),
+        optimizer_param=SimpleNamespace(
+            reset_epoch=True,
+            opt_name="UNSUPPORTED_FOR_PATH_TEST",
+        ),
+    )
+
+    with pytest.raises(Exception, match="Unsupported optimizer"):
+        trainer.load_model_optimizer(None, None, None)
+
+    output = capsys.readouterr().out
+    assert f"=> loading checkpoint '{checkpoint_path}'" in output
+    assert f"=> loaded checkpoint '{checkpoint_path}' (epoch 4)" in output
 
 
 def _minimal_charge_model(sqrt_epsilon_inf=1.4):
@@ -88,6 +152,26 @@ def test_resume_restores_optimizer_moments_and_scheduler_position():
     assert scheduler.T_cur == 1.5
 
 
+def test_resume_migrates_scheduler_base_to_configured_optimizer_peak_lr():
+    checkpoint = _checkpoint_with_training_state()
+    parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
+    optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
+
+    restored = restore_nep_training_state(
+        checkpoint,
+        optimizer,
+        scheduler,
+        reset_epoch=False,
+        optimizer_peak_lr=0.02,
+    )
+
+    assert restored == (True, True)
+    assert scheduler.base_lrs == pytest.approx([0.02])
+    assert optimizer.param_groups[0]["initial_lr"] == pytest.approx(0.02)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(
+        scheduler.get_last_lr()[0])
+
+
 def test_legacy_checkpoint_without_training_state_uses_fresh_objects():
     parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
     optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
@@ -129,6 +213,26 @@ def test_checkpoint_without_scheduler_restores_optimizer_only():
     assert scheduler.last_epoch == 0
 
 
+def test_missing_scheduler_state_restarts_optimizer_lr_at_peak():
+    checkpoint = _checkpoint_with_training_state()
+    checkpoint.pop("scheduler")
+    parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
+    optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
+
+    restored = restore_nep_training_state(
+        checkpoint,
+        optimizer,
+        scheduler,
+        reset_epoch=False,
+        optimizer_peak_lr=0.02,
+    )
+
+    assert restored == (True, False)
+    assert scheduler.base_lrs == pytest.approx([0.02])
+    assert scheduler.get_last_lr() == pytest.approx([0.02])
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.02)
+
+
 def test_new_checkpoint_contains_optimizer_and_scheduler_state():
     parameter = torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float64))
     model = torch.nn.Linear(1, 1, dtype=torch.float64)
@@ -136,7 +240,8 @@ def test_new_checkpoint_contains_optimizer_and_scheduler_state():
     scheduler.step(1.5)
 
     checkpoint = build_nep_checkpoint(
-        {"model_type": "NEP"}, 12, model, optimizer, scheduler)
+        {"model_type": "NEP"}, 12, model, optimizer, scheduler,
+        optimizer_updates=321, warmup_updates=500)
 
     assert checkpoint["json_file"] == {"model_type": "NEP"}
     assert checkpoint["epoch"] == 12
@@ -146,6 +251,8 @@ def test_new_checkpoint_contains_optimizer_and_scheduler_state():
         - 0.0014730016279731956
     ) < 1.0e-15
     assert checkpoint["scheduler"]["T_cur"] == 1.5
+    assert checkpoint["optimizer_updates"] == 321
+    assert checkpoint["warmup_updates"] == 500
 
 
 def test_new_checkpoint_records_absent_scheduler():
@@ -724,6 +831,183 @@ def test_model_output_requests_keep_charge_energy_for_force_or_virial():
     assert requests["need_charge_energy"] is True
 
 
+def test_scale_lr_defaults_to_disabled_and_is_serialized():
+    optimizer_param = OptimizerParam()
+    optimizer_param.set_optimizer({})
+
+    assert optimizer_param.scale_lr is False
+    assert optimizer_param.scaling_method == "sqrt"
+    output = optimizer_param.to_dict()
+    assert output["scale_lr"] is False
+    assert output["scaling_method"] == "sqrt"
+
+
+def test_explicit_scale_lr_configuration_is_preserved():
+    optimizer_param = OptimizerParam()
+    optimizer_param.set_optimizer({
+        "optimizer": {
+            "scale_lr": True,
+            "scaling_method": "sqrt_gpu",
+        },
+    })
+
+    assert optimizer_param.scale_lr is True
+    assert optimizer_param.scaling_method == "sqrt_gpu"
+    output = optimizer_param.to_dict()
+    assert output["scale_lr"] is True
+    assert output["scaling_method"] == "sqrt_gpu"
+
+
+def test_explicit_sqrt_scaling_is_applied_once_to_optimizer_peak_lr():
+    lr_scale = calculate_lr_scale(
+        scale_lr=True,
+        scaling_method="sqrt",
+        local_batch_size=32,
+        world_size=4,
+    )
+    optimizer_peak_lr = resolve_optimizer_peak_lr(0.001, lr_scale)
+
+    assert lr_scale == pytest.approx(math.sqrt(128))
+    assert optimizer_peak_lr == pytest.approx(0.0113137084989848)
+
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam([parameter], lr=optimizer_peak_lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=180, T_mult=1, eta_min=3.51e-8)
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(optimizer_peak_lr)
+    assert scheduler.base_lrs == pytest.approx([optimizer_peak_lr])
+
+
+def test_atom_aware_scaling_uses_stable_dataset_average():
+    lr_scale = calculate_lr_scale(
+        scale_lr=True,
+        scaling_method="sqrt_batch_gpu_atom",
+        local_batch_size=32,
+        world_size=4,
+        avg_atom_nums=50.0,
+    )
+
+    assert lr_scale == pytest.approx(math.sqrt(32 * 4 * 50))
+
+
+def test_warmup_completion_preserves_optimizer_and_scheduler_state():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam([parameter], lr=0.011)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=180, T_mult=1, eta_min=3.51e-8)
+    optimizer.param_groups[0]["lr"] = 0.002
+    network = object.__new__(nep_network)
+    network.optimizer_peak_lr = 0.011
+
+    returned_optimizer, returned_scheduler = network.reset_lr(
+        None, 180, optimizer, scheduler)
+
+    assert returned_optimizer is optimizer
+    assert returned_scheduler is scheduler
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.011)
+    assert scheduler.base_lrs == pytest.approx([0.011])
+
+
+def test_disabled_scaling_keeps_configured_learning_rate():
+    lr_scale = calculate_lr_scale(
+        scale_lr=False,
+        scaling_method="sqrt",
+        local_batch_size=32,
+        world_size=4,
+    )
+
+    assert lr_scale == 1.0
+    assert resolve_optimizer_peak_lr(0.001, lr_scale) == 0.001
+
+
+def test_unknown_scaling_method_is_rejected_when_scaling_is_enabled():
+    with pytest.raises(ValueError, match="scaling_method"):
+        calculate_lr_scale(
+            scale_lr=True,
+            scaling_method="typo",
+            local_batch_size=32,
+            world_size=1,
+        )
+
+
+def test_optimizer_update_step_is_monotonic_across_batch32_epoch_boundary():
+    steps = [
+        optimizer_update_step(completed_updates, batch_index)
+        for completed_updates in (0, 122)
+        for batch_index in range(122)
+    ]
+
+    assert steps == list(range(244))
+    assert steps[121] == 121
+    assert steps[122] == 122
+
+
+def test_optimizer_update_step_survives_changed_loader_length_on_resume():
+    assert optimizer_update_step(244, 0) == 244
+    assert optimizer_update_step(244, 37) == 281
+
+
+@pytest.mark.parametrize(
+    "update, expected",
+    ((0, 0.0), (500_000, 0.5), (1_000_000, 1.0), (1_500_000, 1.0)),
+)
+def test_loss_weight_progress_uses_optimizer_updates(update, expected):
+    assert calculate_loss_weight_progress(update, 1_000_000) == expected
+
+
+def test_warmup_lr_uses_persisted_optimizer_update_target():
+    assert calculate_warmup_lr(0, 500, 1.0e-8, 0.01) == pytest.approx(1.0e-8)
+    assert calculate_warmup_lr(250, 500, 1.0e-8, 0.01) == pytest.approx(
+        0.005000005)
+    assert calculate_warmup_lr(500, 500, 1.0e-8, 0.01) == pytest.approx(0.01)
+    # A changed loader length on resume does not enter this calculation.
+    assert calculate_warmup_lr(321, 500, 1.0e-8, 0.01) == pytest.approx(
+        1.0e-8 + (321 / 500) * (0.01 - 1.0e-8))
+
+
+def test_force_prefactor_depends_on_progress_instead_of_learning_rate():
+    assert get_adam_loss_prefactor_from_progress(100.0, 1.0, 0.0) == 100.0
+    assert get_adam_loss_prefactor_from_progress(100.0, 1.0, 0.5) == 50.5
+    assert get_adam_loss_prefactor_from_progress(100.0, 1.0, 1.0) == 1.0
+
+
+def test_nep_loss_uses_progress_even_when_optimizer_lr_changes():
+    optimizer_param = type("OptimizerParamStub", (), {
+        "train_force": True,
+        "train_energy": False,
+        "train_virial": False,
+        "train_egroup": False,
+        "train_charge": False,
+        "train_bec": False,
+        "start_pre_fac_force": 100.0,
+        "end_pre_fac_force": 1.0,
+    })()
+    args = type("ArgsStub", (), {"optimizer_param": optimizer_param})()
+    force_loss = torch.tensor(2.0)
+    energy_loss = torch.tensor(0.0)
+
+    low_lr_loss = get_loss(
+        args,
+        0.0002,
+        1.0,
+        force_loss,
+        energy_loss,
+        loss_weight_progress=0.5,
+    )
+    high_lr_loss = get_loss(
+        args,
+        0.02,
+        1.0,
+        force_loss,
+        energy_loss,
+        loss_weight_progress=0.5,
+    )
+
+    assert low_lr_loss.item() == pytest.approx(101.0)
+    assert high_lr_loss.item() == pytest.approx(101.0)
+
+
 if __name__ == "__main__":
     test_shift_total_charge_converts_naked_label_to_screened_target()
     test_fragment_charge_loss_aggregates_per_image_fragment_namespace()
@@ -742,3 +1026,145 @@ if __name__ == "__main__":
     test_default_ion_bec_uses_valence_on_diagonal()
     test_model_output_requests_skip_coordinate_graph_for_fragment_charge_only()
     test_model_output_requests_keep_charge_energy_for_force_or_virial()
+
+def _dp_adam_params(**overrides):
+    values = {
+        "opt_name": "ADAM",
+        "learning_rate": 0.001,
+        "lambda_2": None,
+        "batch_size": 32,
+        "scale_lr": False,
+        "scaling_method": "sqrt",
+        "t_0": None,
+        "t_mult": None,
+        "stop_lr": 1.0e-5,
+        "stop_step": 1000,
+        "decay_step": 100,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _dp_optimizer_with_moments(parameter, lr=0.01):
+    optimizer = torch.optim.Adam([parameter], lr=lr)
+    parameter.square().sum().backward()
+    optimizer.step()
+    optimizer.zero_grad()
+    return optimizer
+
+
+def test_dp_adam_uses_nep_sqrt_scaling_once_for_optimizer_and_scheduler():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    params = _dp_adam_params(scale_lr=True, t_0=2, t_mult=2)
+
+    optimizer, scheduler, peak_lr = create_dp_adam_optimizer_and_scheduler(
+        [parameter], params, iterations=10, world_size=4,
+        avg_atom_nums=50.0)
+
+    assert peak_lr == pytest.approx(0.0113137084989848)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(peak_lr)
+    assert scheduler.base_lrs == pytest.approx([peak_lr])
+
+
+def test_dp_adam_disabled_scaling_keeps_configured_lr_without_batch_multiplier():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    params = _dp_adam_params(scale_lr=False)
+
+    optimizer, scheduler, peak_lr = create_dp_adam_optimizer_and_scheduler(
+        [parameter], params, iterations=10, world_size=4,
+        avg_atom_nums=50.0)
+    step_lr = resolve_dp_step_lr(
+        global_update=0,
+        optimizer_peak_lr=peak_lr,
+        stop_step=params.stop_step,
+        decay_step=params.decay_step,
+        stop_lr=params.stop_lr,
+    )
+
+    assert scheduler is None
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
+    assert peak_lr == pytest.approx(0.001)
+    assert step_lr == pytest.approx(0.001)
+
+
+def test_dp_checkpoint_restores_adam_moments_scheduler_and_update_count():
+    source_parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    source_optimizer = _dp_optimizer_with_moments(source_parameter)
+    source_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        source_optimizer, T_0=2, T_mult=2, eta_min=1.0e-5)
+    source_scheduler.step(1.5)
+    checkpoint = build_dp_checkpoint(
+        json_file={"model_type": "DP"},
+        epoch=7,
+        model=torch.nn.Linear(1, 1),
+        optimizer=source_optimizer,
+        scheduler=source_scheduler,
+        optimizer_updates=123,
+        davg=[1.0],
+    )
+
+    target_parameter = torch.nn.Parameter(torch.tensor([5.0]))
+    target_optimizer = torch.optim.Adam([target_parameter], lr=0.01)
+    target_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        target_optimizer, T_0=2, T_mult=2, eta_min=1.0e-5)
+    restored = restore_dp_training_state(
+        checkpoint,
+        target_optimizer,
+        target_scheduler,
+        reset_epoch=False,
+        optimizer_peak_lr=0.01,
+    )
+
+    assert restored == (True, True)
+    assert checkpoint["optimizer_updates"] == 123
+    assert checkpoint["davg"] == [1.0]
+    source_state = next(iter(source_optimizer.state.values()))
+    target_state = next(iter(target_optimizer.state.values()))
+    assert target_state["step"] == source_state["step"]
+    assert torch.equal(target_state["exp_avg"], source_state["exp_avg"])
+    assert target_scheduler.state_dict()["T_cur"] == pytest.approx(
+        source_scheduler.state_dict()["T_cur"])
+
+
+def test_dp_reset_epoch_and_legacy_checkpoint_keep_fresh_training_state():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam([parameter], lr=0.001)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=2, T_mult=2, eta_min=1.0e-5)
+
+    assert restore_dp_training_state(
+        {"epoch": 3}, optimizer, scheduler, reset_epoch=False,
+        optimizer_peak_lr=0.001) == (False, False)
+    assert restore_dp_training_state(
+        {"optimizer": {"unexpected": "state"}},
+        optimizer,
+        scheduler,
+        reset_epoch=True,
+        optimizer_peak_lr=0.001,
+    ) == (False, False)
+    assert optimizer.state == {}
+
+def test_dp_checkpoint_can_omit_kalman_optimizer_state():
+    checkpoint = build_dp_checkpoint(
+        json_file={"model_type": "DP"},
+        epoch=2,
+        model=torch.nn.Linear(1, 1),
+        optimizer=None,
+        scheduler=None,
+        optimizer_updates=None,
+    )
+
+    assert checkpoint["optimizer"] is None
+    assert checkpoint["scheduler"] is None
+
+def test_dp_adam_treats_uninitialized_world_size_as_single_process():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    params = _dp_adam_params(scale_lr=True)
+
+    optimizer, scheduler, peak_lr = create_dp_adam_optimizer_and_scheduler(
+        [parameter], params, iterations=10, world_size=0,
+        avg_atom_nums=50.0)
+
+    assert scheduler is None
+    assert peak_lr == pytest.approx(0.001 * math.sqrt(32))
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(peak_lr)

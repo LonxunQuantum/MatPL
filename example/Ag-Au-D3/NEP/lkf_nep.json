@@ -30,8 +30,8 @@
     },
     "optimizer": {
         "optimizer": "LKF",
-        "epochs": 1,
-        "batch_size": 8,
+        "epochs": 30,
+        "batch_size": 1,
         "print_freq": 10,
         "block_size": 5120,
         "kalman_lambda": 0.98,

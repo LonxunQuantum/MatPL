@@ -204,7 +204,7 @@
         
     ],
 
-    "work_dir": "./dev_gpu_nep_dp",
+    "work_dir": "./dev_gpu_nep_dp2",
     "work_list": [
         {
             "_work_type":"mcloud envs(gpu and cpu) for DP, NEP",

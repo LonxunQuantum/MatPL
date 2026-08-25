@@ -16,9 +16,18 @@ from src.user.input_param import InputParam
 from collections import defaultdict
 from src.utils.debug_operation import check_cuda_memory
 from src.utils.train_log import AverageMeter, Summary, ProgressMeter
+from src.utils.learning_rate import optimizer_update_step
 
 
-def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam):
+def resolve_dp_step_lr(
+        global_update, optimizer_peak_lr, stop_step, decay_step, stop_lr):
+    """Resolve DP decay from the already-scaled optimizer peak LR."""
+    return adjust_lr(
+        global_update, optimizer_peak_lr, stop_step, decay_step, stop_lr)
+
+
+def train(train_loader, model, criterion, optimizer, scheduler, epoch,
+          optimizer_peak_lr, completed_updates, device, args:InputParam):
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     learning_rate = AverageMeter("LR", ":.8e", Summary.AVERAGE)
@@ -74,12 +83,17 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         # for param_group in optimizer.param_groups:
         #     param_group["lr"] = real_lr * (nr_batch_sample**0.5)
 
+        global_step = optimizer_update_step(completed_updates, i)
         if scheduler is None:
-            global_step = (epoch - 1) * len(train_loader) + i * nr_batch_sample
-            real_lr = adjust_lr(global_step, start_lr, \
-                            args.optimizer_param.stop_step, args.optimizer_param.decay_step, args.optimizer_param.stop_lr) #  stop_step, decay_step
+            real_lr = resolve_dp_step_lr(
+                global_step,
+                optimizer_peak_lr,
+                args.optimizer_param.stop_step,
+                args.optimizer_param.decay_step,
+                args.optimizer_param.stop_lr,
+            )
             for param_group in optimizer.param_groups:
-                param_group["lr"] = real_lr * (nr_batch_sample**0.5)
+                param_group["lr"] = real_lr
         else:
             real_lr = optimizer.param_groups[0]["lr"]
             # adjusted_lr = real_lr * (avg_atom_number ** 0.5)
@@ -262,7 +276,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
                     "dstd":model.dstd,
                     "energy_shift":model.energy_shift,
                     "atom_type_order": np.array(args.atom_type),    #atom type order of davg/dstd/energy_shift
-                    "sij_max":Sij_max
+                    "sij_max":Sij_max,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict() if scheduler is not None else None,
+                    "optimizer_updates": global_step + 1,
                     },
                     os.path.join(args.file_paths.model_store_dir, "saved_models"),
                     epoch,

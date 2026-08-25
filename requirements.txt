@@ -15,4 +15,5 @@ pwact
 pybind11
 charset_normalizer==3.3.2
 psutil
-
+mkl==2022.2.0
+mkl-include==2022.2.0

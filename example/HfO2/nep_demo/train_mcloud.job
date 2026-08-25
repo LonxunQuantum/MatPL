@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-task=1
 #SBATCH --partition=3080ti
 
-source /share/app/MATPL/MatPL-2025.3/env.sh
+source /share/app/MATPL/MatPL-2026.3/env.sh
 
 MATPL train nep_train.json
 

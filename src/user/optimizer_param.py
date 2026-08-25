@@ -47,6 +47,7 @@ class OptimizerParam(object):
             raise Exception("ERROR! the lambda_2 should >= 0 !")
 
         self.warmup = get_parameter("warm_epochs",optimizer_dict, None) #预热epochs
+        self.scale_lr = get_parameter("scale_lr", optimizer_dict, False)
         self.scaling_method = get_parameter("scaling_method",optimizer_dict, "sqrt")  # linear_gpu sqrt_batch sqrt_gpu sqrt sqrt_batch_gpu_atom defalt is (avg_atom_nums) ** 0.5
 
         if "KF" in self.opt_name.upper():  #set Kalman Filter Optimizer params
@@ -180,6 +181,8 @@ class OptimizerParam(object):
                 opt_dict["momentum"]= self.momentum
 
             opt_dict["learning_rate"]= self.learning_rate
+            opt_dict["scale_lr"] = self.scale_lr
+            opt_dict["scaling_method"] = self.scaling_method
             opt_dict["stop_lr"] = self.stop_lr
             opt_dict["stop_step"] = self.stop_step
             opt_dict["decay_step"] = self.decay_step

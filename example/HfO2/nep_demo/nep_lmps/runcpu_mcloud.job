@@ -11,7 +11,7 @@ echo "Running on nodes: $SLURM_NODELIST"
 
 module load lammps4matpl/2025.3
 
-mpirun -np 4 lmp_mpi -in in.lammps
+mpirun -np 4 lmp_mpi -in in.lmp-cpu-25
 
 end=$(date +%s)
 take=$(( end - start ))

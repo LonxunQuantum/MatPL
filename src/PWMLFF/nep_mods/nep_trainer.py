@@ -6,7 +6,12 @@ import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from src.loss.loss import adjust_lr, warmup_lr, get_loss, print_l1_l2
+from src.loss.loss import adjust_lr, get_loss, print_l1_l2
+from src.utils.learning_rate import (
+    calculate_loss_weight_progress,
+    calculate_warmup_lr,
+    optimizer_update_step,
+)
 
 from src.optimizer.KFWrapper import KFOptimizerWrapper
 # import horovod.torch as hvd
@@ -304,20 +309,9 @@ def _get_model_output_requests(sample, args: InputParam, train_virial: bool):
     }
 
 
-def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr, device, args:InputParam):
-    def scale_learning_rate(ngpus, nbatch, avg_atom_nums, scaling_method):
-        if scaling_method == 'linear_gpu':
-            return ngpus # 只乘以卡数
-        elif scaling_method == 'sqrt_batch':
-            return nbatch** 0.5
-        elif scaling_method == 'sqrt_gpu':
-            return ngpus** 0.5
-        elif scaling_method == 'sqrt':
-            return (nbatch * ngpus) ** 0.5
-        elif scaling_method == 'sqrt_batch_gpu_atom':
-            return (nbatch * ngpus * avg_atom_nums) ** 0.5
-        return (avg_atom_nums) ** 0.5
-
+def train(train_loader, model, criterion, optimizer, scheduler, epoch,
+          optimizer_peak_lr, completed_updates, warmup_updates,
+          device, args:InputParam):
     batch_time = AverageMeter("Time", ":6.3f", device=device, world_size=args.world_size)
     data_time = AverageMeter("Data", ":6.3f", device=device, world_size=args.world_size)
     learning_rate = AverageMeter("LR", ":.8e", Summary.AVERAGE, device=device, world_size=args.world_size)
@@ -406,42 +400,35 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         data_time.update(time.time() - end)
         batch_size = sample["num_atom"].shape[0]
         avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
-        nr_batch_sample = sample["num_atom"].shape[0]
-        lr_scale = scale_learning_rate(
-            args.world_size,
-            batch_size,
-            avg_atom_number,
-            args.optimizer_param.scaling_method,
-        )
+        global_update = optimizer_update_step(completed_updates, i)
+        loss_weight_progress = calculate_loss_weight_progress(
+            global_update, args.optimizer_param.stop_step)
         # 如果采用预热，则前n个epoch 学习率线性增加
-        if args.optimizer_param.warmup is not None and epoch <= args.optimizer_param.warmup: # epoch 从1计数
-            base_lr = warmup_lr(iter=i,
-                                iternum=len(train_loader),
-                                cur_epoch=epoch,
-                                warm_epochs=args.optimizer_param.warmup,
-                                start_lr=args.optimizer_param.stop_lr,
-                                end_lr=args.optimizer_param.learning_rate
-                                )
-            real_lr = base_lr * lr_scale
+        if global_update < warmup_updates:
+            optimizer_lr = calculate_warmup_lr(
+                global_update=global_update,
+                warmup_updates=warmup_updates,
+                start_lr=args.optimizer_param.stop_lr,
+                optimizer_peak_lr=optimizer_peak_lr,
+            )
             for param_group in optimizer.param_groups:
-                param_group["lr"] = real_lr
+                param_group["lr"] = optimizer_lr
             is_warmlr = True
         else:
             is_warmlr = False
             if scheduler is None: # 不启用周期性重启
-                global_step = (epoch - 1) * len(train_loader) + i * nr_batch_sample
-                base_lr = adjust_lr(
-                    global_step, start_lr,
+                optimizer_lr = adjust_lr(
+                    global_update, optimizer_peak_lr,
                     args.optimizer_param.stop_step, args.optimizer_param.decay_step, args.optimizer_param.stop_lr
                 )
-                real_lr = base_lr * lr_scale # base_lr * (sqrt(batch*gpu)
                 for param_group in optimizer.param_groups:
-                    param_group["lr"] = real_lr
+                    param_group["lr"] = optimizer_lr
             else: # 周期性重启
-                base_lr = optimizer.param_groups[0]["lr"]
-                real_lr = base_lr * lr_scale
+                if global_update == warmup_updates:
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = optimizer_peak_lr
+                optimizer_lr = optimizer.param_groups[0]["lr"]
 
-        learning_rate.update(real_lr)
         data_mask = Virial_label[:, 0] > -1e6
         train_virial = args.optimizer_param.train_virial and data_mask.any().item()
         output_requests = _get_model_output_requests(sample, args, train_virial)
@@ -489,7 +476,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
 
         loss = get_loss(
             args,
-            base_lr,
+            optimizer_lr,
             avg_atom_number,
             loss_F_val,
             loss_Etot_val,
@@ -498,6 +485,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
             loss_Charge_val,
             loss_BEC_val,
             train_virial,
+            loss_weight_progress=loss_weight_progress,
         )
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
         loss.backward()
@@ -512,6 +500,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
 
         if scheduler is not None and is_warmlr is False:
             scheduler.step()
+        optimizer_lr = optimizer.param_groups[0]["lr"]
+        learning_rate.update(optimizer_lr)
 
         loss_val = loss
         L1, L2 = print_l1_l2(model)
@@ -566,7 +556,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         progress.sync_meters()
 
     if args.rank == 0:
-        progress.display_summary(["Training Set:", f"BaseLR {base_lr:.8e}", f"LR {real_lr:.8e}"])
+        progress.display_summary([
+            "Training Set:",
+            f"PeakLR {optimizer_peak_lr:.8e}",
+            f"OptimizerLR {optimizer_lr:.8e}",
+        ])
 
     return (
         losses.avg,
@@ -579,7 +573,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch, start_lr,
         loss_Virial_per_atom.root,
         loss_Charge.root,
         loss_BEC.root,
-        real_lr,
+        optimizer_lr,
         loss_L1.root,
         loss_L2.root
     )

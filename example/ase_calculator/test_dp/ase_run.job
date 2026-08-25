@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH --job-name=11_dev_gpu_NEP_ADAM
+#SBATCH --job-name=asedp
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
@@ -14,14 +14,12 @@ echo "Running on nodes: $SLURM_NODELIST"
 
 start=$(date +%s)
 #module load intel/2020
-#module load cuda/11.8-share
-#source /data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh
-#conda activate matpl-2025.3
-#source /data/home/wuxingxing/codespace/MatPL-2025.3/env.sh
 
 source /share/app/MATPL/MatPL-2026.3/env.sh
 
-#source /share/app/MATPL/MatPL-2025.3/env.sh
-
+#module load cuda/11.8-share
+#source /data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh
+#conda activate matpl-2026.3
+#source ~/xcode/qnep-elec/env.sh
 python ase_test.py
 

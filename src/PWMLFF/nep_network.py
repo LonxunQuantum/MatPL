@@ -25,7 +25,11 @@ from src.aux.inference_plot import inference_plot
 import concurrent.futures
 import multiprocessing
 from src.utils.debug_operation import check_cuda_memory, check_cpu_memory
-from src.utils.learning_rate import is_epoch_before_restart
+from src.utils.learning_rate import (
+    calculate_lr_scale,
+    is_epoch_before_restart,
+    resolve_optimizer_peak_lr,
+)
 from src.optimizer.GKF import GKFOptimizer
 from src.optimizer.LKF import LKFOptimizer
 
@@ -100,7 +104,8 @@ def load_nep_checkpoint_with_fallback(
 
 def restore_nep_training_state(
         checkpoint, optimizer, scheduler, reset_epoch,
-        allow_optimizer_param_group_mismatch=False):
+        allow_optimizer_param_group_mismatch=False,
+        optimizer_peak_lr=None):
     """Restore optional NEP optimizer/scheduler state for a true resume."""
     if checkpoint is None or reset_epoch:
         return False, False
@@ -137,12 +142,51 @@ def restore_nep_training_state(
             raise RuntimeError(
                 "Failed to restore the NEP scheduler state from checkpoint"
             ) from exc
+        if optimizer_peak_lr is not None:
+            old_base_lrs = scheduler.base_lrs
+            old_current_lrs = scheduler.get_last_lr()
+            scheduler.base_lrs = [
+                optimizer_peak_lr for _ in optimizer.param_groups]
+            current_lrs = []
+            for old_base_lr, old_current_lr in zip(
+                    old_base_lrs, old_current_lrs):
+                if old_base_lr == scheduler.eta_min:
+                    current_lrs.append(optimizer_peak_lr)
+                else:
+                    phase = (
+                        (old_current_lr - scheduler.eta_min)
+                        / (old_base_lr - scheduler.eta_min)
+                    )
+                    current_lrs.append(
+                        scheduler.eta_min
+                        + phase * (optimizer_peak_lr - scheduler.eta_min)
+                    )
+            scheduler._last_lr = current_lrs
+            for param_group, current_lr in zip(
+                    optimizer.param_groups, current_lrs):
+                param_group["initial_lr"] = optimizer_peak_lr
+                param_group["lr"] = current_lr
         scheduler_restored = True
+    elif (
+            scheduler is not None
+            and optimizer_restored
+            and optimizer_peak_lr is not None):
+        # A legacy/incomplete checkpoint has no scheduler position to resume.
+        # Restart the scheduler explicitly from its peak and keep optimizer LR
+        # consistent with that fresh scheduler state.
+        current_lrs = [optimizer_peak_lr for _ in optimizer.param_groups]
+        scheduler.base_lrs = current_lrs.copy()
+        scheduler._last_lr = current_lrs.copy()
+        for param_group in optimizer.param_groups:
+            param_group["initial_lr"] = optimizer_peak_lr
+            param_group["lr"] = optimizer_peak_lr
 
     return optimizer_restored, scheduler_restored
 
 
-def build_nep_checkpoint(json_file, epoch, model, optimizer, scheduler):
+def build_nep_checkpoint(
+        json_file, epoch, model, optimizer, scheduler,
+        optimizer_updates=None, warmup_updates=None):
     """Build a NEP checkpoint with the state required for true resume."""
     return {
         "json_file": json_file,
@@ -150,6 +194,8 @@ def build_nep_checkpoint(json_file, epoch, model, optimizer, scheduler):
         "state_dict": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "optimizer_updates": optimizer_updates,
+        "warmup_updates": warmup_updates,
     }
 
 
@@ -604,10 +650,21 @@ class nep_network:
         # optimizer, and learning rate scheduler
         scheduler = None
         if self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]:
-            if self.input_param.optimizer_param.warmup is not None:# 如果采用预热，则前n个epoch 学习率线性增加,一般前5% epochs，从最小增加
-                init_lr = self.input_param.optimizer_param.stop_lr 
-            else:
-                init_lr = self.input_param.optimizer_param.learning_rate
+            self.lr_scale = calculate_lr_scale(
+                self.input_param.optimizer_param.scale_lr,
+                self.input_param.optimizer_param.scaling_method,
+                self.input_param.optimizer_param.batch_size,
+                self.input_param.world_size,
+                avg_atom_num,
+            )
+            self.optimizer_peak_lr = resolve_optimizer_peak_lr(
+                self.input_param.optimizer_param.learning_rate,
+                self.lr_scale,
+            )
+            # Always initialize the optimizer and scheduler from the actual
+            # peak LR. Warmup temporarily changes only the current optimizer
+            # LR, so scheduler.base_lrs remains the true peak value.
+            init_lr = self.optimizer_peak_lr
 
             if self.input_param.optimizer_param.opt_name == "ADAM":
                 optimizer = optim.Adam(
@@ -664,6 +721,7 @@ class nep_network:
                     self.input_param.nep_param,
                     "fixed_sqrt_epsilon_inf",
                     None) is not None,
+                optimizer_peak_lr=self.optimizer_peak_lr,
             )
             if self.is_rank_0:
                 if self.input_param.optimizer_param.reset_epoch:
@@ -675,43 +733,38 @@ class nep_network:
                     if scheduler is not None:
                         print(f"NEP scheduler state: {scheduler_message}")
 
+        if (
+                checkpoint is not None
+                and not self.input_param.optimizer_param.reset_epoch):
+            self.completed_optimizer_updates = checkpoint.get(
+                "optimizer_updates")
+            if self.completed_optimizer_updates is None:
+                # Backward compatibility for checkpoints written before the
+                # explicit optimizer-update counter was introduced.
+                self.completed_optimizer_updates = (
+                    self.input_param.optimizer_param.start_epoch - 1
+                ) * iterations
+            self.warmup_optimizer_updates = checkpoint.get(
+                "warmup_updates")
+            if self.warmup_optimizer_updates is None:
+                self.warmup_optimizer_updates = (
+                    (self.input_param.optimizer_param.warmup or 0)
+                    * iterations
+                )
+        else:
+            self.completed_optimizer_updates = 0
+            self.warmup_optimizer_updates = (
+                (self.input_param.optimizer_param.warmup or 0) * iterations)
+
         return model, optimizer, scheduler
 
 
     def reset_lr(self, model, iterations, optimizer, scheduler):
-        # 初始化优化器
-        init_lr = self.input_param.optimizer_param.learning_rate
-        if self.input_param.optimizer_param.opt_name == "ADAM":
-            optimizer = optim.Adam(
-                model.parameters(),
-                lr=init_lr,
-                weight_decay=self.input_param.optimizer_param.lambda_2 or 0
-            )
-        elif self.input_param.optimizer_param.opt_name == "ADAMW":
-            optimizer = optim.AdamW(
-                model.parameters(),
-                lr=init_lr,
-                weight_decay=self.input_param.optimizer_param.lambda_2 or 0
-            )
-        elif self.input_param.optimizer_param.opt_name == "SGD":
-            optimizer = optim.SGD(
-                model.parameters(),
-                lr=init_lr,
-                momentum=self.input_param.optimizer_param.momentum,
-                weight_decay=self.input_param.optimizer_param.weight_decay
-            )
-        else:
-            raise Exception("Error: Unsupported optimizer!")
-        # 初始化学习率调度器
-        scheduler = None
-        if self.input_param.optimizer_param.t_0 and self.input_param.optimizer_param.opt_name not in ["LKF", "GKF"]:
-            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer,
-                T_0=self.input_param.optimizer_param.t_0 * iterations,
-                T_mult=self.input_param.optimizer_param.t_mult,
-                eta_min=self.input_param.optimizer_param.stop_lr,
-                last_epoch=-1
-            )
+        # Warmup must not recreate Adam and discard its accumulated moments.
+        # The scheduler was initialized from optimizer_peak_lr and was not
+        # stepped during warmup, so only restore the optimizer's current LR.
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = self.optimizer_peak_lr
         return optimizer, scheduler
 
     def train(self):
@@ -775,7 +828,7 @@ class nep_network:
             dist.barrier()
 
         model, optimizer, scheduler = self.load_model_optimizer(energy_shift, 
-                                                                avg_atom_num=1, 
+                                                                avg_atom_num=train_loader.dataset.avg_image_atom,
                                                                 iterations=len(train_loader), 
                                                                 q_scaler = q_scaler, 
                                                                 max_NN_radial = max_NN_radial, 
@@ -818,7 +871,7 @@ class nep_network:
         if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
             train_lists.extend(["time(s)"])
         else:
-            train_lists.extend(["real_lr", "time(s)"])
+            train_lists.extend(["optimizer_lr", "time(s)"])
 
         train_print_width = {
             "epoch": 5,
@@ -834,7 +887,7 @@ class nep_network:
             "RMSE_virial(eV/atom)": 23,
             "Loss_l1": 18,
             "Loss_l2": 18,
-            "real_lr": 18,
+            "optimizer_lr": 18,
             "time(s)": 15,
         }
 
@@ -854,8 +907,6 @@ class nep_network:
 
         for epoch in range(self.input_param.optimizer_param.start_epoch, self.input_param.optimizer_param.epochs + 1):
             time_start = time.time()
-            if self.input_param.optimizer_param.warmup is not None and self.input_param.optimizer_param.warmup + 1 == epoch: # epoch 从1计数
-                optimizer, scheduler = self.reset_lr(model, len(train_loader), optimizer, scheduler)
             # 设置 sampler 的 epoch 以确保 shuffle 一致
             if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
                 train_loader.sampler.set_epoch(epoch)
@@ -865,10 +916,15 @@ class nep_network:
                     train_loader, model, self.criterion, optimizer, epoch, self.device, self.input_param
                 )
             else:
-                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, real_lr, loss_l1, loss_l2 = train(
+                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, optimizer_lr, loss_l1, loss_l2 = train(
                     train_loader, model, self.criterion, optimizer, scheduler, epoch,
-                        self.input_param.optimizer_param.learning_rate, self.device, self.input_param
+                        self.optimizer_peak_lr,
+                        self.completed_optimizer_updates,
+                        self.warmup_optimizer_updates,
+                        self.device,
+                        self.input_param,
                 )
+                self.completed_optimizer_updates += len(train_loader)
 
             time_end = time.time()
             # self.convert_to_gpumd(model)
@@ -903,7 +959,7 @@ class nep_network:
                     if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
                         train_log_line += "%15.4f" % (time_end - time_start)
                     else:
-                        train_log_line += f"{real_lr:18.10e}{(time_end - time_start):15.4f}"
+                        train_log_line += f"{optimizer_lr:18.10e}{(time_end - time_start):15.4f}"
                     f_train_log.write(f"{train_log_line}\n")
 
                 if val_loader and len(val_loader) > 0:
@@ -932,6 +988,8 @@ class nep_network:
                     model,
                     optimizer,
                     scheduler,
+                    self.completed_optimizer_updates,
+                    self.warmup_optimizer_updates,
                 )
                 save_checkpoint(
                     checkpoint_dict,

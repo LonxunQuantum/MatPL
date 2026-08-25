@@ -30,8 +30,8 @@
     },
     "optimizer": {
         "optimizer": "ADAM",
-        "epochs": 4,
-        "batch_size": 8,
+        "epochs": 30,
+        "batch_size": 1,
         "print_freq": 10,
         "train_energy": true,
         "train_force": true,
