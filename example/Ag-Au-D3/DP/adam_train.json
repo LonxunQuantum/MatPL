@@ -26,10 +26,10 @@
     },
     "optimizer": {
         "optimizer": "ADAM",
-        "epochs": 4,
+        "epochs": 30,
         "train_energy": true,
         "train_force": true,
-        "batch_size": 8,
+        "batch_size": 1,
         "train_virial": true
     },
     "format":"pwmlff/npy",

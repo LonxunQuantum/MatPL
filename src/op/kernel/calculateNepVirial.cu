@@ -120,17 +120,20 @@ __global__ void nepvirial_grad_wrt_neighbors_a(
     const unsigned int atom_id = blockIdx.y;
     const unsigned int neigh_index = threadIdx.x + block_id * blockDim.x;
 
-    if (neigh_index >= neigh_num)
-        return;
-
     const unsigned int index_xyzw = threadIdx.y;
     const unsigned int tid = threadIdx.x;
 
+    // 注意：必须在提前 return 之前完成共享内存加载。
+    // 否则当末块活跃线程不足 9 个（neigh_num % 128 为 1~8，或 neigh_num < 9）时，
+    // grad_one 尾部元素无人写入，读取未初始化共享内存可能得到 NaN。
     __shared__ double grad_one[9];
     if(tid < 9){
         grad_one[tid] = net_grad[tid];
     }
     __syncthreads();
+
+    if (neigh_index >= neigh_num)
+        return;
 
     if (atom_id >= natoms) {
         return;

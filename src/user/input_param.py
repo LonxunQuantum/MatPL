@@ -328,6 +328,9 @@ class InputParam(object):
                 params_dict["optimizer"] = self.optimizer_param.to_linear_dict()
             else:
                 params_dict["model"]["fitting_net"] = self.model_param.fitting_net.to_dict_std()
+                if (self.model_type == "NEP" and
+                        self.nep_param.use_analytical_nep_grad is False):
+                    params_dict["model"]["fitting_net"]["use_analytical_nep_grad"] = False
                 params_dict["optimizer"] = self.optimizer_param.to_dict()
         # elif self.model_type in ["NEP"]:
         #     nep_in_content = self.model_param.nep_param.to_txt()

@@ -177,6 +177,28 @@ torch::autograd::variable_list calculateNepFeat(
     int64_t feat_multi_nums,
     int64_t fix_cij);
 
+torch::autograd::variable_list calculateNepFeatWithGradContext(
+    at::Tensor coeff2,
+    at::Tensor d12_radial,
+    at::Tensor NL_radial,
+    at::Tensor atom_map,
+    at::Tensor feats,
+    double rcut_radial,
+    int64_t feat_multi_nums,
+    int64_t fix_cij);
+
+at::Tensor calculateNepFeatInputGrad(
+    at::Tensor grad_input,
+    at::Tensor coeff2,
+    at::Tensor d12_radial,
+    at::Tensor NL_radial,
+    at::Tensor dfeat_c2,
+    at::Tensor dfeat_2b,
+    at::Tensor dfeat_2b_noc,
+    at::Tensor atom_map,
+    int64_t multi_feat_num,
+    int64_t fix_cij);
+
 
 // the following is the code nep multi feature
 class CalculateNepMbFeat : public torch::autograd::Function<CalculateNepMbFeat> {
@@ -232,6 +254,36 @@ torch::autograd::variable_list calculateNepMbFeat(
     at::Tensor NL_angluar,
     at::Tensor atom_map,
     at::Tensor feats,
+    int64_t feat_2b_num,
+    int64_t lmax_3,
+    int64_t lmax_4,
+    int64_t lmax_5,
+    double rcut_angluar,
+    int64_t fix_cij);
+
+torch::autograd::variable_list calculateNepMbFeatWithGradContext(
+    at::Tensor coeff3,
+    at::Tensor d12_angluar,
+    at::Tensor NL_angluar,
+    at::Tensor atom_map,
+    at::Tensor feats,
+    int64_t feat_2b_num,
+    int64_t lmax_3,
+    int64_t lmax_4,
+    int64_t lmax_5,
+    double rcut_angluar,
+    int64_t fix_cij);
+
+at::Tensor calculateNepMbFeatInputGrad(
+    at::Tensor grad_input,
+    at::Tensor coeff3,
+    at::Tensor d12,
+    at::Tensor NL,
+    at::Tensor dfeat_c3,
+    at::Tensor dfeat_3b,
+    at::Tensor dfeat_3b_noc,
+    at::Tensor sum_fxyz,
+    at::Tensor atom_map,
     int64_t feat_2b_num,
     int64_t lmax_3,
     int64_t lmax_4,

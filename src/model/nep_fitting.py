@@ -37,6 +37,49 @@ class LayerModule(nn.Module):
         self.bias = nn.Parameter(bias, requires_grad=True) if bias is not None else None
         self.resnet_dt = nn.Parameter(resnet_dt, requires_grad=True) if resnet_dt is not None else None
 
+
+def _apply_hidden_layers_with_cache(x, layers, network_size, bias_flag, activation):
+    caches = []
+    for i, layer in enumerate(layers):
+        x_in = x
+        if bias_flag and layer.bias is not None:
+            hiden = torch.matmul(x, layer.weight) + layer.bias
+        else:
+            hiden = torch.matmul(x, layer.weight)
+
+        hiden = activation(hiden)
+        residual = "none"
+        if i > 0:
+            if network_size[i + 1] == network_size[i] and layer.resnet_dt is not None:
+                x = hiden * layer.resnet_dt + x
+                residual = "scaled"
+            else:
+                x = hiden + x
+                residual = "add"
+        else:
+            x = hiden
+
+        caches.append((layer, hiden, residual))
+    return x, caches
+
+
+def _input_grad_from_hidden_seed(seed, caches):
+    grad = seed
+    for layer, hiden, residual in reversed(caches):
+        hidden_seed = grad
+        skip_seed = None
+        if residual == "add":
+            skip_seed = grad
+        elif residual == "scaled":
+            skip_seed = grad
+            hidden_seed = grad * layer.resnet_dt
+
+        affine_seed = hidden_seed * (1.0 - hiden * hiden)
+        grad = torch.matmul(affine_seed, layer.weight.transpose(0, 1))
+        if skip_seed is not None:
+            grad = grad + skip_seed
+    return grad
+
 class FittingNet(nn.Module):
 
     def __init__(self,  
@@ -168,6 +211,24 @@ class FittingNet(nn.Module):
                     x = torch.matmul(x, layer.weight)
         return x
 
+    def forward_with_input_grad(self, x: torch.Tensor):
+        hidden, caches = _apply_hidden_layers_with_cache(
+            x,
+            self.layers[:-1],
+            self.network_size,
+            self.bias_flag,
+            self.activation,
+        )
+        layer = self.layers[-1]
+        if self.last_bias:
+            energy = torch.matmul(hidden, layer.weight) + layer.bias
+        else:
+            energy = torch.matmul(hidden, layer.weight)
+
+        seed = layer.weight.transpose(0, 1).expand(x.shape[0], -1)
+        denergy_dx = _input_grad_from_hidden_seed(seed, caches)
+        return energy, denergy_dx
+
 
 class QNEPFittingNet(nn.Module):
 
@@ -278,6 +339,26 @@ class QNEPFittingNet(nn.Module):
             energy = energy + self.energy_head.bias
         charge = torch.matmul(x, self.charge_head.weight)
         return energy, charge
+
+    def forward_with_input_grad(self, x: torch.Tensor):
+        hidden, caches = _apply_hidden_layers_with_cache(
+            x,
+            self.layers,
+            self.network_size,
+            self.bias_flag,
+            self.activation,
+        )
+
+        energy = torch.matmul(hidden, self.energy_head.weight)
+        if self.energy_head.bias is not None:
+            energy = energy + self.energy_head.bias
+        charge = torch.matmul(hidden, self.charge_head.weight)
+
+        energy_seed = self.energy_head.weight.transpose(0, 1).expand(x.shape[0], -1)
+        charge_seed = self.charge_head.weight.transpose(0, 1).expand(x.shape[0], -1)
+        denergy_dx = _input_grad_from_hidden_seed(energy_seed, caches)
+        dcharge_dx = _input_grad_from_hidden_seed(charge_seed, caches)
+        return energy, charge, denergy_dx, dcharge_dx
 '''    
 class EmbeddingNet0(nn.Module):
     def __init__(self, 

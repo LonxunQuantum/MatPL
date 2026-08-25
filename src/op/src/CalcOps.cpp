@@ -415,7 +415,7 @@ torch::autograd::variable_list CalculateNepFeat::forward(
         ctx->saved_data["multi_feat_num"] = multi_feat_num;
         ctx->saved_data["fix_cij"] = fix_cij;
 
-        return {feats};
+        return {feats, dfeat_c2, dfeat_2b, dfeat_2b_noc};
     }
 
 torch::autograd::variable_list CalculateNepFeat::backward(
@@ -688,6 +688,35 @@ torch::autograd::variable_list calculateNepFeat(
         return CalculateNepFeat::apply(coeff2, d12_radial, NL_radial, atom_map, feats, rcut_radial, feat_multi_nums, fix_cij);
     }
 
+torch::autograd::variable_list calculateNepFeatWithGradContext(
+    at::Tensor coeff2,
+    at::Tensor d12_radial,
+    at::Tensor NL_radial,
+    at::Tensor atom_map,
+    at::Tensor feats,
+    double rcut_radial,
+    int64_t feat_multi_nums,
+    int64_t fix_cij)
+    {
+        return CalculateNepFeat::apply(coeff2, d12_radial, NL_radial, atom_map, feats, rcut_radial, feat_multi_nums, fix_cij);
+    }
+
+at::Tensor calculateNepFeatInputGrad(
+    at::Tensor grad_input,
+    at::Tensor coeff2,
+    at::Tensor d12_radial,
+    at::Tensor NL_radial,
+    at::Tensor dfeat_c2,
+    at::Tensor dfeat_2b,
+    at::Tensor dfeat_2b_noc,
+    at::Tensor atom_map,
+    int64_t multi_feat_num,
+    int64_t fix_cij)
+    {
+        auto result = CalculateNepFeatGrad::apply(grad_input, coeff2, d12_radial, NL_radial, dfeat_c2, dfeat_2b, dfeat_2b_noc, atom_map, multi_feat_num, fix_cij);
+        return result[1];
+    }
+
 
 torch::autograd::variable_list CalculateNepMbFeat::forward(
     torch::autograd::AutogradContext *ctx,
@@ -728,7 +757,7 @@ torch::autograd::variable_list CalculateNepMbFeat::forward(
         ctx->saved_data["lmax_4"] = lmax_4;
         ctx->saved_data["lmax_5"] = lmax_5;
         ctx->saved_data["fix_cij"] = fix_cij;
-        return {feats};
+        return {feats, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz};
     }
 
 torch::autograd::variable_list CalculateNepMbFeat::backward(
@@ -1038,6 +1067,43 @@ torch::autograd::variable_list calculateNepMbFeat(
     int64_t fix_cij) 
     {
         return CalculateNepMbFeat::apply(coeff, d12, NL, atom_map, feats, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut, fix_cij);
+    }
+
+torch::autograd::variable_list calculateNepMbFeatWithGradContext(
+    at::Tensor coeff3,
+    at::Tensor d12,
+    at::Tensor NL,
+    at::Tensor atom_map,
+    at::Tensor feats,
+    int64_t feat_2b_num,
+    int64_t lmax_3,
+    int64_t lmax_4,
+    int64_t lmax_5,
+    double rcut_angular,
+    int64_t fix_cij)
+    {
+        return CalculateNepMbFeat::apply(coeff3, d12, NL, atom_map, feats, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut_angular, fix_cij);
+    }
+
+at::Tensor calculateNepMbFeatInputGrad(
+    at::Tensor grad_input,
+    at::Tensor coeff3,
+    at::Tensor d12,
+    at::Tensor NL,
+    at::Tensor dfeat_c3,
+    at::Tensor dfeat_3b,
+    at::Tensor dfeat_3b_noc,
+    at::Tensor sum_fxyz,
+    at::Tensor atom_map,
+    int64_t feat_2b_num,
+    int64_t lmax_3,
+    int64_t lmax_4,
+    int64_t lmax_5,
+    double rcut_angular,
+    int64_t fix_cij)
+    {
+        auto result = CalculateNepMbFeatGrad::apply(grad_input, coeff3, d12, NL, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz, atom_map, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut_angular, fix_cij);
+        return result[1];
     }
 
 std::vector<torch::Tensor> calculate_maxneigh(

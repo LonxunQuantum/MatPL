@@ -153,11 +153,13 @@ if [ -d "$OP_DIR" ]; then
     if cmake .. && $MAKE_CMD; then
         echo "Operators built successfully"
     else
-        echo "Warning: Failed to build operators"
+        echo "Error: Failed to build operators"
+        exit 1
     fi
     cd "$BASE_DIR"  # Return to base directory
 else
-    echo "Warning: Operators directory not found: $OP_DIR"
+    echo "Error: Operators directory not found: $OP_DIR"
+    exit 1
 fi
 
 # Create symbolic links in bin directory

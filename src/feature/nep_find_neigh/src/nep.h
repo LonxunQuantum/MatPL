@@ -133,7 +133,8 @@ public:
     std::vector<double>& force,
     std::vector<double>& virial,
     std::vector<double>&  total_virial,
-    const std::string& kspace_method = "ewald");
+    const std::string& kspace_method = "ewald",
+    double total_charge = 0.0);
 
   ParaMB paramb;
   ANN annmb;

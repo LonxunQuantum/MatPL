@@ -19,6 +19,19 @@ else:
     torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
     CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
 
+# 无 BEC 标签时，可为指定离子生成价态对角张量；其他原子保持 -1e6 掩码。
+BEC_MONOVALENT_ION_TYPES = (3, 11, 19)  # Li, Na, K
+BEC_DIVALENT_ION_TYPES = (12, 20)  # Mg, Ca
+
+
+def _build_default_ion_bec(atom_z):
+    atom_z = np.asarray(atom_z).reshape(-1)
+    bec = np.full((atom_z.size, 9), -1e6, dtype=float)
+    identity = np.eye(3, dtype=float).reshape(9)
+    bec[np.isin(atom_z, BEC_MONOVALENT_ION_TYPES)] = identity
+    bec[np.isin(atom_z, BEC_DIVALENT_ION_TYPES)] = 2.0 * identity
+    return bec
+
 def get_det(box: np.array):
     matrix = box.reshape((3, 3))
     return np.linalg.det(matrix)
@@ -71,7 +84,7 @@ def variable_length_collate_fn(batch):
         return [x[key] for x in tensors]
 
     for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei", "bec"]:
+        if key in ["position", "force", "atom_type_map", "ei", "bec", "fragment", "fragment_charge"]:
             items = extract_items(filtered_batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
@@ -94,7 +107,7 @@ def variable_length_collate_fn_nolimit(batch):
         return [x[key] for x in tensors]
 
     for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei", "bec"]:
+        if key in ["position", "force", "atom_type_map", "ei", "bec", "fragment", "fragment_charge"]:
             items = extract_items(batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
@@ -139,7 +152,8 @@ class UniDataset(Dataset):
                 batch_max_types=-1,
                 dtype: Union[torch.dtype, str] = torch.float64, 
                 index_type: Union[torch.dtype, str] = torch.int64,
-                use_cartesian=True):
+                use_cartesian=True,
+                fill_metal_bec=False):
         super(UniDataset, self).__init__()
         self.dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
         self.dirs = data_paths  # include all movement data path
@@ -155,6 +169,7 @@ class UniDataset(Dataset):
         self.avg_image_atom= None
         self.use_cartesian = use_cartesian
         self.batch_max_types = batch_max_types
+        self.fill_metal_bec = fill_metal_bec
         self.dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
         self.index_type = (
             index_type
@@ -262,16 +277,49 @@ class UniDataset(Dataset):
         data["force"] = torch.from_numpy(self.image_list[index].force).to(self.dtype)
         data["ei"] = torch.from_numpy(self.image_list[index].atomic_energy).to(self.dtype)
         data["energy"] = torch.from_numpy(np.array([self.image_list[index].Ep])).to(self.dtype)
-        charge = getattr(self.image_list[index], "charge", None)
-        if charge is None:
-            charge = getattr(self.image_list[index], "total_charge", 0.0)
-        data["charge"] = torch.from_numpy(np.array([charge], dtype=float)).to(self.dtype)
+        image = self.image_list[index]
+        charge = getattr(image, "charge", None)
+        fragment = getattr(image, "fragment", None)
+        natoms = len(data["atom_type_map"])
+        charge_array = None if charge is None else np.asarray(charge, dtype=float).reshape(-1)
+        fragment_array = None if fragment is None else np.asarray(fragment, dtype=int).reshape(-1)
+
+        if (
+            charge_array is not None
+            and fragment_array is not None
+            and charge_array.size == natoms
+            and fragment_array.size == natoms
+        ):
+            data["fragment"] = torch.from_numpy(fragment_array).to(self.index_type)
+            data["fragment_charge"] = torch.from_numpy(charge_array).to(self.dtype)
+            valid_charge = ~np.isnan(charge_array)
+            if valid_charge.all():
+                total_charge = 0.0
+                for frag_id in np.unique(fragment_array):
+                    frag_mask = fragment_array == frag_id
+                    total_charge += charge_array[frag_mask][0]
+            else:
+                total_charge = getattr(image, "total_charge", 0.0)
+        elif charge_array is not None and charge_array.size == 1:
+            total_charge = charge_array[0]
+        else:
+            total_charge = getattr(image, "total_charge", 0.0)
+        if "fragment" not in data:
+            data["fragment"] = torch.full((natoms,), -1, dtype=self.index_type)
+            data["fragment_charge"] = torch.full((natoms,), float("nan"), dtype=self.dtype)
+        data["charge"] = torch.from_numpy(np.array([total_charge], dtype=float)).to(self.dtype)
         data["position"] = torch.from_numpy(self.image_list[index].position).to(self.dtype)
         data["virial"] = torch.from_numpy(np.ones([9]) * -1e6).to(self.dtype) if self.image_list[index].virial is None \
                             else torch.from_numpy(self.image_list[index].virial.flatten()).to(self.dtype)
         bec = getattr(self.image_list[index], "bec", None)
-        data["bec"] = torch.from_numpy(np.ones([len(data["atom_type_map"]), 9]) * -1e6).to(self.dtype) if bec is None \
-                            else torch.from_numpy(np.asarray(bec).reshape(-1, 9)).to(self.dtype)
+        if bec is not None:
+            data["bec"] = torch.from_numpy(np.asarray(bec).reshape(-1, 9)).to(self.dtype)
+        else:
+            bec_array = np.ones([len(data["atom_type_map"]), 9]) * -1e6
+            if self.fill_metal_bec:
+                atom_z = np.asarray(self.image_list[index].atom_types_image)
+                bec_array = _build_default_ion_bec(atom_z)
+            data["bec"] = torch.from_numpy(bec_array).to(self.dtype)
         return data
         # for key in list(data.keys()):
         #     print(key)

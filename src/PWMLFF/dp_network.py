@@ -40,10 +40,140 @@ from src.pre_data.dpuni_data_loader import UniDataset, type_map, variable_length
 from src.PWMLFF.dp_mods.dp_trainer import train_KF, train, valid, save_checkpoint, predict
 from src.PWMLFF.dp_param_extract import load_davg_dstd_from_checkpoint, load_davg_dstd_from_feature_path
 from src.user.input_param import InputParam
-from src.utils.learning_rate import is_epoch_before_restart
+from src.utils.learning_rate import (
+    calculate_lr_scale,
+    is_epoch_before_restart,
+    resolve_optimizer_peak_lr,
+)
 from src.utils.file_operation import write_arrays_to_file, copy_movements_to_work_dir, smlink_file
 #from data_loader_2type_dp import MovementDataset, get_torch_data
 from src.aux.inference_plot import inference_plot
+
+def create_dp_adam_optimizer_and_scheduler(
+        parameters, optimizer_param, iterations, world_size,
+        avg_atom_nums=1.0):
+    """Create a DP gradient optimizer using the same LR scale as NEP."""
+    # DP currently trains in one process; InputParam uses 0 before a
+    # distributed launcher assigns a world size.
+    world_size = max(int(world_size or 1), 1)
+    lr_scale = calculate_lr_scale(
+        optimizer_param.scale_lr,
+        optimizer_param.scaling_method,
+        optimizer_param.batch_size,
+        world_size,
+        avg_atom_nums,
+    )
+    optimizer_peak_lr = resolve_optimizer_peak_lr(
+        optimizer_param.learning_rate, lr_scale)
+
+    weight_decay = optimizer_param.lambda_2 or 0
+    if optimizer_param.opt_name == "ADAM":
+        optimizer = optim.Adam(
+            parameters, lr=optimizer_peak_lr, weight_decay=weight_decay)
+    elif optimizer_param.opt_name == "ADAMW":
+        optimizer = optim.AdamW(
+            parameters, lr=optimizer_peak_lr, weight_decay=weight_decay)
+    elif optimizer_param.opt_name == "SGD":
+        optimizer = optim.SGD(
+            parameters,
+            lr=optimizer_peak_lr,
+            momentum=optimizer_param.momentum,
+            weight_decay=optimizer_param.weight_decay,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported DP gradient optimizer: {optimizer_param.opt_name}")
+
+    scheduler = None
+    if optimizer_param.t_0 is not None:
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=optimizer_param.t_0 * iterations,
+            T_mult=optimizer_param.t_mult,
+            eta_min=optimizer_param.stop_lr,
+            last_epoch=-1,
+        )
+    return optimizer, scheduler, optimizer_peak_lr
+
+
+def restore_dp_training_state(
+        checkpoint, optimizer, scheduler, reset_epoch,
+        optimizer_peak_lr=None):
+    """Restore DP optimizer and scheduler state for a true resume."""
+    if checkpoint is None or reset_epoch:
+        return False, False
+
+    optimizer_restored = False
+    optimizer_state = checkpoint.get("optimizer")
+    if optimizer_state is not None:
+        try:
+            optimizer.load_state_dict(optimizer_state)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                "Failed to restore the DP optimizer state from checkpoint"
+            ) from exc
+        optimizer_restored = True
+
+    scheduler_restored = False
+    scheduler_state = checkpoint.get("scheduler")
+    if scheduler is not None and scheduler_state is not None:
+        try:
+            scheduler.load_state_dict(scheduler_state)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                "Failed to restore the DP scheduler state from checkpoint"
+            ) from exc
+        if optimizer_peak_lr is not None:
+            old_base_lrs = scheduler.base_lrs
+            old_current_lrs = scheduler.get_last_lr()
+            scheduler.base_lrs = [
+                optimizer_peak_lr for _ in optimizer.param_groups]
+            current_lrs = []
+            for old_base_lr, old_current_lr in zip(
+                    old_base_lrs, old_current_lrs):
+                if old_base_lr == scheduler.eta_min:
+                    current_lrs.append(optimizer_peak_lr)
+                else:
+                    phase = (
+                        (old_current_lr - scheduler.eta_min)
+                        / (old_base_lr - scheduler.eta_min)
+                    )
+                    current_lrs.append(
+                        scheduler.eta_min
+                        + phase * (optimizer_peak_lr - scheduler.eta_min))
+            scheduler._last_lr = current_lrs
+            for param_group, current_lr in zip(
+                    optimizer.param_groups, current_lrs):
+                param_group["initial_lr"] = optimizer_peak_lr
+                param_group["lr"] = current_lr
+        scheduler_restored = True
+    elif (scheduler is not None and optimizer_restored
+          and optimizer_peak_lr is not None):
+        current_lrs = [optimizer_peak_lr for _ in optimizer.param_groups]
+        scheduler.base_lrs = current_lrs.copy()
+        scheduler._last_lr = current_lrs.copy()
+        for param_group in optimizer.param_groups:
+            param_group["initial_lr"] = optimizer_peak_lr
+            param_group["lr"] = optimizer_peak_lr
+
+    return optimizer_restored, scheduler_restored
+
+
+def build_dp_checkpoint(
+        json_file, epoch, model, optimizer, scheduler,
+        optimizer_updates=None, **model_state):
+    """Build a DP checkpoint containing all state needed for Adam resume."""
+    checkpoint = {
+        "json_file": json_file,
+        "epoch": epoch,
+        "state_dict": model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "optimizer_updates": optimizer_updates,
+    }
+    checkpoint.update(model_state)
+    return checkpoint
+
 
 class dp_network:
     def __init__(self, dp_param:InputParam):
@@ -180,7 +310,9 @@ class dp_network:
             davg_dstd_energy_shift = self.davg_dstd_energy_shift
         return davg_dstd_energy_shift
     
-    def load_model_optimizer(self, davg, dstd, energy_shift, iterations=1):
+    def load_model_optimizer(
+            self, davg, dstd, energy_shift, iterations=1,
+            avg_atom_nums=1.0):
         # create model 
         # when running evaluation, nothing needs to be done with davg.npy
         if self.dp_params.descriptor.type_embedding:
@@ -191,10 +323,13 @@ class dp_network:
 
         # optionally resume from a checkpoint
         checkpoint = None
-        if self.dp_params.recover_train and \
-            (self.dp_params.file_paths.model_load_path is not None and os.path.exists(self.dp_params.file_paths.model_load_path)):
+        if (
+            self.dp_params.recover_train
+            and self.dp_params.file_paths.model_load_path
+            and os.path.isfile(self.dp_params.file_paths.model_load_path)
+        ):
             model_path = self.dp_params.file_paths.model_load_path
-        elif self.inference: 
+        elif self.dp_params.inference:
             model_path = self.dp_params.file_paths.model_load_path
         else:
             model_path = self.dp_params.file_paths.model_save_path  #recover from last training for training
@@ -228,64 +363,59 @@ class dp_network:
             model = model.cuda()
             if model.compress_tab is not None:
                 model.compress_tab.to(device=self.device)
-        # optimizer, and learning rate scheduler
-        if self.dp_params.optimizer_param.opt_name == "LKF":
+        # optimizer, learning-rate scale, and scheduler
+        optimizer_param = self.dp_params.optimizer_param
+        scheduler = None
+        self.optimizer_peak_lr = None
+        if optimizer_param.opt_name == "LKF":
             optimizer = LKFOptimizer(
                 model.parameters(),
-                self.dp_params.optimizer_param.kalman_lambda,
-                self.dp_params.optimizer_param.kalman_nue,
-                self.dp_params.optimizer_param.block_size,
-                self.dp_params.optimizer_param.p0_weight
+                optimizer_param.kalman_lambda,
+                optimizer_param.kalman_nue,
+                optimizer_param.block_size,
+                optimizer_param.p0_weight
             )
-        elif self.dp_params.optimizer_param.opt_name == "GKF":
+        elif optimizer_param.opt_name == "GKF":
             optimizer = GKFOptimizer(
                 model.parameters(),
-                self.dp_params.optimizer_param.kalman_lambda,
-                self.dp_params.optimizer_param.kalman_nue
+                optimizer_param.kalman_lambda,
+                optimizer_param.kalman_nue
             )
-        elif self.dp_params.optimizer_param.opt_name == "ADAM":
-            if self.dp_params.optimizer_param.lambda_2 is None:
-                optimizer = optim.Adam(model.parameters(), 
-                                    lr=self.dp_params.optimizer_param.learning_rate)
-            else:
-                optimizer = optim.Adam(model.parameters(), 
-                                    lr=self.dp_params.optimizer_param.learning_rate, 
-                                        weight_decay=self.dp_params.optimizer_param.lambda_2)
-
-        elif self.dp_params.optimizer_param.opt_name == "ADAMW":
-            if self.dp_params.optimizer_param.lambda_2 is None:
-                optimizer = optim.AdamW(model.parameters(), 
-                                    lr=self.dp_params.optimizer_param.learning_rate)
-            else:
-                optimizer = optim.AdamW(model.parameters(), 
-                                    lr=self.dp_params.optimizer_param.learning_rate, 
-                                        weight_decay=self.dp_params.optimizer_param.lambda_2)
-
-        elif self.dp_params.optimizer_param.opt_name == "SGD":
-            optimizer = optim.SGD(
-                model.parameters(), 
-                self.dp_params.optimizer_param.learning_rate,
-                momentum=self.dp_params.optimizer_param.momentum,
-                weight_decay=self.dp_params.optimizer_param.weight_decay
-            )
+        elif optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]:
+            optimizer, scheduler, self.optimizer_peak_lr = \
+                create_dp_adam_optimizer_and_scheduler(
+                    model.parameters(),
+                    optimizer_param,
+                    iterations,
+                    self.dp_params.world_size,
+                    avg_atom_nums,
+                )
         else:
             raise Exception("Error: Unsupported optimizer!")
-        
-        if self.dp_params.optimizer_param.t_0 is not None and \
-            self.dp_params.optimizer_param.opt_name not in  ["LKF", "GKF"]: 
-            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 
-                                                                    T_0= self.dp_params.optimizer_param.t_0*iterations, 
-                                                                    T_mult=self.dp_params.optimizer_param.t_mult,
-                                                                    eta_min=self.dp_params.optimizer_param.stop_lr,
-                                                                    last_epoch=-1)
 
+        if checkpoint is not None and not optimizer_param.reset_epoch:
+            if optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]:
+                restore_dp_training_state(
+                    checkpoint,
+                    optimizer,
+                    scheduler,
+                    reset_epoch=False,
+                    optimizer_peak_lr=self.optimizer_peak_lr,
+                )
+            elif checkpoint.get("optimizer") is not None:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+                load_p = checkpoint["optimizer"]['state'][0]['P']
+                optimizer.set_kalman_P(
+                    load_p,
+                    checkpoint["optimizer"]['state'][0]['kalman_lambda'])
+
+        if checkpoint is not None and not optimizer_param.reset_epoch:
+            self.completed_optimizer_updates = checkpoint.get(
+                "optimizer_updates",
+                (optimizer_param.start_epoch - 1) * iterations,
+            )
         else:
-            scheduler = None
-
-        if checkpoint is not None and "optimizer" in checkpoint.keys():
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            load_p = checkpoint["optimizer"]['state'][0]['P']
-            optimizer.set_kalman_P(load_p, checkpoint["optimizer"]['state'][0]['kalman_lambda'])
+            self.completed_optimizer_updates = 0
                 
         '''
         if self.dp_params.hvd:
@@ -408,7 +538,16 @@ class dp_network:
         if davg is None:
             energy_shift = train_dataset.get_energy_shift()
             davg, dstd = train_dataset.get_davg_dstd()
-        model, optimizer, scheduler = self.load_model_optimizer(davg, dstd, energy_shift, iterations=len(train_loader))
+        avg_atom_nums = (
+            float(np.mean([len(image.position)
+                           for image in train_dataset.image_list]))
+            if train_dataset.image_list else 1.0
+        )
+        model, optimizer, scheduler = self.load_model_optimizer(
+            davg, dstd, energy_shift,
+            iterations=len(train_loader),
+            avg_atom_nums=avg_atom_nums,
+        )
         if not os.path.exists(self.dp_params.file_paths.model_store_dir):
             os.makedirs(self.dp_params.file_paths.model_store_dir)
         if self.dp_params.model_num == 1:
@@ -489,8 +628,10 @@ class dp_network:
             else:
                 loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, real_lr, Sij_max, loss_l1, loss_l2 = train(
                     train_loader, model, self.criterion, optimizer, scheduler, epoch, \
-                        self.dp_params.optimizer_param.learning_rate, self.device, self.dp_params
+                        self.optimizer_peak_lr, self.completed_optimizer_updates,
+                        self.device, self.dp_params
                 )
+                self.completed_optimizer_updates += len(train_loader)
             time_end = time.time()
 
             # evaluate on validation set
@@ -552,56 +693,48 @@ class dp_network:
             # should include dstd.npy and davg.npy 
             
             # if not self.dp_params.hvd or (self.dp_params.hvd and hvd.rank() == 0):
-            if self.dp_params.file_paths.save_p_matrix:
+            checkpoint_optimizer = (
+                optimizer
+                if (self.dp_params.optimizer_param.opt_name
+                    in ["ADAM", "ADAMW", "SGD"]
+                    or self.dp_params.file_paths.save_p_matrix)
+                else None
+            )
+            checkpoint_state = build_dp_checkpoint(
+                json_file=self.dp_params.to_dict(),
+                epoch=epoch,
+                model=model,
+                optimizer=checkpoint_optimizer,
+                scheduler=scheduler,
+                optimizer_updates=self.completed_optimizer_updates,
+                davg=davg,
+                dstd=dstd,
+                energy_shift=energy_shift,
+                atom_type_order=np.array(self.dp_params.atom_type),
+                sij_max=Sij_max,
+            )
+            save_checkpoint(
+                checkpoint_state,
+                self.dp_params.file_paths.model_name,
+                self.dp_params.file_paths.model_store_dir,
+            )
+            # If using warm restarts, preserve the full resumable state at
+            # the end of each cycle as well.
+            if (not self.dp_params.file_paths.save_p_matrix
+                    and self.dp_params.optimizer_param.t_0 is not None
+                    and is_epoch_before_restart(
+                        self.dp_params.optimizer_param.t_0,
+                        self.dp_params.optimizer_param.t_mult,
+                        epoch)):
+                save_path = os.path.join(
+                    self.dp_params.file_paths.model_store_dir, "saved_models")
+                if not os.path.exists(save_path):
+                    os.makedirs(save_path)
                 save_checkpoint(
-                    {
-                    "json_file":self.dp_params.to_dict(),
-                    "epoch": epoch,
-                    "state_dict": model.state_dict(),
-                    "davg":davg,
-                    "dstd":dstd,
-                    "energy_shift":energy_shift,
-                    "atom_type_order": np.array(self.dp_params.atom_type),    #atom type order of davg/dstd/energy_shift
-                    "sij_max":Sij_max,
-                    "optimizer":optimizer.state_dict()
-                    },
-                    self.dp_params.file_paths.model_name,
-                    self.dp_params.file_paths.model_store_dir,
+                    checkpoint_state,
+                    f'epoch_{epoch}_{self.dp_params.file_paths.model_name}',
+                    save_path,
                 )
-            else: 
-                save_checkpoint(
-                    {
-                    "json_file":self.dp_params.to_dict(),
-                    "epoch": epoch,
-                    "state_dict": model.state_dict(),
-                    "davg":davg,
-                    "dstd":dstd,
-                    "energy_shift":energy_shift,
-                    "atom_type_order": np.array(self.dp_params.atom_type),    #atom type order of davg/dstd/energy_shift
-                    "sij_max":Sij_max
-                    },
-                    self.dp_params.file_paths.model_name,
-                    self.dp_params.file_paths.model_store_dir,
-                )
-                # if use CosineAnnealingWarmRestarts, save the model before restarting learning rate
-                if self.dp_params.optimizer_param.t_0 is not None and \
-                    is_epoch_before_restart(self.dp_params.optimizer_param.t_0, self.dp_params.optimizer_param.t_mult, epoch):
-                    save_path = os.path.join(self.dp_params.file_paths.model_store_dir, "saved_models")
-                    if os.path.exists(save_path) is not True:
-                        os.makedirs(save_path)
-                    save_checkpoint({
-                                    "json_file":self.dp_params.to_dict(),
-                                    "epoch": epoch,
-                                    "state_dict": model.state_dict(),
-                                    "davg":davg,
-                                    "dstd":dstd,
-                                    "energy_shift":energy_shift,
-                                    "atom_type_order": np.array(self.dp_params.atom_type),    #atom type order of davg/dstd/energy_shift
-                                    "sij_max":Sij_max
-                                    },
-                                    f'epoch_{epoch}_{self.dp_params.file_paths.model_name}',
-                                    save_path,
-                                    )
 
 
     def load_model_with_ckpt(self, davg, dstd, energy_shift):
@@ -657,4 +790,3 @@ class dp_network:
         command = r'mpirun -n ' + str(num_thread) + r' main_MD.x'
         print (command)
         subprocess.run(command, shell=True) 
-

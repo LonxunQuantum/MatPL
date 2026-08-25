@@ -10,9 +10,9 @@ echo "SLURM_SUBMIT_DIR is $SLURM_SUBMIT_DIR"
 echo "Starting job $SLURM_JOB_ID at " `date`
 
 echo "Running on nodes: $SLURM_NODELIST"
-module load lammps4matpl/2025.3
+module load lammps4matpl/2026.3
 
-mpirun -np 4 lmp_mpi -in in.lammps
+mpirun -np 4 lmp -k on g 4 -sf kk -pk kokkos -in in.lmp-kk
 
 end=$(date +%s)
 take=$(( end - start ))

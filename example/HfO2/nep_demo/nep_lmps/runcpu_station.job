@@ -10,9 +10,9 @@ echo "Starting job $SLURM_JOB_ID at " `date`
 echo "Running on nodes: $SLURM_NODELIST"
 
 module load intel/2020 
-
-source /share/app/MATPL/MatPL-2025.3/matpl-env.sh
-
+# 替换路径为自己的安装matpl-env.sh 路径
+source /share/app/MATPL/MatPL-2025.3/env.sh
+# 26版本暂不支持纯cpu运行
 mpirun -np 4 lmp_mpi -in in.lammps
 
 end=$(date +%s)

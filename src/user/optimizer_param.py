@@ -47,6 +47,7 @@ class OptimizerParam(object):
             raise Exception("ERROR! the lambda_2 should >= 0 !")
 
         self.warmup = get_parameter("warm_epochs",optimizer_dict, None) #预热epochs
+        self.scale_lr = get_parameter("scale_lr", optimizer_dict, False)
         self.scaling_method = get_parameter("scaling_method",optimizer_dict, "sqrt")  # linear_gpu sqrt_batch sqrt_gpu sqrt sqrt_batch_gpu_atom defalt is (avg_atom_nums) ** 0.5
 
         if "KF" in self.opt_name.upper():  #set Kalman Filter Optimizer params
@@ -81,7 +82,9 @@ class OptimizerParam(object):
         self.train_virial = get_parameter("train_virial", optimizer_dict, False)
         self.train_egroup = get_parameter("train_egroup", optimizer_dict, False)
         self.train_charge = get_parameter("train_charge", optimizer_dict, False)
+        self.train_charge_ion = get_parameter("train_charge_ion", optimizer_dict, False)
         self.train_bec = get_parameter("train_bec", optimizer_dict, False)
+        self.train_bec_ion = get_parameter("train_bec_ion", optimizer_dict, False)
 
         self.force_delta = None
         self.population = None
@@ -125,7 +128,9 @@ class OptimizerParam(object):
         opt_dict["train_energy"] = self.train_energy
         opt_dict["train_force"] = self.train_force
         opt_dict["train_charge"] = self.train_charge
+        opt_dict["train_charge_ion"] = self.train_charge_ion
         opt_dict["train_bec"] = self.train_bec
+        opt_dict["train_bec_ion"] = self.train_bec_ion
         # opt_dict["train_ei"] = self.train_ei
         opt_dict["pre_fac_force"] = self.pre_fac_force
         opt_dict["pre_fac_etot"] = self.pre_fac_etot
@@ -153,7 +158,9 @@ class OptimizerParam(object):
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force
             opt_dict["train_charge"] = self.train_charge
+            opt_dict["train_charge_ion"] = self.train_charge_ion
             opt_dict["train_bec"] = self.train_bec
+            opt_dict["train_bec_ion"] = self.train_bec_ion
             # opt_dict["train_ei"] = self.train_ei
             opt_dict["train_virial"] = self.train_virial
             # opt_dict["train_egroup"] = self.train_egroup
@@ -174,6 +181,8 @@ class OptimizerParam(object):
                 opt_dict["momentum"]= self.momentum
 
             opt_dict["learning_rate"]= self.learning_rate
+            opt_dict["scale_lr"] = self.scale_lr
+            opt_dict["scaling_method"] = self.scaling_method
             opt_dict["stop_lr"] = self.stop_lr
             opt_dict["stop_step"] = self.stop_step
             opt_dict["decay_step"] = self.decay_step
@@ -181,7 +190,9 @@ class OptimizerParam(object):
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force
             opt_dict["train_charge"] = self.train_charge
+            opt_dict["train_charge_ion"] = self.train_charge_ion
             opt_dict["train_bec"] = self.train_bec
+            opt_dict["train_bec_ion"] = self.train_bec_ion
             # opt_dict["train_ei"] = self.train_ei
             opt_dict["train_virial"] = self.train_virial
             # opt_dict["train_egroup"] = self.train_egroup

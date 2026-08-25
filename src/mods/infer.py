@@ -13,6 +13,37 @@ from pwdata import Config
 from src.utils.nep_to_gpumd import extract_model, get_atomic_number_from_name
 from src.user.convert_model import get_model_type, is_nep_txt, is_nep_ckpt
 
+def _get_image_total_charge(image, default_total_charge=0.0):
+    charge = getattr(image, "charge", None)
+    fragment = getattr(image, "fragment", None)
+    if charge is not None:
+        charge_array = np.asarray(charge, dtype=float)
+        if fragment is not None and charge_array.size == getattr(image, "atom_nums", charge_array.size):
+            fragment_array = np.asarray(fragment).reshape(-1)
+            charge_array = charge_array.reshape(-1)
+            if fragment_array.size == charge_array.size:
+                valid_fragment = fragment_array >= 0
+                if valid_fragment.any():
+                    fragment_charge = charge_array[valid_fragment]
+                    fragment_id = fragment_array[valid_fragment]
+                    if np.isfinite(fragment_charge).all():
+                        total_charge = 0.0
+                        for frag in np.unique(fragment_id):
+                            total_charge += fragment_charge[fragment_id == frag][0]
+                        return float(total_charge)
+                    total_charge = np.asarray(getattr(image, "total_charge", default_total_charge), dtype=float).reshape(-1)
+                    if total_charge.size and np.isfinite(total_charge[0]):
+                        return float(total_charge[0])
+                    return float(default_total_charge)
+        if charge_array.size == 1 and np.isfinite(charge_array.reshape(-1)[0]):
+            return float(charge_array.reshape(-1)[0])
+    total_charge = getattr(image, "total_charge", default_total_charge)
+    total_charge = np.asarray(total_charge, dtype=float).reshape(-1)
+    if total_charge.size and np.isfinite(total_charge[0]):
+        return float(total_charge[0])
+    return float(default_total_charge)
+
+
 class Inference(object):
     def __init__(self, 
                  ckpt_file: str, 
@@ -292,7 +323,7 @@ class Inference(object):
         data = torch.from_numpy(data).to(self.device)
         return data
 
-    def inference_nep_txt(self, image_read, do_deviation=False, kspace_method="ewald"):
+    def inference_nep_txt(self, image_read, do_deviation=False, kspace_method="ewald", total_charge=None):
         # infer = Save_Data(data_path=structrue_file, format=format)
         # structrue_file, format="pwmat/config", atom_names=None, 
         # image_read = Config(data_path=structrue_file, format=format, atom_names=atom_names).images
@@ -325,11 +356,13 @@ class Inference(object):
                 raise Exception("Error! the atom types in structrue file is larger than the max atom types in model!")
             type_maps = np.array(type_map(atom_types_struc, input_atom_types)).reshape(1, -1)
 
+            image_total_charge = _get_image_total_charge(image) if total_charge is None else float(total_charge)
             calc_args = (
                     list(type_maps[0]), 
                     list(np.array(image.lattice).transpose(1, 0).reshape(-1)), 
                     np.array(image.position).transpose(1, 0).reshape(-1),
-                    kspace_method
+                    kspace_method,
+                    image_total_charge
             )
             ei_predict, force_predict, virial_predict, charge_predict, bec_predict = self.calc.inference(*calc_args) # kspace_method = ["ewald" "pppm"]
             ei_predict   = np.array(ei_predict).reshape(atom_nums)
@@ -365,7 +398,7 @@ class Inference(object):
                 
         return etot_list, ei_list, force_list, virial_list, charge_list, bec_list
 
-    def ase_nep_infer(self, lattice, cart_postions, symbols, kspace_method="ewald"):
+    def ase_nep_infer(self, lattice, cart_postions, symbols, kspace_method="ewald", total_charge=0.0):
         # infer = Save_Data(data_path=structrue_file, format=format)
         input_atom_types = np.array(self.model_atom_type)
         atom_nums = cart_postions.shape[0]
@@ -375,7 +408,8 @@ class Inference(object):
                     list(type_maps[0]), 
                     list(np.array(lattice).transpose(1, 0).reshape(-1)), 
                     np.array(cart_postions).transpose(1, 0).reshape(-1),
-                    kspace_method
+                    kspace_method,
+                    float(total_charge)
             )
         ei_predict, force_predict, virial_predict, charge_predict, bec_predict = self.calc.inference(*calc_args)
 

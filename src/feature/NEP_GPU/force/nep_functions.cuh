@@ -403,7 +403,11 @@ static __global__ void find_descriptor_charge2(
   }
 }
 
-static __global__ void zero_total_charge(const int N, float* g_charge)
+static __global__ void shift_total_charge(
+  const int N,
+  float* g_charge,
+  const float total_charge,
+  const float* sqrt_epsilon_inf)
 {
   int tid = threadIdx.x;
   int number_of_batches = (N - 1) / 1024 + 1;
@@ -425,14 +429,16 @@ static __global__ void zero_total_charge(const int N, float* g_charge)
     __syncthreads();
   }
 
-  float mean_charge = s_charge[0] / N;
+  const float screened_total_charge = total_charge / sqrt_epsilon_inf[0];
+  float charge_correction = (screened_total_charge - s_charge[0]) / N;
   for (int batch = 0; batch < number_of_batches; ++batch) {
     int n = tid + batch * 1024;
     if (n < N) {
-      g_charge[n] -= mean_charge;
+      g_charge[n] += charge_correction;
     }
   }
 }
+
 
 static __global__ void find_bec_diagonal(const int N, const float* g_charge, float* g_bec)
 {

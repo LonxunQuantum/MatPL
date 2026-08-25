@@ -6,24 +6,51 @@ import numpy as np
 from pwdata import Config
 from src.utils.nep_to_gpumd import get_atomic_name_from_number, check_atom_type_name
 
-def _extract_kspace_method(args: list[str]):
+def _extract_infer_options(args: list[str]):
     valid_methods = ["ewald", "pppm"]
-    if len(args) >= 2 and args[-2].lower() == "kspace":
-        method = args[-1].lower()
-        if method in valid_methods:
-            return args[:-2], method
-        print(
-            "WARNING! Detected kspace option but method '{}' is invalid. "
-            "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'.".format(args[-1])
-        )
-        return args[:-2], "ewald"
-    if len(args) >= 1 and args[-1].lower() == "kspace":
-        print(
-            "WARNING! Detected kspace option without method. "
-            "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'."
-        )
-        return args[:-1], "ewald"
-    return args, "ewald"
+    filtered_args = []
+    kspace_method = "ewald"
+    total_charge = None
+    i = 0
+    while i < len(args):
+        key = args[i].lower()
+        if key == "kspace":
+            if i + 1 < len(args):
+                method = args[i + 1].lower()
+                if method in valid_methods:
+                    kspace_method = method
+                else:
+                    print(
+                        "WARNING! Detected kspace option but method '{}' is invalid. "
+                        "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'.".format(args[i + 1])
+                    )
+                    kspace_method = "ewald"
+                i += 2
+            else:
+                print(
+                    "WARNING! Detected kspace option without method. "
+                    "Valid methods are 'ewald' and 'pppm'. Use default 'ewald'."
+                )
+                i += 1
+            continue
+        if key == "total_charge":
+            if i + 1 < len(args):
+                try:
+                    total_charge = float(args[i + 1])
+                except ValueError:
+                    print(
+                        "WARNING! Detected total_charge option but value '{}' is invalid. "
+                        "Use default total_charge=0.0.".format(args[i + 1])
+                    )
+                    total_charge = None
+                i += 2
+            else:
+                print("WARNING! Detected total_charge option without value. Use default total_charge=0.0.")
+                i += 1
+            continue
+        filtered_args.append(args[i])
+        i += 1
+    return filtered_args, kspace_method, total_charge
 
 def infer_main(sys_cmd:list[str]):
     ckpt_file = sys_cmd[0]
@@ -35,7 +62,7 @@ def infer_main(sys_cmd:list[str]):
     device = None
     
     atom_names = sys_cmd[sys_index+1:]
-    atom_names, kspace_method = _extract_kspace_method(atom_names)
+    atom_names, kspace_method, total_charge = _extract_infer_options(atom_names)
     if isinstance(atom_names, list) is False:
         atom_names = [atom_names]
     if format.lower() == "lammps/dump" or format.lower() == "lammps/lmp":
@@ -70,7 +97,7 @@ def infer_main(sys_cmd:list[str]):
         if infer.model_type == "DP":
             infer.inference(image_read)
         elif infer.model_type == "NEP":
-            infer.inference_nep_txt(image_read, kspace_method=kspace_method)
+            infer.inference_nep_txt(image_read, kspace_method=kspace_method, total_charge=total_charge)
 
 def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list[str]=None):
     # set atom_types in trajs

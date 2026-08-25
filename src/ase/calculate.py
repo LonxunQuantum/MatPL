@@ -65,13 +65,15 @@ class MatPL_calculator(Calculator):
 
         Calculator.calculate(self, atoms, properties, system_changes)
         # dp
+        charge = None 
+        bec = None
         if self.model_type == "DP":
             Etot, Ei, Force, Virial = self.calc.ase_dp_infer(lattice = np.array(atoms.cell),
                         cart_postions = atoms.get_positions(),
                         symbols = self.atoms.get_chemical_symbols()
                         )
         if self.model_type == "NEP":
-            Etot, Ei, Force, Virial = self.calc.ase_nep_infer(lattice = np.array(atoms.cell),
+            Etot, Ei, Force, Virial, charge, bec = self.calc.ase_nep_infer(lattice = np.array(atoms.cell),
                         cart_postions = atoms.get_positions(),
                         symbols = self.atoms.get_chemical_symbols()
                         )
@@ -79,6 +81,8 @@ class MatPL_calculator(Calculator):
         self.results["energy"]   = Etot
         self.results["energies"] = Ei
         self.results["forces"] = Force
+        # self.results["charge"] = charge
+        # self.results["bec"] = bec
         stress = -Virial / atoms.get_volume()
         self.results["stress"] = stress.flat[[0, 4, 8, 5, 2, 1]]
 

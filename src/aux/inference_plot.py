@@ -120,6 +120,10 @@ def inference_plot(data_dir:str, return_extra=False):
         dft_charge = _load_flat_values(charge_dft_path)
         MLFF_charge = _load_flat_values(charge_pred_path)
         if len(dft_charge) > 0 and len(dft_charge) == len(MLFF_charge):
+            charge_mask = np.isfinite(dft_charge) & np.isfinite(MLFF_charge)
+            dft_charge = dft_charge[charge_mask]
+            MLFF_charge = MLFF_charge[charge_mask]
+        if len(dft_charge) > 0 and len(dft_charge) == len(MLFF_charge):
             rmse_charge = np.sqrt(np.square(dft_charge - MLFF_charge).mean())
             charge_r2 = _safe_r2(dft_charge, MLFF_charge)
             charge_min = min(dft_charge.min(), MLFF_charge.min())

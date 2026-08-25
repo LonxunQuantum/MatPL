@@ -2,15 +2,14 @@ import os
 import torch
 import json
 import socket
+from copy import deepcopy
 from contextlib import closing
 import argparse
 
-import torch
 import torch.multiprocessing as mp
 
 from src.user.input_param import InputParam
 from src.PWMLFF.nep_network import nep_network, save_checkpoint
-from src.utils.file_operation import delete_tree, copy_tree, copy_file
 from src.utils.atom_type_emb_dict import element_table
 from src.utils.file_operation import delete_tree, copy_tree, copy_file
 from src.utils.json_operation import get_parameter, get_required_parameter
@@ -169,7 +168,6 @@ def nep_test(input_json: json, cmd:str):
     nep_param.set_test_relative_params(input_json, is_nep_txt=True)
     nep_trainer = nep_network(nep_param)
     # nep_trainer.inference()
-    # nep_trainer.gpu_nep_inference(model_load_path)
     nep_trainer.multi_cpus_nep_inference(model_load_path, kspace_method=kspace_method) # the speed is 1cpu > 1gpu
     # if nep_trainer.device.type == 'cuda':
     #     nep_trainer.inference()
@@ -199,29 +197,36 @@ def nep_test(input_json: json, cmd:str):
     nep_trainer.inference()
     """
 
-def nep_test_ckpt(input_json: json, cmd:str):
+def _prepare_nep_test_ckpt_json(checkpoint_json: dict, input_json: dict):
+    """Build test configuration without mutating metadata stored in a checkpoint."""
+    test_json = deepcopy(checkpoint_json)
+    test_json["datasets_path"] = []
+    test_json["train_data"] = []
+    test_json["valid_data"] = []
+    test_json["test_data"] = get_required_parameter("test_data", input_json)
+    test_json["format"] = get_parameter(
+        "format", input_json, "pwmat/movement")
+    return test_json
+
+
+def nep_test_ckpt(input_json: json, cmd: str):
 
     model_load_path = get_required_parameter("model_load_file", input_json)
     model_checkpoint = torch.load(model_load_path, map_location=torch.device("cpu"), weights_only=False)
-    json_dict_train = model_checkpoint["json_file"]
-    model_checkpoint["json_file"]["datasets_path"] = []
-    json_dict_train["train_data"] = []
-    json_dict_train["valid_data"] = []
-    json_dict_train["test_data"] = input_json["test_data"]
-    json_dict_train["format"] = get_parameter("format", input_json, "pwmat/movement")
-    nep_param = InputParam(json_dict_train, "test".upper())
+    test_json = _prepare_nep_test_ckpt_json(
+        model_checkpoint["json_file"], input_json)
+    nep_param = InputParam(test_json, "test".upper())
 
     nep_param.multi_gpus = False
     nep_param.multi_nodes = False
     nep_param.world_size = 1
     nep_param.rank = 0
     nep_param.local_rank = 0
-    num_nodes = 1
     
     # set inference param
     nep_param.set_test_relative_params(input_json)
-    dp_trainer = nep_network(nep_param)
-    dp_trainer.inference()
+    nep_trainer = nep_network(nep_param)
+    nep_trainer.inference()
     
 # def toneplmps(cmd_list:list[str]):
 # this function is move to togpumd -> totxt for nep5

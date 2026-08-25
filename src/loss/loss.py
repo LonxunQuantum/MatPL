@@ -8,6 +8,13 @@ def get_adam_loss_prefactor(start_prefactor, end_prefactor, real_lr, start_lr=0.
     return end_prefactor + (start_prefactor - end_prefactor) * lr_ratio
 
 
+def get_adam_loss_prefactor_from_progress(
+        start_prefactor, end_prefactor, loss_weight_progress):
+    """Interpolate loss weight by training progress, independently of LR."""
+    progress = min(max(loss_weight_progress, 0.0), 1.0)
+    return start_prefactor + (end_prefactor - start_prefactor) * progress
+
+
 def check_loss_prefactor(name, prefactor, start_prefactor, end_prefactor, real_lr, start_lr=0.001):
     lr_ratio = real_lr / start_lr
     lr_ratio = min(max(lr_ratio, 0.0), 1.0)
@@ -39,97 +46,102 @@ def get_loss(
     loss_Charge_val=None,
     loss_BEC_val=None,
     train_virial=False,
+    loss_weight_progress=None,
 ):
     optimizer_param = args.optimizer_param
     loss = torch.zeros_like(loss_F_val)
 
+    def loss_prefactor(start_prefactor, end_prefactor):
+        if loss_weight_progress is None:
+            return get_adam_loss_prefactor(
+                start_prefactor, end_prefactor, real_lr)
+        return get_adam_loss_prefactor_from_progress(
+            start_prefactor, end_prefactor, loss_weight_progress)
+
+    def validate_prefactor(name, prefactor, start_prefactor, end_prefactor):
+        if start_prefactor < 0 or end_prefactor < 0 or prefactor < 0:
+            raise ValueError(
+                f"ERROR! {name} loss prefactor must be non-negative. "
+                f"Current values: prefactor={prefactor:.8e}, "
+                f"start_pre_fac_{name}={start_prefactor:.8e}, "
+                f"end_pre_fac_{name}={end_prefactor:.8e}.")
+        return prefactor
+
     if optimizer_param.train_force:
-        pref_force = get_adam_loss_prefactor(
+        pref_force = loss_prefactor(
             optimizer_param.start_pre_fac_force,
             optimizer_param.end_pre_fac_force,
-            real_lr,
         )
-        pref_force = check_loss_prefactor(
+        pref_force = validate_prefactor(
             "force",
             pref_force,
             optimizer_param.start_pre_fac_force,
             optimizer_param.end_pre_fac_force,
-            real_lr,
         )
         loss = loss + pref_force * loss_F_val
 
     if optimizer_param.train_energy:
-        pref_etot = get_adam_loss_prefactor(
+        pref_etot = loss_prefactor(
             optimizer_param.start_pre_fac_etot,
             optimizer_param.end_pre_fac_etot,
-            real_lr,
         )
-        pref_etot = check_loss_prefactor(
+        pref_etot = validate_prefactor(
             "etot",
             pref_etot,
             optimizer_param.start_pre_fac_etot,
             optimizer_param.end_pre_fac_etot,
-            real_lr,
         )
         loss = loss + pref_etot * loss_Etot_val / avg_atom_number
 
     if train_virial and loss_Virial_val is not None:
-        pref_virial = get_adam_loss_prefactor(
+        pref_virial = loss_prefactor(
             optimizer_param.start_pre_fac_virial,
             optimizer_param.end_pre_fac_virial,
-            real_lr,
         )
-        pref_virial = check_loss_prefactor(
+        pref_virial = validate_prefactor(
             "virial",
             pref_virial,
             optimizer_param.start_pre_fac_virial,
             optimizer_param.end_pre_fac_virial,
-            real_lr,
         )
         loss = loss + pref_virial * loss_Virial_val / avg_atom_number
 
     if optimizer_param.train_egroup and loss_Egroup_val is not None:
-        pref_egroup = get_adam_loss_prefactor(
+        pref_egroup = loss_prefactor(
             optimizer_param.start_pre_fac_egroup,
             optimizer_param.end_pre_fac_egroup,
-            real_lr,
         )
-        pref_egroup = check_loss_prefactor(
+        pref_egroup = validate_prefactor(
             "egroup",
             pref_egroup,
             optimizer_param.start_pre_fac_egroup,
             optimizer_param.end_pre_fac_egroup,
-            real_lr,
         )
         loss = loss + pref_egroup * loss_Egroup_val
 
     if getattr(optimizer_param, "train_charge", False) and loss_Charge_val is not None:
-        pref_charge = get_adam_loss_prefactor(
+        pref_charge = loss_prefactor(
             optimizer_param.start_pre_fac_charge,
             optimizer_param.end_pre_fac_charge,
-            real_lr,
         )
-        pref_charge = check_loss_prefactor(
+        pref_charge = validate_prefactor(
             "charge",
             pref_charge,
             optimizer_param.start_pre_fac_charge,
             optimizer_param.end_pre_fac_charge,
-            real_lr,
         )
-        loss = loss + pref_charge * loss_Charge_val / avg_atom_number
+        loss = loss + pref_charge * loss_Charge_val
 
     if getattr(optimizer_param, "train_bec", False) and loss_BEC_val is not None:
-        pref_bec = get_adam_loss_prefactor(
+        pref_bec = loss_prefactor(
             optimizer_param.start_pre_fac_bec,
             optimizer_param.end_pre_fac_bec,
-            real_lr,
         )
-        pref_bec = check_loss_prefactor(
+        pref_bec = validate_prefactor(
             "bec",
             pref_bec,
             optimizer_param.start_pre_fac_bec,
             optimizer_param.end_pre_fac_bec,
-            real_lr,
         )
         loss = loss + pref_bec * loss_BEC_val
 
