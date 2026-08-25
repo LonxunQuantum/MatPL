@@ -331,10 +331,135 @@ case "${DPREC,,}" in
     ;;
 esac
 
+GPU_ARCH=${GPU_ARCH^^}
+if [[ ! "$GPU_ARCH" =~ ^[A-Z][A-Z0-9_]*[0-9]+$ ]]; then
+  echo "Invalid GPU architecture: $GPU_ARCH. Use a Kokkos CUDA architecture suffix such as AMPERE86." >&2
+  exit 1
+fi
+CMAKE_CUDA_ARCHITECTURES=${GPU_ARCH##*[!0-9]}
+
 echo "Using Kokkos CUDA architecture: $GPU_ARCH"
+echo "Using CMake CUDA architecture: $CMAKE_CUDA_ARCHITECTURES"
 if [ "$DPREC_ENABLED" = true ]; then
   echo "DPREC_NEPINFER enabled; lammps-2026.3 will be built in build-64"
 fi
+
+build_lammps_offline_deps() {
+    local deps_dir=$1
+    local prebuilt_prefix=$deps_dir/install
+    local prefix=$deps_dir/install-local
+    local build_dir=$deps_dir/build
+    local openblas_lib=$prefix/lib/libopenblas.so
+    local gsl_lib=$prefix/lib/libgsl.so
+    local gsl_cblas_lib=$prefix/lib/libgslcblas.so
+    local voro_lib=$prefix/lib/libvoro++.a
+    local voro_header=$prefix/include/voro++/voro++.hh
+    local gfortran_lib
+
+    if [ -f "$prebuilt_prefix/lib/libvoro++.a" ] && \
+       [ -f "$prebuilt_prefix/include/voro++/voro++.hh" ] && \
+       [ -x "$prebuilt_prefix/bin/offline-deps-smoke" ]; then
+        echo "Checking bundled prebuilt OpenBLAS and GSL..."
+        if LD_LIBRARY_PATH="$prebuilt_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$prebuilt_prefix/bin/offline-deps-smoke"; then
+            LAMMPS_DEPS_PREFIX=$prebuilt_prefix
+            export LAMMPS_DEPS_PREFIX
+            export LD_LIBRARY_PATH="$LAMMPS_DEPS_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "Using bundled prebuilt OpenBLAS and GSL: $LAMMPS_DEPS_PREFIX"
+            return 0
+        fi
+        echo "Warning: bundled OpenBLAS/GSL cannot run on this machine; trying the bundled sources."
+    else
+        echo "Warning: bundled OpenBLAS/GSL/Voro++ files are incomplete; trying the bundled sources."
+    fi
+
+    mkdir -p "$prefix" "$build_dir"
+
+    if [ ! -f "$openblas_lib" ]; then
+        echo "Building OpenBLAS for offline LAMMPS dependencies..."
+        if [ ! -f "$deps_dir/OpenBLAS-0.3.23.tar.gz" ]; then
+            echo "Error: $deps_dir/OpenBLAS-0.3.23.tar.gz not found"
+            return 1
+        fi
+        rm -rf "$build_dir/OpenBLAS-0.3.23"
+        tar -xzf "$deps_dir/OpenBLAS-0.3.23.tar.gz" -C "$build_dir"
+        cd "$build_dir/OpenBLAS-0.3.23" || return 1
+        if command -v gfortran >/dev/null 2>&1; then
+            gfortran_lib=$(dirname "$(gfortran -print-file-name=libgfortran.so)")
+            if [ -f "$gfortran_lib/libgfortran.so" ]; then
+                export LIBRARY_PATH="$gfortran_lib:$LIBRARY_PATH"
+            fi
+        fi
+        make -j$JOB_COUNT USE_OPENMP=0 DYNAMIC_ARCH=1
+        if [ $? -ne 0 ]; then
+            echo "Error: OpenBLAS build failed"
+            return 1
+        fi
+        make PREFIX="$prefix" install
+        if [ $? -ne 0 ]; then
+            echo "Error: OpenBLAS install failed"
+            return 1
+        fi
+    else
+        echo "Using existing OpenBLAS: $openblas_lib"
+    fi
+
+    if [ ! -f "$gsl_lib" ] || [ ! -f "$gsl_cblas_lib" ]; then
+        echo "Building GSL for offline LAMMPS dependencies..."
+        if [ ! -f "$deps_dir/gsl-2.7.1.tar.gz" ]; then
+            echo "Error: $deps_dir/gsl-2.7.1.tar.gz not found"
+            return 1
+        fi
+        rm -rf "$build_dir/gsl-2.7.1"
+        tar -xzf "$deps_dir/gsl-2.7.1.tar.gz" -C "$build_dir"
+        cd "$build_dir/gsl-2.7.1" || return 1
+        ./configure --prefix="$prefix"
+        if [ $? -ne 0 ]; then
+            echo "Error: GSL configure failed"
+            return 1
+        fi
+        make -j$JOB_COUNT
+        if [ $? -ne 0 ]; then
+            echo "Error: GSL build failed"
+            return 1
+        fi
+        make install
+        if [ $? -ne 0 ]; then
+            echo "Error: GSL install failed"
+            return 1
+        fi
+    else
+        echo "Using existing GSL: $gsl_lib"
+    fi
+
+    if [ ! -f "$voro_lib" ] || [ ! -f "$voro_header" ]; then
+        echo "Building Voro++ for offline LAMMPS dependencies..."
+        if [ ! -f "$deps_dir/voro++-0.4.6.tar.gz" ]; then
+            echo "Error: $deps_dir/voro++-0.4.6.tar.gz not found"
+            return 1
+        fi
+        rm -rf "$build_dir/voro++-0.4.6"
+        tar -xzf "$deps_dir/voro++-0.4.6.tar.gz" -C "$build_dir"
+        make -C "$build_dir/voro++-0.4.6/src" \
+            -j$JOB_COUNT CXX=g++ CFLAGS="-Wall -ansi -pedantic -O2 -fPIC"
+        if [ $? -ne 0 ]; then
+            echo "Error: Voro++ build failed"
+            return 1
+        fi
+        make -C "$build_dir/voro++-0.4.6" PREFIX="$prefix" install
+        if [ $? -ne 0 ]; then
+            echo "Error: Voro++ install failed"
+            return 1
+        fi
+    else
+        echo "Using existing Voro++: $voro_lib"
+    fi
+
+    LAMMPS_DEPS_PREFIX=$prefix
+    export LAMMPS_DEPS_PREFIX
+    export LD_LIBRARY_PATH="$LAMMPS_DEPS_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    return 0
+}
 
 # 执行环境检查（跳过解压模式）
 if [ "$UNPACK_ONLY" = false ]; then
@@ -351,9 +476,10 @@ TEMP_DIR=$(mktemp -d)
 FINAL_DIR=$BASE_DIR/MatPL-2026.3
 ENV_DIR=$FINAL_DIR/matpl-2026.3
 MATPL=$FINAL_DIR/MatPL-2026.3               #./MatPL-2026.3/MatPL-2026.3
-LAMMPS_STABLE=$FINAL_DIR/lammps-23-4        #./MatPL-2026.3/lammps-23-4
+LAMMPS_STABLE=$FINAL_DIR/lammps-25-4        #./MatPL-2026.3/lammps-25-4
 LAMMPS_FORTRAN=$FINAL_DIR/lammps-fortran    #./MatPL-2026.3/lammps-fortran
 LAMMPS_NEPKK=$FINAL_DIR/lammps-2026.3    #./MatPL-2026.3/lammps-2026.3 
+LAMMPS_OFFLINE_DEPS=$FINAL_DIR/lammps-offline-deps
 
 # Create final directory
 mkdir -p $FINAL_DIR
@@ -370,12 +496,13 @@ tar -xzf matpl-2026.3.tar.gz -C $ENV_DIR > /dev/null 2>&1
 
 # Move MatPL and lammps_2024.5 directories to FINAL_DIR
 mv $TEMP_DIR/MatPL-2026.3 $FINAL_DIR
+mv $TEMP_DIR/lammps-offline-deps $LAMMPS_OFFLINE_DEPS
 
 if [ "$COMPILE_FORTRAN" = true ]; then
-    cp -r $TEMP_DIR/lammps-23-4 $LAMMPS_FORTRAN
+    cp -r $TEMP_DIR/lammps-25-4 $LAMMPS_FORTRAN
 fi
 
-cp -r $TEMP_DIR/lammps-23-4 $LAMMPS_NEPKK
+cp -r $TEMP_DIR/lammps-25-4 $LAMMPS_NEPKK
 
 # Clean up temporary directory
 rm -rf $TEMP_DIR
@@ -411,16 +538,20 @@ cd $MATPL/src
 echo "Compiling MatPL..."
 if [ $JOB_COUNT -gt 1 ]; then
     if [ "$COMPILE_FORTRAN" = true ]; then
-        bash build.sh -j$JOB_COUNT -m nn
+        MATPL_BUILD_ARGS=(-j$JOB_COUNT -m nn)
     else
-        bash build.sh -j$JOB_COUNT
+        MATPL_BUILD_ARGS=(-j$JOB_COUNT)
     fi
 else
     if [ "$COMPILE_FORTRAN" = true ]; then
-        bash build.sh -m nn
+        MATPL_BUILD_ARGS=(-m nn)
     else
-        bash build.sh
+        MATPL_BUILD_ARGS=()
     fi
+fi
+if ! bash build.sh "${MATPL_BUILD_ARGS[@]}"; then
+    echo "Error: MatPL compilation failed."
+    exit 1
 fi
 
 # Set environment variables
@@ -432,6 +563,36 @@ echo "The compilation of the MatPL-2026.3 machine learning force field training 
 # Compile lammps-2026.3 (only if OpenMPI is compatible)
 LAMMPS_NEPKK_COMPILED=false
 if [ "$OPENMPI_COMPATIBLE" = true ]; then
+    build_lammps_offline_deps "$LAMMPS_OFFLINE_DEPS"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to build offline dependencies for lammps-2026.3."
+        exit 1
+    fi
+
+    # Locate the bundled Torch and MKL files required by the MATPLDP package.
+    TORCH_DIR=$(python -c 'from pathlib import Path; import torch; print(Path(torch.__file__).resolve().parent / "share" / "cmake" / "Torch")')
+    TORCH_LIB_DIR=$(python -c 'from pathlib import Path; import torch; print(Path(torch.__file__).resolve().parent / "lib")')
+    if [ ! -f "$TORCH_DIR/TorchConfig.cmake" ]; then
+        echo "Error: TorchConfig.cmake not found in the bundled Python environment: $TORCH_DIR"
+        exit 1
+    fi
+
+    MKL_INCLUDE_DIR=$ENV_DIR/include
+    if [ ! -f "$MKL_INCLUDE_DIR/mkl_vsl.h" ]; then
+        echo "Error: MKL headers not found in the bundled Python environment. Ensure mkl-include is packed."
+        exit 1
+    fi
+    if [ -f "$ENV_DIR/lib/libmkl_rt.so.2" ]; then
+        MKL_LIBRARY=$ENV_DIR/lib/libmkl_rt.so.2
+    elif [ -f "$ENV_DIR/lib/libmkl_rt.so" ]; then
+        MKL_LIBRARY=$ENV_DIR/lib/libmkl_rt.so
+    else
+        echo "Error: MKL runtime library not found in the bundled Python environment: $ENV_DIR/lib"
+        exit 1
+    fi
+    export LD_LIBRARY_PATH="$TORCH_LIB_DIR:$ENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+    LAMMPS_OPENBLAS_LIB=$LAMMPS_DEPS_PREFIX/lib/libopenblas.so
     cd $LAMMPS_NEPKK
     LAMMPS_BUILD_DIR=build
     DPREC_CMAKE_OPTION=
@@ -442,25 +603,45 @@ if [ "$OPENMPI_COMPATIBLE" = true ]; then
     mkdir "$LAMMPS_BUILD_DIR"
     cd "$LAMMPS_BUILD_DIR"
 
-    cmake -C ../cmake/presets/basic.cmake \
+    if ! cmake -C $MATPL/src/lmps/lammps-2026.3/lmp_nepkokkos_cmake/matplcomm.cmake \
        -DPKG_MESONT=no \
        -DPKG_JPEG=no \
        -DPKG_KOKKOS=yes \
        -DPKG_NEP_KK=yes \
+       -DPKG_MATPLDP=yes \
+       -DTorch_DIR="$TORCH_DIR" \
+       -DCMAKE_CXX_STANDARD=17 \
+       -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
        -DKokkos_ENABLE_CUDA=yes \
        -DKokkos_ENABLE_OPENMP=yes \
        -DKokkos_ENABLE_CUDA_LAMBDA=yes \
        -DFFT_KOKKOS=CUFFT \
-       -DKokkos_ARCH_${GPU_ARCH}=ON \
+       "-DKokkos_ARCH_${GPU_ARCH}=ON" \
+       -DMKL_INCLUDE_DIR="$MKL_INCLUDE_DIR" \
+       -DMKL_LIBRARY="$MKL_LIBRARY" \
+       -DBLAS_LIBRARIES=$LAMMPS_OPENBLAS_LIB \
+       -DLAPACK_LIBRARIES=$LAMMPS_OPENBLAS_LIB \
+       -DGSL_ROOT_DIR=$LAMMPS_DEPS_PREFIX \
+       -DPLUMED_URL=file://$LAMMPS_OFFLINE_DEPS/plumed-src-2.9.4.tgz \
+       -DDOWNLOAD_VORO=OFF \
+       -DVORO_LIBRARY=$LAMMPS_DEPS_PREFIX/lib/libvoro++.a \
+       -DVORO_INCLUDE_DIR=$LAMMPS_DEPS_PREFIX/include/voro++ \
        $DPREC_CMAKE_OPTION \
        -DTEST_TIME=ON \
-       ../cmake
+       ../cmake; then
+        echo "Error: CMake configuration for lammps-2026.3 failed."
+        exit 1
+    fi
 
-    cmake --build . -j$JOB_COUNT
+    if ! cmake --build . -j$JOB_COUNT; then
+        echo "Error: lammps-2026.3 compilation failed."
+        exit 1
+    fi
 
 cat <<EOF > "$LAMMPS_NEPKK/env.sh"
 # Environment for MatPL-2026.3 lammps path
 export PATH=$LAMMPS_NEPKK/$LAMMPS_BUILD_DIR:\$PATH
+export LD_LIBRARY_PATH=$LAMMPS_DEPS_PREFIX/lib:$ENV_DIR/lib:$TORCH_LIB_DIR:\${LD_LIBRARY_PATH:-}
 EOF
 
     echo "The compilation of the lammps-2026.3 has been completed."
