@@ -182,6 +182,45 @@ def test_radial_analytical_force_matches_autograd_on_cuda():
     torch.testing.assert_close(virial, virial_ref, rtol=1e-7, atol=1e-7)
 
 
+def test_nep_virial_cuda_backward_uses_each_batch_gradient():
+    """The second image must not reuse the first image's upstream gradient."""
+    if not torch.cuda.is_available():
+        return
+
+    device = torch.device("cuda")
+    dtype = torch.float64
+    list_neigh = torch.tensor([[0], [1]], dtype=torch.int64, device=device)
+    num_atom = torch.tensor([1, 1], dtype=torch.int64, device=device)
+    rij = torch.tensor(
+        [[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+        dtype=dtype,
+        device=device,
+    )
+    ri_d = torch.zeros(2, 1, 4, 3, dtype=dtype, device=device)
+    ri_d[:, :, 0, 0] = 1.0
+    ri_d[:, :, 1, 1] = 1.0
+    ri_d[:, :, 2, 2] = 1.0
+    ri_d[:, :, 3, :] = 1.0
+    dE = torch.ones(2, 1, 4, dtype=dtype, device=device, requires_grad=True)
+
+    virial = CalcOps.calculateNepVirial(
+        list_neigh, dE, rij, ri_d, num_atom)[0]
+    upstream = torch.tensor(
+        [[0.0] * 9, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]],
+        dtype=dtype,
+        device=device,
+    )
+    virial.backward(upstream)
+
+    expected = torch.tensor(
+        [[[0.0, 0.0, 0.0, 0.0]], [[32.0, 77.0, 122.0, 231.0]]],
+        dtype=dtype,
+        device=device,
+    )
+    torch.testing.assert_close(dE.grad, expected)
+
+
 if __name__ == "__main__":
     test_force_virial_helper_matches_radial_cpu_formula()
     test_radial_analytical_force_matches_autograd_on_cuda()
+    test_nep_virial_cuda_backward_uses_each_batch_gradient()

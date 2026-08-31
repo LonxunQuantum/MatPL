@@ -263,7 +263,7 @@ torch::autograd::variable_list CalculateNepVirial::forward(
             neigh_num, 
             virial, 
             atom_virial);
-        ctx->save_for_backward({list_neigh, dE, Rij, Ri_d});
+        ctx->save_for_backward({list_neigh, dE, Rij, Ri_d, num_atom});
         return {virial, atom_virial};
     }
 
@@ -277,15 +277,19 @@ torch::autograd::variable_list CalculateNepVirial::backward(
         auto dE = saved[1];
         auto Rij = saved[2];
         auto Ri_d = saved[3];
+        auto num_atom = saved[4];
         auto dims = list_neigh.sizes();
         int natoms = dims[0];
         int neigh_num = dims[1];
+        int batch_size = num_atom.sizes()[0];
         auto grad = torch::zeros_like(dE);
         torch_launch_calculate_nepvirial_grad(
                 list_neigh, 
                 Rij, 
                 Ri_d, 
+                num_atom,
                 grad_output[0], 
+                batch_size,
                 natoms, 
                 neigh_num, 
                 grad);

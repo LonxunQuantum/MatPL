@@ -109,10 +109,12 @@ __device__ inline double nepdev_dot9(
 
 __global__ void nepvirial_grad_wrt_neighbors_a(
     double * grad_output,    // natoms * neigh_num * 4
-    const double * net_grad, // 9
+    const double * net_grad, // batch_num * 9
     const double * Ri_d,     // Ri_d
     const double * Rij,
     const int64_t * nlist,
+    const int64_t * num_atom,
+    const int batch_num,
     const int natoms,
     const int neigh_num)
 {
@@ -123,12 +125,19 @@ __global__ void nepvirial_grad_wrt_neighbors_a(
     const unsigned int index_xyzw = threadIdx.y;
     const unsigned int tid = threadIdx.x;
 
+    int image_id = 0;
+    int64_t image_end = num_atom[0];
+    while (atom_id >= image_end && image_id + 1 < batch_num) {
+        ++image_id;
+        image_end += num_atom[image_id];
+    }
+
     // 注意：必须在提前 return 之前完成共享内存加载。
     // 否则当末块活跃线程不足 9 个（neigh_num % 128 为 1~8，或 neigh_num < 9）时，
     // grad_one 尾部元素无人写入，读取未初始化共享内存可能得到 NaN。
     __shared__ double grad_one[9];
     if(tid < 9){
-        grad_one[tid] = net_grad[tid];
+        grad_one[tid] = net_grad[image_id * 9 + tid];
     }
     __syncthreads();
 
@@ -204,7 +213,9 @@ void launch_calculate_nepvirial_grad(
     const int64_t * nblist,
     const double * Rij,
     const double * Ri_d,
+    const int64_t * num_atom,
     const double * net_grad,
+    const int batch_num,
     const int natoms,
     const int neigh_num,
     double * grad_output,
@@ -222,10 +233,12 @@ void launch_calculate_nepvirial_grad(
     nepvirial_grad_wrt_neighbors_a<<<block_grid, thread_grid>>>(
         grad_output, 
         net_grad, 
-        Ri_d, 
-        Rij, 
-        nblist, 
-        natoms, 
+        Ri_d,
+        Rij,
+        nblist,
+        num_atom,
+        batch_num,
+        natoms,
         neigh_num
         );
 }

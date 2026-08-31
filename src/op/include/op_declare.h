@@ -96,7 +96,9 @@ void torch_launch_calculate_nepvirial_grad(
                        const torch::Tensor &nblist,
                        const torch::Tensor &Rij,
                        const torch::Tensor &Ri_d,
+                       const torch::Tensor &num_atom,
                        const torch::Tensor &net_grad,
+                       int64_t batch_num,
                        int64_t natoms,
                        int64_t neigh_num,
                        torch::Tensor &grad

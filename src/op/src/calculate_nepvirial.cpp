@@ -31,7 +31,9 @@ void torch_launch_calculate_nepvirial_grad(
     const torch::Tensor &nblist,
     const torch::Tensor &Rij,
     const torch::Tensor &Ri_d,
+    const torch::Tensor &num_atom,
     const torch::Tensor &net_grad,
+    int64_t batch_num,
     int64_t natoms,
     int64_t neigh_num,
     torch::Tensor &grad
@@ -41,8 +43,9 @@ void torch_launch_calculate_nepvirial_grad(
         (const int64_t *) nblist.data_ptr(),
         (const double *) Rij.data_ptr(),
         (const double *) Ri_d.data_ptr(),
+        (const int64_t *) num_atom.data_ptr(),
         (const double *) net_grad.data_ptr(),
-        natoms, neigh_num,
+        batch_num, natoms, neigh_num,
         (double *) grad.data_ptr(),
         device_id
     );
