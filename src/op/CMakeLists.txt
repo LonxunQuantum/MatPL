@@ -1,140 +1,123 @@
-execute_process(
-    COMMAND python3 -c "
-try:
-    import torch
-    if torch._C._GLIBCXX_USE_CXX11_ABI:
-        print('1')
-    else:
-        print('0')
-except:
-    print('0')  # 检测失败设置为0
-"
-    OUTPUT_VARIABLE TORCH_ABI
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
+cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+project(CalcOps LANGUAGES CXX)
 
-if(TORCH_ABI STREQUAL "0")
-    message(STATUS "set _GLIBCXX_USE_CXX11_ABI=0")
-    add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
-else()
-    message(STATUS "set _GLIBCXX_USE_CXX11_ABI=1(default)")
-endif()
-
-# 1. Basic info
-cmake_minimum_required(VERSION 3.2 FATAL_ERROR)
-project(CalcOps)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED on)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# 2. Include Torch and Python paths
-execute_process(COMMAND python3 -c "import torch; print(torch.utils.cmake_prefix_path)" OUTPUT_VARIABLE TORCH_CMAKE_PREFIX_PATH)
-string(REPLACE "\n" "" TORCH_CMAKE_PREFIX_PATH ${TORCH_CMAKE_PREFIX_PATH})
-list(APPEND CMAKE_PREFIX_PATH ${TORCH_CMAKE_PREFIX_PATH})
+set(MATPL_GPU_BACKEND AUTO CACHE STRING "AUTO, CUDA, HIP, or CPU")
+set_property(CACHE MATPL_GPU_BACKEND PROPERTY STRINGS AUTO CUDA HIP CPU)
 
-execute_process(COMMAND python3 -c "import sysconfig; print(sysconfig.get_paths()['include'])" OUTPUT_VARIABLE PYTHON_INCLUDE_DIR)
-string(REPLACE "\n" "" PYTHON_INCLUDE_DIR ${PYTHON_INCLUDE_DIR})
-execute_process(COMMAND python3 -c "import torch; print(torch.__path__[0])" OUTPUT_VARIABLE TORCH_PATH)
-string(REPLACE "\n" "" TORCH_PATH ${TORCH_PATH})
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
-include_directories(${PYTHON_INCLUDE_DIR})
-include_directories(${TORCH_PATH}/include/)
-include_directories(${TORCH_PATH}/include/torch/csrc/api/include/)
-
-# 3. Set output directories
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-file(MAKE_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-file(MAKE_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/obj)
-file(MAKE_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY})
-
-# 4. Detect if PyTorch was built with CUDA support (compile-time support)
-#    NOT whether CUDA devices are available at runtime
 execute_process(
-    COMMAND python3 -c "
-import torch
-# Check 1: If PyTorch was compiled with CUDA support
-if torch.cuda.is_available() or hasattr(torch.version, 'cuda'):
-    # Check 2: If torch.version.cuda exists (this indicates CUDA support at compile time)
-    if hasattr(torch.version, 'cuda') and torch.version.cuda is not None:
-        print('TRUE')
-    else:
-        # Some PyTorch builds might have CUDA support but no cuda version string
-        print('TRUE' if torch.cuda.is_built() else 'FALSE')
-else:
-    print('FALSE')
-"
-    OUTPUT_VARIABLE PYTORCH_BUILT_WITH_CUDA
+    COMMAND "${Python3_EXECUTABLE}" -c
+        "import torch; print('|'.join([str(int(torch._C._GLIBCXX_USE_CXX11_ABI)), torch.utils.cmake_prefix_path, torch.version.cuda or 'NONE', getattr(torch.version, 'hip', None) or 'NONE', torch.__path__[0]]))"
+    OUTPUT_VARIABLE MATPL_TORCH_INFO
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE PYTHON_EXIT_CODE
+    RESULT_VARIABLE MATPL_TORCH_INFO_RESULT
+    ERROR_VARIABLE MATPL_TORCH_INFO_ERROR
+)
+if(NOT MATPL_TORCH_INFO_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "Unable to query PyTorch with ${Python3_EXECUTABLE}: "
+        "${MATPL_TORCH_INFO_ERROR}"
+    )
+endif()
+
+string(REPLACE "|" ";" MATPL_TORCH_INFO_LIST "${MATPL_TORCH_INFO}")
+list(LENGTH MATPL_TORCH_INFO_LIST MATPL_TORCH_INFO_LENGTH)
+if(NOT MATPL_TORCH_INFO_LENGTH EQUAL 5)
+    message(FATAL_ERROR "Unexpected PyTorch probe output: ${MATPL_TORCH_INFO}")
+endif()
+list(GET MATPL_TORCH_INFO_LIST 0 MATPL_TORCH_ABI)
+list(GET MATPL_TORCH_INFO_LIST 1 MATPL_TORCH_CMAKE_PREFIX_PATH)
+list(GET MATPL_TORCH_INFO_LIST 2 MATPL_TORCH_CUDA_VERSION)
+list(GET MATPL_TORCH_INFO_LIST 3 MATPL_TORCH_HIP_VERSION)
+list(GET MATPL_TORCH_INFO_LIST 4 MATPL_TORCH_PATH)
+if(MATPL_TORCH_CUDA_VERSION STREQUAL "NONE")
+    set(MATPL_TORCH_CUDA_VERSION "")
+endif()
+if(MATPL_TORCH_HIP_VERSION STREQUAL "NONE")
+    set(MATPL_TORCH_HIP_VERSION "")
+endif()
+
+if(MATPL_TORCH_ABI STREQUAL "0")
+    message(STATUS "Using _GLIBCXX_USE_CXX11_ABI=0 from PyTorch")
+    add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
+else()
+    message(STATUS "Using _GLIBCXX_USE_CXX11_ABI=1 from PyTorch")
+    add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=1)
+endif()
+
+list(APPEND CMAKE_PREFIX_PATH "${MATPL_TORCH_CMAKE_PREFIX_PATH}")
+set(CMAKE_DISABLE_FIND_PACKAGE_MKL TRUE)
+find_package(Torch REQUIRED)
+
+include_directories("${Python3_INCLUDE_DIRS}")
+include_directories("${MATPL_TORCH_PATH}/include")
+include_directories("${MATPL_TORCH_PATH}/include/torch/csrc/api/include")
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/obj")
+file(MAKE_DIRECTORY
+    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+    "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}"
 )
 
-# Handle Python execution errors
-if(NOT PYTHON_EXIT_CODE EQUAL 0)
-    message(WARNING "Failed to check PyTorch CUDA support. Assuming no CUDA.")
-    set(PYTORCH_BUILT_WITH_CUDA "FALSE")
-endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveBackend.cmake")
+matpl_resolve_backend(
+    "${MATPL_GPU_BACKEND}"
+    "${MATPL_TORCH_CUDA_VERSION}"
+    "${MATPL_TORCH_HIP_VERSION}"
+    MATPL_RESOLVED_BACKEND
+)
 
-message(STATUS "PyTorch built with CUDA support: ${PYTORCH_BUILT_WITH_CUDA}")
-
-# 5. Detect if CUDA toolkit is available on the system (for compilation)
-find_program(NVCC nvcc)
-if(NVCC)
-    set(SYSTEM_HAS_CUDA_TOOLKIT TRUE)
-    message(STATUS "CUDA toolkit found: ${NVCC}")
-else()
-    set(SYSTEM_HAS_CUDA_TOOLKIT FALSE)
-    message(STATUS "CUDA toolkit not found in PATH")
-    
-    # Check CUDA_HOME or CUDA_PATH as fallback
-    if(DEFINED ENV{CUDA_HOME} AND EXISTS $ENV{CUDA_HOME}/bin/nvcc)
-        set(SYSTEM_HAS_CUDA_TOOLKIT TRUE)
-        set(NVCC $ENV{CUDA_HOME}/bin/nvcc)
-        message(STATUS "Found CUDA toolkit via CUDA_HOME: $ENV{CUDA_HOME}")
-    elseif(DEFINED ENV{CUDA_PATH} AND EXISTS $ENV{CUDA_PATH}/bin/nvcc)
-        set(SYSTEM_HAS_CUDA_TOOLKIT TRUE)
-        set(NVCC $ENV{CUDA_PATH}/bin/nvcc)
-        message(STATUS "Found CUDA toolkit via CUDA_PATH: $ENV{CUDA_PATH}")
+if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")
+    if(MATPL_TORCH_CUDA_VERSION STREQUAL "")
+        message(FATAL_ERROR
+            "MATPL_GPU_BACKEND=CUDA requires a CUDA PyTorch build. "
+            "Current PyTorch reports CUDA='${MATPL_TORCH_CUDA_VERSION}', "
+            "HIP='${MATPL_TORCH_HIP_VERSION}'. Use a CUDA PyTorch environment "
+            "or configure -DMATPL_GPU_BACKEND=CPU."
+        )
+    endif()
+    find_program(MATPL_NVCC_EXECUTABLE nvcc)
+    if(NOT MATPL_NVCC_EXECUTABLE)
+        message(FATAL_ERROR
+            "CUDA backend selected, but nvcc was not found. Load the CUDA "
+            "toolkit or configure -DMATPL_GPU_BACKEND=CPU."
+        )
+    endif()
+    set(CMAKE_CUDA_COMPILER "${MATPL_NVCC_EXECUTABLE}" CACHE FILEPATH "CUDA compiler")
+elseif(MATPL_RESOLVED_BACKEND STREQUAL "HIP")
+    if(MATPL_TORCH_HIP_VERSION STREQUAL "")
+        message(FATAL_ERROR
+            "MATPL_GPU_BACKEND=HIP requires a HIP PyTorch build. "
+            "Current PyTorch reports CUDA='${MATPL_TORCH_CUDA_VERSION}', "
+            "HIP='${MATPL_TORCH_HIP_VERSION}'. Use the DTK/HIP PyTorch environment "
+            "or configure -DMATPL_GPU_BACKEND=CPU."
+        )
+    endif()
+    find_program(MATPL_HIPCC_EXECUTABLE hipcc)
+    if(NOT MATPL_HIPCC_EXECUTABLE)
+        message(FATAL_ERROR
+            "HIP backend selected, but hipcc was not found. Source the DTK "
+            "environment or configure -DMATPL_GPU_BACKEND=CPU."
+        )
     endif()
 endif()
 
-# 6. Determine if GPU compilation should proceed
-# We need BOTH: PyTorch built with CUDA AND CUDA toolkit available for compilation
-if(PYTORCH_BUILT_WITH_CUDA AND SYSTEM_HAS_CUDA_TOOLKIT)
-    set(COMPILE_WITH_GPU TRUE)
-    message(STATUS "Enabling GPU compilation: PyTorch has CUDA support AND CUDA toolkit is available")
-elseif(PYTORCH_BUILT_WITH_CUDA AND NOT SYSTEM_HAS_CUDA_TOOLKIT)
-    set(COMPILE_WITH_GPU FALSE)
-    message(WARNING "PyTorch was built with CUDA support but CUDA toolkit is not available for compilation.")
-    message(WARNING "Please install CUDA toolkit or set CUDA_HOME environment variable.")
-    message(WARNING "Building only CPU operators.")
-elseif(NOT PYTORCH_BUILT_WITH_CUDA AND SYSTEM_HAS_CUDA_TOOLKIT)
-    set(COMPILE_WITH_GPU FALSE)
-    message(WARNING "CUDA toolkit is available but PyTorch was not built with CUDA support.")
-    message(WARNING "Please install PyTorch with CUDA support.")
-    message(WARNING "Building only CPU operators.")
-else()
-    set(COMPILE_WITH_GPU FALSE)
-    message(STATUS "No CUDA support detected. Building only CPU operators.")
-endif()
+string(TOLOWER "${MATPL_RESOLVED_BACKEND}" MATPL_RESOLVED_BACKEND_LOWER)
+file(WRITE "${CMAKE_BINARY_DIR}/matpl_backend.txt"
+    "${MATPL_RESOLVED_BACKEND_LOWER}\n"
+)
+message(STATUS
+    "MatPL backend: requested=${MATPL_GPU_BACKEND}, "
+    "resolved=${MATPL_RESOLVED_BACKEND}, "
+    "torch.cuda=${MATPL_TORCH_CUDA_VERSION}, torch.hip=${MATPL_TORCH_HIP_VERSION}"
+)
 
-# 7. Always add CPU subdirectory
-add_subdirectory(cmake/cpu)
-
-# 8. Conditionally add GPU subdirectory
-if(COMPILE_WITH_GPU)
-    message(STATUS "Adding GPU subdirectory for CUDA compilation.")
-    
-    # Pass CUDA toolkit info to GPU subdirectory if needed
-    if(DEFINED ENV{CUDA_HOME})
-        set(CUDA_TOOLKIT_ROOT_DIR $ENV{CUDA_HOME} CACHE PATH "CUDA Toolkit root directory")
-    endif()
-    if(NVCC)
-        set(CUDA_NVCC_EXECUTABLE ${NVCC} CACHE FILEPATH "CUDA NVCC executable")
-    endif()
-    
-    add_subdirectory(cmake/gpu)
-else()
-    message(STATUS "Skipping GPU subdirectory.")
-endif()
+add_subdirectory("cmake/${MATPL_RESOLVED_BACKEND_LOWER}")

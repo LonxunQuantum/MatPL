@@ -1,13 +1,10 @@
 # 1. 包含包
-# PyTorch's Caffe2 CMake config opportunistically discovers external MKL.
-# The PyTorch wheel already contains its CPU backend, so keep a separately
-# installed pip MKL runtime from becoming a link dependency of CalcOps_cuda.
-set(CMAKE_DISABLE_FIND_PACKAGE_MKL TRUE)
-find_package(Torch REQUIRED)
 enable_language(CUDA)  # 使用现代CMake方式启用CUDA
 
 # 2. 设置 CUDA 架构支持
-set(CMAKE_CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90") 
+if(NOT CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90")
+endif()
 message(STATUS "Enabled CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # 3. 全局 CUDA 编译选项
@@ -42,7 +39,7 @@ target_include_directories(CalcOps_cuda PRIVATE
 
 # 设置CUDA架构属性
 set_target_properties(CalcOps_cuda PROPERTIES
-    CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90"
+    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
     POSITION_INDEPENDENT_CODE ON
 )
 
