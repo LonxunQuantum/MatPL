@@ -652,7 +652,11 @@ class nep_network:
         if self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]:
             self.lr_scale = calculate_lr_scale(
                 self.input_param.optimizer_param.scale_lr,
-                self.input_param.optimizer_param.scaling_method,
+                getattr(
+                    self.input_param.optimizer_param,
+                    "scale_method",
+                    getattr(self.input_param.optimizer_param, "scaling_method", "sqrt"),
+                ),
                 self.input_param.optimizer_param.batch_size,
                 self.input_param.world_size,
                 avg_atom_num,
@@ -871,7 +875,7 @@ class nep_network:
         if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
             train_lists.extend(["time(s)"])
         else:
-            train_lists.extend(["optimizer_lr", "time(s)"])
+            train_lists.extend(["last_lr_used", "time(s)"])
 
         train_print_width = {
             "epoch": 5,
@@ -887,7 +891,7 @@ class nep_network:
             "RMSE_virial(eV/atom)": 23,
             "Loss_l1": 18,
             "Loss_l2": 18,
-            "optimizer_lr": 18,
+            "last_lr_used": 18,
             "time(s)": 15,
         }
 
@@ -916,7 +920,7 @@ class nep_network:
                     train_loader, model, self.criterion, optimizer, epoch, self.device, self.input_param
                 )
             else:
-                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, optimizer_lr, loss_l1, loss_l2 = train(
+                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, last_lr_used, loss_l1, loss_l2 = train(
                     train_loader, model, self.criterion, optimizer, scheduler, epoch,
                         self.optimizer_peak_lr,
                         self.completed_optimizer_updates,
@@ -959,7 +963,7 @@ class nep_network:
                     if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
                         train_log_line += "%15.4f" % (time_end - time_start)
                     else:
-                        train_log_line += f"{optimizer_lr:18.10e}{(time_end - time_start):15.4f}"
+                        train_log_line += f"{last_lr_used:18.10e}{(time_end - time_start):15.4f}"
                     f_train_log.write(f"{train_log_line}\n")
 
                 if val_loader and len(val_loader) > 0:

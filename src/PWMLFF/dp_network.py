@@ -58,7 +58,11 @@ def create_dp_adam_optimizer_and_scheduler(
     world_size = max(int(world_size or 1), 1)
     lr_scale = calculate_lr_scale(
         optimizer_param.scale_lr,
-        optimizer_param.scaling_method,
+        getattr(
+            optimizer_param,
+            "scale_method",
+            getattr(optimizer_param, "scaling_method", "sqrt"),
+        ),
         optimizer_param.batch_size,
         world_size,
         avg_atom_nums,
