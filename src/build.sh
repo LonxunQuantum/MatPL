@@ -2,10 +2,13 @@
 
 # Default make command (single core) and NEP types
 MAKE_CMD="make"
+JOBS=1
 COMPILE_FORTRAN=0
+REQUESTED_BACKEND="auto"
+DRY_RUN=0
 
 # Define directory variables
-BASE_DIR=$(pwd)  # src directory
+BASE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # src directory
 BIN_DIR="$BASE_DIR/bin"
 LIB_DIR="$BASE_DIR/lib"
 NEP_CPU_DIR="$BASE_DIR/feature/nep_find_neigh"
@@ -19,22 +22,30 @@ show_help() {
     echo "  -h              Show this help message"
     echo "  -jN             Use N parallel jobs for compilation (e.g., -j4)"
     echo "  -m nn           Compile Fortran codes (required for NN and Linear models)"
+    echo "  --gpu-backend B Build operators for auto, cuda, hip, or cpu"
+    echo "  --dry-run       Print the selected operator build commands and exit"
     echo ""
     echo "Examples:"
     echo "  $0                     # Default compilation without Fortran"
     echo "  $0 -j4                 # Use 4 parallel jobs"
     echo "  $0 -m nn               # Compile Fortran codes"
-    echo "  $0 -j4 -m nn      # Use 4 jobs, compile Fortran"
-    exit 0
+    echo "  $0 -j4 -m nn           # Use 4 jobs, compile Fortran"
+    echo "  $0 --gpu-backend hip -j4"
 }
 
 # Parse command line arguments
 while [ $# -gt 0 ]; do
     case $1 in
-        -h)
+        -h|--help)
             show_help
+            exit 0
             ;;
         -j*)
+            JOBS="${1#-j}"
+            if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+                echo "Error: -j requires a positive integer"
+                exit 1
+            fi
             MAKE_CMD="make $1"
             shift
             ;;
@@ -47,18 +58,76 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             ;;
+        --gpu-backend)
+            if [ $# -lt 2 ]; then
+                echo "Error: --gpu-backend requires auto, cuda, hip, or cpu"
+                exit 1
+            fi
+            REQUESTED_BACKEND="${2,,}"
+            shift 2
+            ;;
+        --gpu-backend=*)
+            REQUESTED_BACKEND="${1#*=}"
+            REQUESTED_BACKEND="${REQUESTED_BACKEND,,}"
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
         *)
             echo "Error: Unknown option $1"
             show_help
+            exit 1
             ;;
     esac
 done
+
+case "$REQUESTED_BACKEND" in
+    auto|cuda|hip|cpu)
+        ;;
+    *)
+        echo "Error: Unsupported GPU backend '$REQUESTED_BACKEND'"
+        exit 1
+        ;;
+esac
+
+if [ "$REQUESTED_BACKEND" = "auto" ]; then
+    if ! RESOLVED_BACKEND=$(python -c \
+        "import torch; print('hip' if getattr(torch.version, 'hip', None) else ('cuda' if torch.version.cuda else 'cpu'))"); then
+        echo "Error: Unable to detect the PyTorch backend for --gpu-backend auto"
+        exit 1
+    fi
+else
+    RESOLVED_BACKEND="$REQUESTED_BACKEND"
+fi
+
+case "$RESOLVED_BACKEND" in
+    cuda|hip|cpu)
+        ;;
+    *)
+        echo "Error: PyTorch backend detection returned '$RESOLVED_BACKEND'"
+        exit 1
+        ;;
+esac
+
+OP_BUILD_DIR="$OP_DIR/build/$RESOLVED_BACKEND"
+RESOLVED_BACKEND_UPPER="${RESOLVED_BACKEND^^}"
 
 echo "Using MAKE_CMD = $MAKE_CMD"
 if [ $COMPILE_FORTRAN -eq 1 ]; then
     echo "Compile Fortran codes: Yes"
 else
     echo "Compile Fortran codes: No"
+fi
+echo "Requested operator backend: $REQUESTED_BACKEND"
+echo "Resolved operator backend: $RESOLVED_BACKEND"
+echo "Operator build directory: $OP_BUILD_DIR"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "cmake -S $OP_DIR -B $OP_BUILD_DIR -DMATPL_GPU_BACKEND=$RESOLVED_BACKEND_UPPER"
+    echo "cmake --build $OP_BUILD_DIR --parallel $JOBS"
+    exit 0
 fi
 
 mkdir -p "$BIN_DIR"
@@ -145,12 +214,20 @@ fi
 # Build operators
 echo "Building operators..."
 if [ -d "$OP_DIR" ]; then
-    cd "$OP_DIR"
-    rm -rf build
-    mkdir -p build
-    cd build
+    case "$OP_BUILD_DIR" in
+        "$OP_DIR"/build/cuda|"$OP_DIR"/build/hip|"$OP_DIR"/build/cpu)
+            ;;
+        *)
+            echo "Error: Refusing to clean unexpected build directory: $OP_BUILD_DIR"
+            exit 1
+            ;;
+    esac
+    rm -rf "$OP_BUILD_DIR"
+    mkdir -p "$OP_BUILD_DIR"
     # for bigmodel the types should be 100
-    if cmake .. && $MAKE_CMD; then
+    if cmake -S "$OP_DIR" -B "$OP_BUILD_DIR" \
+        -DMATPL_GPU_BACKEND="$RESOLVED_BACKEND_UPPER" && \
+        cmake --build "$OP_BUILD_DIR" --parallel "$JOBS"; then
         echo "Operators built successfully"
     else
         echo "Error: Failed to build operators"
