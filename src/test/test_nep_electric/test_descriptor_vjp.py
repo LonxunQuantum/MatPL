@@ -11,7 +11,7 @@ except OSError as exc:
     CalcOps = None
 
 
-def _require_cuda():
+def _require_gpu_backend():
     if CalcOps is None or not torch.cuda.is_available():
         return False
     return True
@@ -20,15 +20,14 @@ def _require_cuda():
 def test_descriptor_vjp_ops_are_registered():
     if CalcOps is None:
         return
-    names = dir(CalcOps)
-    assert "calculateNepFeatWithGradContext" in names
-    assert "calculateNepFeatInputGrad" in names
-    assert "calculateNepMbFeatWithGradContext" in names
-    assert "calculateNepMbFeatInputGrad" in names
+    assert getattr(CalcOps, "calculateNepFeatWithGradContext") is not None
+    assert getattr(CalcOps, "calculateNepFeatInputGrad") is not None
+    assert getattr(CalcOps, "calculateNepMbFeatWithGradContext") is not None
+    assert getattr(CalcOps, "calculateNepMbFeatInputGrad") is not None
 
 
 def test_radial_descriptor_vjp_matches_autograd():
-    if not _require_cuda():
+    if not _require_gpu_backend():
         return
     torch.manual_seed(20260727)
     device = torch.device("cuda")
@@ -82,7 +81,7 @@ def test_radial_descriptor_vjp_matches_autograd():
 
 
 def test_angular_descriptor_vjp_matches_autograd():
-    if not _require_cuda():
+    if not _require_gpu_backend():
         return
     torch.manual_seed(20260727)
     device = torch.device("cuda")
@@ -148,7 +147,7 @@ def test_angular_descriptor_vjp_matches_autograd():
 
 
 def test_angular_descriptor_vjp_matches_autograd_for_real_lmax_shape():
-    if not _require_cuda():
+    if not _require_gpu_backend():
         return
     torch.manual_seed(20260728)
     device = torch.device("cuda")
@@ -207,5 +206,6 @@ def test_angular_descriptor_vjp_matches_autograd_for_real_lmax_shape():
 
 
 if __name__ == "__main__":
+    test_descriptor_vjp_ops_are_registered()
     test_radial_descriptor_vjp_matches_autograd()
     test_angular_descriptor_vjp_matches_autograd()

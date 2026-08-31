@@ -62,6 +62,35 @@ class HipSourceManifestTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_hip_force_launches_fit_dtk_kernel_bounds(self):
+        oversized = []
+        launch_pattern = re.compile(
+            r"(?:const\s+)?int\s+LEN\s*=\s*(\d+)\s*;"
+            r"(?:(?!LEN\s*=).){0,240}?dim3\s+thread_grid\s*\(\s*LEN\s*,\s*3\s*\)",
+            flags=re.DOTALL,
+        )
+        for filename in ("calculateForce.hip", "calculateNepForce.hip"):
+            source = (HIP_ROOT / filename).read_text()
+            for match in launch_pattern.finditer(source):
+                threads = int(match.group(1)) * 3
+                if threads > 256:
+                    oversized.append(f"{filename}:{threads}")
+
+        self.assertEqual(oversized, [])
+
+    def test_hip_virial_backward_launch_fits_dtk_kernel_bounds(self):
+        source = (HIP_ROOT / "calculateNepVirial.hip").read_text()
+        launch = re.search(
+            r"launch_calculate_nepvirial_grad\s*\([^)]*\)\s*\{"
+            r"(?:(?!^}).)*?LEN\s*=\s*(\d+)\s*;"
+            r"(?:(?!^}).)*?dim3\s+thread_grid\s*\(\s*LEN\s*,\s*4\s*\)",
+            source,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+
+        self.assertIsNotNone(launch, "HIP virial backward launch was not found")
+        self.assertLessEqual(int(launch.group(1)) * 4, 256)
+
 
 if __name__ == "__main__":
     unittest.main()

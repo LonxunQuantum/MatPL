@@ -116,7 +116,7 @@ void launch_calculate_force(
 
 #if 1
     hipSetDevice(device_id);
-    const int LEN = 256;
+    const int LEN = 64;
     const int nblock = (neigh_num + LEN - 1) / LEN;
     dim3 block_grid(nblock, natoms, batch_size);
     dim3 thread_grid(LEN, 3);

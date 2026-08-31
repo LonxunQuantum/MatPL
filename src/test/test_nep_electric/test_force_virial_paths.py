@@ -73,7 +73,7 @@ def test_force_virial_helper_matches_radial_cpu_formula():
     torch.testing.assert_close(virial, expected_virial)
 
 
-def test_radial_analytical_force_matches_autograd_on_cuda():
+def test_radial_analytical_force_matches_autograd_on_gpu_backend():
     if not torch.cuda.is_available():
         return
     torch.manual_seed(20260728)
@@ -182,7 +182,7 @@ def test_radial_analytical_force_matches_autograd_on_cuda():
     torch.testing.assert_close(virial, virial_ref, rtol=1e-7, atol=1e-7)
 
 
-def test_nep_virial_cuda_backward_uses_each_batch_gradient():
+def test_nep_virial_gpu_backward_uses_each_batch_gradient():
     """The second image must not reuse the first image's upstream gradient."""
     if not torch.cuda.is_available():
         return
@@ -222,5 +222,5 @@ def test_nep_virial_cuda_backward_uses_each_batch_gradient():
 
 if __name__ == "__main__":
     test_force_virial_helper_matches_radial_cpu_formula()
-    test_radial_analytical_force_matches_autograd_on_cuda()
-    test_nep_virial_cuda_backward_uses_each_batch_gradient()
+    test_radial_analytical_force_matches_autograd_on_gpu_backend()
+    test_nep_virial_gpu_backward_uses_each_batch_gradient()

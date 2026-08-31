@@ -132,7 +132,7 @@ void launch_calculate_nepforce(
     const int device_id
 ) {
     hipSetDevice(device_id);
-    const int LEN = 256;
+    const int LEN = 64;
     const int nblock = (neigh_num + LEN - 1) / LEN;
     dim3 block_grid(nblock, natoms);  // 不再需要 batch_size 维度
     dim3 thread_grid(LEN, 3);
