@@ -6,18 +6,12 @@ import torch
 from src.user.input_param import InputParam
 from pwdata import Config
 from src.utils.debug_operation import check_cuda_memory
+from src.utils.op_loader import load_calc_ops
 import time
 # from src.feature.nep_find_neigh.findneigh import FindNeigh
 from typing import Union, Optional
 from tqdm import tqdm
-if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
-else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+CalcOps = load_calc_ops()
 
 # 无 BEC 标签时，可为指定离子生成价态对角张量；其他原子保持 -1e6 掩码。
 BEC_MONOVALENT_ION_TYPES = (3, 11, 19)  # Li, Na, K

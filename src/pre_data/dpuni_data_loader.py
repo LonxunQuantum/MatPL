@@ -14,14 +14,9 @@ from src.feature.nep_find_neigh.findneigh import FindNeigh
 dpcalc = FindNeigh() # c++ inferface of dp findneighborlist
 
 from tqdm import tqdm
-if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
-else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+from src.utils.op_loader import load_calc_ops
+
+CalcOps = load_calc_ops()
 
 
 def get_det(box: np.array):

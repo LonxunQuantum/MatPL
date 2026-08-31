@@ -9,11 +9,10 @@ from pwdata.image import Image
 import random
 from typing import Union, Optional
 from tqdm import tqdm
+from src.utils.op_loader import load_calc_ops
 
+CalcOps = load_calc_ops()
 if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
     device = torch.cuda.current_device()
     memory_total = torch.cuda.get_device_properties(device).total_memory
     memory_total_gb = memory_total / (1024 ** 3)
@@ -22,9 +21,6 @@ if torch.cuda.is_available():
     else:
         load_batch_size = 2048
 else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
     load_batch_size = 1024
 
 def get_det(box: np.array):

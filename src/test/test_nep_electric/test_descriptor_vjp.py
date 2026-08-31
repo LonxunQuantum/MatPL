@@ -1,18 +1,10 @@
-import os
-
 import torch
+from src.utils.op_loader import load_calc_ops
 
-
-_LIB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "op",
-    "build",
-    "lib",
-    "libCalcOps_bind.so",
-)
 try:
-    torch.ops.load_library(_LIB_PATH)
-    CalcOps = torch.ops.CalcOps_cuda
+    CalcOps = load_calc_ops()
+except FileNotFoundError:
+    CalcOps = None
 except OSError as exc:
     if "libcuda.so" not in str(exc):
         raise

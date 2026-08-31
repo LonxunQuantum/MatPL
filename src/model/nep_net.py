@@ -12,16 +12,10 @@ from typing import List, Tuple, Optional
 from src.user.input_param import InputParam
 from src.user.nep_param import NepParam
 from src.utils.debug_operation import check_cuda_memory
+from src.utils.op_loader import load_calc_ops
 sys.path.append(os.getcwd())
 from src.model.nep_fitting import FittingNet, QNEPFittingNet
-if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
-else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+CalcOps = load_calc_ops()
    
 class NEP(nn.Module):
     _SQRT_EPSILON_INF_MIN = 1.0

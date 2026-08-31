@@ -20,17 +20,9 @@ from src.user.input_param import InputParam
 from src.utils.debug_operation import check_cuda_memory
 from collections import defaultdict
 from src.utils.train_log import AverageMeter, Summary, ProgressMeter
+from src.utils.op_loader import load_calc_ops
 
-if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
-else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+CalcOps = load_calc_ops()
 
 def get_model_module(model, args:InputParam):
     return model.module if getattr(args, "world_size", 1) > 1 else model

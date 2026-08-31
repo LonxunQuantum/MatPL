@@ -9,15 +9,9 @@ from typing import List, Tuple, Optional
 sys.path.append(os.getcwd())
 
 from src.model.dp_embedding import EmbeddingNet, FittingNet
+from src.utils.op_loader import load_calc_ops
 # from src.model.calculate_force import CalculateCompress, CalculateForce, CalculateVirialForce
-if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
-else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+CalcOps = load_calc_ops()
 '''
 # logging and our extension
 import logging

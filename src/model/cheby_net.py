@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 from typing import List, Tuple, Optional
 from src.user.input_param import InputParam
+from src.utils.op_loader import load_calc_ops
 import time
 
 sys.path.append(os.getcwd())
@@ -34,14 +35,7 @@ lib.get_dfeat2c.restype = ctypes.POINTER(ctypes.c_double)
 lib.get_neighbor_list.argtypes = [ctypes.c_void_p]
 lib.get_neighbor_list.restype = ctypes.POINTER(ctypes.c_int)
 
-if torch.cuda.is_available():
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind.so")
-    torch.ops.load_library(lib_path)
-    CalcOps = torch.ops.CalcOps_cuda
-else:
-    lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "op/build/lib/libCalcOps_bind_cpu.so")
-    torch.ops.load_library(lib_path)    # load the custom op, no use for cpu version
-    CalcOps = torch.ops.CalcOps_cpu     # only for compile while no cuda device
+CalcOps = load_calc_ops()
 
 class ChebyNet(nn.Module):
     def __init__(self, input_param: InputParam, scaler, energy_shift):
