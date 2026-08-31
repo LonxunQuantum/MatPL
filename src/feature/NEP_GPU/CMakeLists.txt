@@ -1,11 +1,13 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 project(NEP_GPU LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CUDA_STANDARD 14)
 
 # 设置 CUDA 架构支持
-set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
+endif()
 
 # Kepler sm_30
 # Maxwell, GTX980 sm_52
@@ -20,9 +22,9 @@ set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89 90)
 # 引入 pybind11
 find_package(pybind11 REQUIRED)
 
-# CUDA 相关配置
-find_package(CUDA 11.8 REQUIRED)
-enable_language(CUDA)
+# 使用当前环境提供的 CUDA toolkit。NVIDIA 环境使用原生 toolkit，
+# DCU 环境使用 DTK 提供的 CUDA 兼容层与 nvcc 包装器。
+find_package(CUDAToolkit REQUIRED)
 
 # 添加 pybind11 包装代码
 pybind11_add_module(nep_gpu
@@ -34,14 +36,20 @@ pybind11_add_module(nep_gpu
     utilities/error.cu
 )
 
-set_target_properties(nep_gpu PROPERTIES SUFFIX ".so")
+set_target_properties(nep_gpu PROPERTIES
+    SUFFIX ".so"
+    # Link the runtime explicitly below. This prevents CMake from adding the
+    # NVIDIA-only cudadevrt archive, which DTK's CUDA compatibility layer does
+    # not provide.
+    CUDA_RUNTIME_LIBRARY None
+)
 
-# 包含 CUDA 和本地目录
+# 包含 GPU toolkit 和本地目录
 target_include_directories(nep_gpu PRIVATE
-    ${CUDA_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/force
     ${CMAKE_CURRENT_SOURCE_DIR}/utilities
 )
 
-# 链接 CUDA 库
-target_link_libraries(nep_gpu PRIVATE ${CUDA_LIBRARIES} ${CUDA_cufft_LIBRARY})
+# DTK 为这些标准 CUDA targets 提供兼容实现。
+target_link_libraries(nep_gpu PRIVATE CUDA::cudart CUDA::cufft)

@@ -113,6 +113,49 @@ esac
 
 OP_BUILD_DIR="$OP_DIR/build/$RESOLVED_BACKEND"
 RESOLVED_BACKEND_UPPER="${RESOLVED_BACKEND^^}"
+NEP_GPU_BUILD_DIR="$NEP_GPU_DIR/build/$RESOLVED_BACKEND"
+NEP_GPU_CUDACXX=""
+NEP_GPU_TOOLKIT_ROOT=""
+
+find_dtk_nvcc() {
+    local dtk_root candidate
+    for candidate in "${MATPL_DTK_NVCC:-}" "${CUDACXX:-}"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    for dtk_root in "${MATPL_DTK_ROOT:-}" "${ROCM_PATH:-}"; do
+        [ -n "$dtk_root" ] || continue
+        for candidate in \
+            "$dtk_root"/cuda/cuda-*/bin/nvcc \
+            "$dtk_root/cuda/cuda/bin/nvcc"; do
+            if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+if [ "$RESOLVED_BACKEND" = "cuda" ]; then
+    NEP_GPU_CUDACXX=$(command -v nvcc 2>/dev/null || true)
+    NEP_GPU_TOOLKIT_ROOT="${CUDAToolkit_ROOT:-${CUDA_HOME:-${CUDA_PATH:-}}}"
+    if [ -z "$NEP_GPU_TOOLKIT_ROOT" ] && [ -n "$NEP_GPU_CUDACXX" ]; then
+        NEP_GPU_TOOLKIT_ROOT=$(cd "$(dirname "$NEP_GPU_CUDACXX")/.." && pwd)
+    fi
+elif [ "$RESOLVED_BACKEND" = "hip" ]; then
+    NEP_GPU_CUDACXX=$(find_dtk_nvcc || true)
+    if [ -n "${MATPL_DTK_CUDA_ROOT:-}" ]; then
+        NEP_GPU_TOOLKIT_ROOT="$MATPL_DTK_CUDA_ROOT"
+    elif [ -n "${MATPL_DTK_ROOT:-}" ]; then
+        NEP_GPU_TOOLKIT_ROOT="$MATPL_DTK_ROOT/cuda/cuda"
+    elif [ -n "${ROCM_PATH:-}" ]; then
+        NEP_GPU_TOOLKIT_ROOT="$ROCM_PATH/cuda/cuda"
+    fi
+fi
 
 echo "Using MAKE_CMD = $MAKE_CMD"
 if [ $COMPILE_FORTRAN -eq 1 ]; then
@@ -123,8 +166,21 @@ fi
 echo "Requested operator backend: $REQUESTED_BACKEND"
 echo "Resolved operator backend: $RESOLVED_BACKEND"
 echo "Operator build directory: $OP_BUILD_DIR"
+echo "NEP-GPU backend: $RESOLVED_BACKEND"
+if [ -n "$NEP_GPU_CUDACXX" ]; then
+    echo "NEP-GPU CUDA compiler: $NEP_GPU_CUDACXX"
+    echo "NEP-GPU build directory: $NEP_GPU_BUILD_DIR"
+else
+    echo "NEP-GPU CUDA compiler: unavailable"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
+    if [ -n "$NEP_GPU_CUDACXX" ]; then
+        echo "PATH=$(dirname "$NEP_GPU_CUDACXX"):\$PATH CUDACXX=$NEP_GPU_CUDACXX cmake -S $NEP_GPU_DIR -B $NEP_GPU_BUILD_DIR -DCUDAToolkit_ROOT=$NEP_GPU_TOOLKIT_ROOT"
+        echo "cmake --build $NEP_GPU_BUILD_DIR --parallel $JOBS"
+    else
+        echo "Skipping NEP-GPU interface for backend $RESOLVED_BACKEND"
+    fi
     echo "cmake -S $OP_DIR -B $OP_BUILD_DIR -DMATPL_GPU_BACKEND=$RESOLVED_BACKEND_UPPER"
     echo "cmake --build $OP_BUILD_DIR --parallel $JOBS"
     exit 0
@@ -192,23 +248,28 @@ fi
 # make nep-gpu interface
 echo "Building NEP-GPU interface..."
 
-# Check if CUDA is available
-if command -v nvcc >/dev/null 2>&1 || [ -n "$CUDA_HOME" ] || [ -n "$CUDA_PATH" ]; then
+# CUDA uses the native nvcc. DCU uses DTK's nvcc-compatible wrapper while
+# retaining the single NEP_GPU CUDA source tree.
+if [ -n "$NEP_GPU_CUDACXX" ]; then
     if [ -d "$NEP_GPU_DIR" ]; then
-        mkdir -p "$NEP_GPU_DIR/build"
-        cd "$NEP_GPU_DIR/build"
-        if cmake -Dpybind11_DIR=$(python -m pybind11 --cmakedir) .. && $MAKE_CMD; then
+        mkdir -p "$NEP_GPU_BUILD_DIR"
+        if PATH="$(dirname "$NEP_GPU_CUDACXX"):$PATH" \
+            CUDACXX="$NEP_GPU_CUDACXX" \
+            cmake -S "$NEP_GPU_DIR" -B "$NEP_GPU_BUILD_DIR" \
+                -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
+                -DCUDAToolkit_ROOT="$NEP_GPU_TOOLKIT_ROOT" && \
+            PATH="$(dirname "$NEP_GPU_CUDACXX"):$PATH" \
+            cmake --build "$NEP_GPU_BUILD_DIR" --parallel "$JOBS"; then
             echo "compile nep_gpu interface success"
         else
             echo "Warning: Failed to build NEP-GPU interface"
         fi
-        cd "$BASE_DIR"  # Return to base directory
     else
         echo "Warning: NEP-GPU directory not found: $NEP_GPU_DIR"
     fi
 else
-    echo "Warning: CUDA not detected, skipping NEP-GPU compilation"
-    echo "         To compile with GPU support, please install CUDA toolkit"
+    echo "Warning: No CUDA-compatible compiler found for backend $RESOLVED_BACKEND"
+    echo "         Skipping NEP-GPU compilation"
 fi
 
 # Build operators
