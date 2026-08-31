@@ -5,6 +5,15 @@ class OptimizerParam(object):
     def __init__(self) -> None:
         pass
 
+    @property
+    def scaling_method(self):
+        """Backward-compatible alias for the canonical scale_method name."""
+        return self.scale_method
+
+    @scaling_method.setter
+    def scaling_method(self, value):
+        self.scale_method = value
+
     def set_optimizer(self, json_source:dict, nep_param:NepParam=None):
         optimizer_dict = get_parameter("optimizer", json_source, {})
         self.opt_name = get_parameter("optimizer", optimizer_dict, "ADAM")
@@ -48,7 +57,17 @@ class OptimizerParam(object):
 
         self.warmup = get_parameter("warm_epochs",optimizer_dict, None) #预热epochs
         self.scale_lr = get_parameter("scale_lr", optimizer_dict, False)
-        self.scaling_method = get_parameter("scaling_method",optimizer_dict, "sqrt")  # linear_gpu sqrt_batch sqrt_gpu sqrt sqrt_batch_gpu_atom defalt is (avg_atom_nums) ** 0.5
+        if (
+            "scale_method" in optimizer_dict
+            and "scaling_method" in optimizer_dict
+            and optimizer_dict["scale_method"] != optimizer_dict["scaling_method"]
+        ):
+            raise ValueError(
+                "Conflicting scale_method and legacy scaling_method values")
+        legacy_scale_method = get_parameter(
+            "scaling_method", optimizer_dict, "sqrt")
+        self.scale_method = get_parameter(
+            "scale_method", optimizer_dict, legacy_scale_method)
 
         if "KF" in self.opt_name.upper():  #set Kalman Filter Optimizer params
             self.kalman_lambda = get_parameter("kalman_lambda", optimizer_dict, 0.98)
@@ -182,7 +201,7 @@ class OptimizerParam(object):
 
             opt_dict["learning_rate"]= self.learning_rate
             opt_dict["scale_lr"] = self.scale_lr
-            opt_dict["scaling_method"] = self.scaling_method
+            opt_dict["scale_method"] = self.scale_method
             opt_dict["stop_lr"] = self.stop_lr
             opt_dict["stop_step"] = self.stop_step
             opt_dict["decay_step"] = self.decay_step

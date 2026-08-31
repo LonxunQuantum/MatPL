@@ -35,6 +35,7 @@ from src.utils.learning_rate import (
     calculate_loss_weight_progress,
     calculate_lr_scale,
     calculate_warmup_lr,
+    optimizer_step_with_lr,
     optimizer_update_step,
     resolve_optimizer_peak_lr,
 )
@@ -836,10 +837,11 @@ def test_scale_lr_defaults_to_disabled_and_is_serialized():
     optimizer_param.set_optimizer({})
 
     assert optimizer_param.scale_lr is False
-    assert optimizer_param.scaling_method == "sqrt"
+    assert optimizer_param.scale_method == "sqrt"
     output = optimizer_param.to_dict()
     assert output["scale_lr"] is False
-    assert output["scaling_method"] == "sqrt"
+    assert output["scale_method"] == "sqrt"
+    assert "scaling_method" not in output
 
 
 def test_explicit_scale_lr_configuration_is_preserved():
@@ -847,21 +849,48 @@ def test_explicit_scale_lr_configuration_is_preserved():
     optimizer_param.set_optimizer({
         "optimizer": {
             "scale_lr": True,
-            "scaling_method": "sqrt_gpu",
+            "scale_method": "sqrt_gpu",
         },
     })
 
     assert optimizer_param.scale_lr is True
-    assert optimizer_param.scaling_method == "sqrt_gpu"
+    assert optimizer_param.scale_method == "sqrt_gpu"
     output = optimizer_param.to_dict()
     assert output["scale_lr"] is True
-    assert output["scaling_method"] == "sqrt_gpu"
+    assert output["scale_method"] == "sqrt_gpu"
+    assert "scaling_method" not in output
+
+
+def test_legacy_scaling_method_is_accepted_but_serialized_canonically():
+    optimizer_param = OptimizerParam()
+    optimizer_param.set_optimizer({
+        "optimizer": {
+            "scale_lr": True,
+            "scaling_method": "sqrt_batch",
+        },
+    })
+
+    assert optimizer_param.scale_method == "sqrt_batch"
+    assert optimizer_param.to_dict()["scale_method"] == "sqrt_batch"
+    assert "scaling_method" not in optimizer_param.to_dict()
+
+
+def test_conflicting_scale_method_names_are_rejected():
+    optimizer_param = OptimizerParam()
+
+    with pytest.raises(ValueError, match="scale_method.*scaling_method"):
+        optimizer_param.set_optimizer({
+            "optimizer": {
+                "scale_method": "sqrt",
+                "scaling_method": "sqrt_gpu",
+            },
+        })
 
 
 def test_explicit_sqrt_scaling_is_applied_once_to_optimizer_peak_lr():
     lr_scale = calculate_lr_scale(
         scale_lr=True,
-        scaling_method="sqrt",
+        scale_method="sqrt",
         local_batch_size=32,
         world_size=4,
     )
@@ -882,7 +911,7 @@ def test_explicit_sqrt_scaling_is_applied_once_to_optimizer_peak_lr():
 def test_atom_aware_scaling_uses_stable_dataset_average():
     lr_scale = calculate_lr_scale(
         scale_lr=True,
-        scaling_method="sqrt_batch_gpu_atom",
+        scale_method="sqrt_batch_gpu_atom",
         local_batch_size=32,
         world_size=4,
         avg_atom_nums=50.0,
@@ -912,7 +941,7 @@ def test_warmup_completion_preserves_optimizer_and_scheduler_state():
 def test_disabled_scaling_keeps_configured_learning_rate():
     lr_scale = calculate_lr_scale(
         scale_lr=False,
-        scaling_method="sqrt",
+        scale_method="sqrt",
         local_batch_size=32,
         world_size=4,
     )
@@ -922,10 +951,10 @@ def test_disabled_scaling_keeps_configured_learning_rate():
 
 
 def test_unknown_scaling_method_is_rejected_when_scaling_is_enabled():
-    with pytest.raises(ValueError, match="scaling_method"):
+    with pytest.raises(ValueError, match="scale_method"):
         calculate_lr_scale(
             scale_lr=True,
-            scaling_method="typo",
+            scale_method="typo",
             local_batch_size=32,
             world_size=1,
         )
@@ -946,6 +975,22 @@ def test_optimizer_update_step_is_monotonic_across_batch32_epoch_boundary():
 def test_optimizer_update_step_survives_changed_loader_length_on_resume():
     assert optimizer_update_step(244, 0) == 244
     assert optimizer_update_step(244, 37) == 281
+
+
+def test_optimizer_step_reports_lr_used_before_scheduler_restart():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD([parameter], lr=1.0e-2)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=2, T_mult=1, eta_min=1.0e-4)
+
+    parameter.grad = torch.ones_like(parameter)
+    first_lr_used = optimizer_step_with_lr(optimizer, scheduler)
+    parameter.grad = torch.ones_like(parameter)
+    second_lr_used = optimizer_step_with_lr(optimizer, scheduler)
+
+    assert first_lr_used == pytest.approx(1.0e-2)
+    assert second_lr_used == pytest.approx(5.05e-3)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0e-2)
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,7 @@ import math
 
 
 def calculate_lr_scale(
-        scale_lr, scaling_method, local_batch_size, world_size,
+        scale_lr, scale_method, local_batch_size, world_size,
         avg_atom_nums=1.0):
     """Resolve the one-time learning-rate scale used at initialization."""
     if not scale_lr:
@@ -18,12 +18,12 @@ def calculate_lr_scale(
         "sqrt_batch_gpu_atom": math.sqrt(
             local_batch_size * world_size * avg_atom_nums),
     }
-    if scaling_method not in methods:
+    if scale_method not in methods:
         valid = ", ".join(sorted(methods))
         raise ValueError(
-            f"Unsupported scaling_method '{scaling_method}'. "
+            f"Unsupported scale_method '{scale_method}'. "
             f"Expected one of: {valid}.")
-    return methods[scaling_method]
+    return methods[scale_method]
 
 
 def resolve_optimizer_peak_lr(learning_rate, lr_scale):
@@ -34,6 +34,15 @@ def resolve_optimizer_peak_lr(learning_rate, lr_scale):
 def optimizer_update_step(completed_updates, batch_index):
     """Return a zero-based update index from a persisted update count."""
     return completed_updates + batch_index
+
+
+def optimizer_step_with_lr(optimizer, scheduler=None):
+    """Step the optimizer and return the LR used for that parameter update."""
+    lr_used = float(optimizer.param_groups[0]["lr"])
+    optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+    return lr_used
 
 
 def calculate_loss_weight_progress(global_update, stop_step):

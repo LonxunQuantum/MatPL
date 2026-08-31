@@ -10,6 +10,7 @@ from src.loss.loss import adjust_lr, get_loss, print_l1_l2
 from src.utils.learning_rate import (
     calculate_loss_weight_progress,
     calculate_warmup_lr,
+    optimizer_step_with_lr,
     optimizer_update_step,
 )
 
@@ -496,11 +497,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
             nn.utils.clip_grad_norm_(model.parameters(), args.optimizer_param.max_norm, args.optimizer_param.norm_type)
         elif args.optimizer_param.clip_value is not None:
             nn.utils.clip_grad_value_(model.parameters(), args.optimizer_param.clip_value)
-        optimizer.step()
-
-        if scheduler is not None and is_warmlr is False:
-            scheduler.step()
-        optimizer_lr = optimizer.param_groups[0]["lr"]
+        optimizer_lr = optimizer_step_with_lr(
+            optimizer,
+            scheduler if scheduler is not None and is_warmlr is False else None,
+        )
         learning_rate.update(optimizer_lr)
 
         loss_val = loss
@@ -559,7 +559,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         progress.display_summary([
             "Training Set:",
             f"PeakLR {optimizer_peak_lr:.8e}",
-            f"OptimizerLR {optimizer_lr:.8e}",
+            f"LastLRUsed {optimizer_lr:.8e}",
         ])
 
     return (
