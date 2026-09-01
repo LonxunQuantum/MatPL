@@ -162,7 +162,7 @@ void launch_calculate_nepforce_grad(
         natoms,
         ndesc);
 
-    LEN = 128;
+    LEN = 64;
     const int nblock_ = (natoms + LEN - 1) / LEN;
     dim3 block_grid_(nblock_, neigh_num);
     dim3 thread_grid_(LEN, 4);

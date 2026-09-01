@@ -182,6 +182,36 @@ def test_radial_analytical_force_matches_autograd_on_gpu_backend():
     torch.testing.assert_close(virial, virial_ref, rtol=1e-7, atol=1e-7)
 
 
+def test_nep_force_gpu_backward_accumulates_neighbor_gradient():
+    """The HIP backward path must include gradients from neighboring atoms."""
+    if not torch.cuda.is_available():
+        return
+
+    device = torch.device("cuda")
+    dtype = torch.float64
+    list_neigh = torch.tensor([[1], [0]], dtype=torch.int64, device=device)
+    dE = torch.zeros(2, 1, 4, dtype=dtype, device=device, requires_grad=True)
+    ri_d = torch.zeros(2, 1, 4, 3, dtype=dtype, device=device)
+    ri_d[:, :, :, 0] = 1.0
+    force = torch.zeros(2, 3, dtype=dtype, device=device)
+
+    force = CalcOps.calculateNepForce(list_neigh, dE, ri_d, force)[0]
+    upstream = torch.tensor(
+        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=dtype,
+        device=device,
+    )
+    force.backward(upstream)
+    torch.cuda.synchronize()
+
+    expected = torch.tensor(
+        [[[-1.0, -1.0, -1.0, -1.0]], [[1.0, 1.0, 1.0, 1.0]]],
+        dtype=dtype,
+        device=device,
+    )
+    torch.testing.assert_close(dE.grad, expected)
+
+
 def test_nep_virial_gpu_backward_uses_each_batch_gradient():
     """The second image must not reuse the first image's upstream gradient."""
     if not torch.cuda.is_available():
@@ -223,4 +253,5 @@ def test_nep_virial_gpu_backward_uses_each_batch_gradient():
 if __name__ == "__main__":
     test_force_virial_helper_matches_radial_cpu_formula()
     test_radial_analytical_force_matches_autograd_on_gpu_backend()
+    test_nep_force_gpu_backward_accumulates_neighbor_gradient()
     test_nep_virial_gpu_backward_uses_each_batch_gradient()

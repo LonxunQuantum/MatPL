@@ -214,7 +214,7 @@ class UniDataset(Dataset):
         else:
             self.energy_shift = [0 for _ in self.atom_types] # for valid or test the energy shift is reused from models
         
-        self.avg_image_atom = np.mean(atom_avg_list)        
+        self.avg_image_atom = np.mean(atom_avg_list) if atom_avg_list else 0.0
         return self.image_list, len(self.image_list)
 
     def set_energy_shift_2(self, class_dict):

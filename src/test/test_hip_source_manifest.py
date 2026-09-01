@@ -65,14 +65,14 @@ class HipSourceManifestTests(unittest.TestCase):
     def test_hip_force_launches_fit_dtk_kernel_bounds(self):
         oversized = []
         launch_pattern = re.compile(
-            r"(?:const\s+)?int\s+LEN\s*=\s*(\d+)\s*;"
-            r"(?:(?!LEN\s*=).){0,240}?dim3\s+thread_grid\s*\(\s*LEN\s*,\s*3\s*\)",
+            r"(?:(?:const\s+)?int\s+)?LEN\s*=\s*(\d+)\s*;"
+            r"(?:(?!LEN\s*=).){0,240}?dim3\s+thread_grid_?\s*\(\s*LEN\s*,\s*([34])\s*\)",
             flags=re.DOTALL,
         )
         for filename in ("calculateForce.hip", "calculateNepForce.hip"):
             source = (HIP_ROOT / filename).read_text()
             for match in launch_pattern.finditer(source):
-                threads = int(match.group(1)) * 3
+                threads = int(match.group(1)) * int(match.group(2))
                 if threads > 256:
                     oversized.append(f"{filename}:{threads}")
 
