@@ -30,7 +30,7 @@
     },
     "optimizer": {
         "optimizer": "ADAM",
-        "epochs": 4,
+        "epochs": 1,
         "batch_size": 32,
         "scaling_method":"sqrt",
         "scale_lr":true,

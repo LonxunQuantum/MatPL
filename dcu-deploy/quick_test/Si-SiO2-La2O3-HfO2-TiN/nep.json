@@ -40,7 +40,7 @@
     },
     "optimizer": {
         "optimizer": "ADAM",
-        "epochs": 4,
+        "epochs": 1,
         "batch_size": 32,
         "print_freq": 10,
         "max_norm": 0.5,

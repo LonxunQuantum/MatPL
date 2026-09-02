@@ -35,7 +35,7 @@
         "optimizer": "ADAM",
         "scaling_method":"sqrt",
         "scale_lr":true,
-        "epochs": 4,
+        "epochs": 1,
         "batch_size": 32,
         "print_freq": 10,
         "max_norm": 5.0,
