@@ -3,6 +3,7 @@ import json
 import math
 import operator
 import os
+import random
 import zlib
 from collections import OrderedDict
 from pathlib import Path
@@ -111,6 +112,133 @@ class AseLmdbShard:
             if mapped == row_id:
                 return row_id
             row_id = mapped
+
+
+class BlockShuffleIndices:
+    """Stream a global permutation while materializing only one index block."""
+
+    def __init__(self, size, block_size, seed, epoch=0, shuffle=True):
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError("size must be a non-negative integer")
+        if (
+            isinstance(block_size, bool)
+            or not isinstance(block_size, int)
+            or block_size < 1
+        ):
+            raise ValueError("block_size must be a positive integer")
+        self.size = size
+        self.block_size = block_size
+        self.seed = seed
+        self.epoch = epoch
+        self.shuffle = shuffle
+        self.current_buffered = 0
+        self.peak_buffered = 0
+
+    def __len__(self):
+        return self.size
+
+    def __iter__(self):
+        self.current_buffered = 0
+        self.peak_buffered = 0
+        if not self.shuffle:
+            yield from range(self.size)
+            return
+
+        random_generator = random.Random(self.seed + self.epoch)
+        block_count = (self.size + self.block_size - 1) // self.block_size
+        block_ids = list(range(block_count))
+        random_generator.shuffle(block_ids)
+        for block_id in block_ids:
+            start = block_id * self.block_size
+            stop = min(start + self.block_size, self.size)
+            block = list(range(start, stop))
+            random_generator.shuffle(block)
+            self.current_buffered = len(block)
+            self.peak_buffered = max(self.peak_buffered, self.current_buffered)
+            yield from block
+            self.current_buffered = 0
+
+
+class DistributedFrameBatchSampler:
+    """Build global frame batches, then give each rank a disjoint slice."""
+
+    def __init__(
+        self,
+        dataset_size,
+        batch_size,
+        rank,
+        world_size,
+        seed=2023,
+        shuffle=True,
+        block_size=65536,
+    ):
+        integer_arguments = {
+            "dataset_size": dataset_size,
+            "batch_size": batch_size,
+            "rank": rank,
+            "world_size": world_size,
+            "block_size": block_size,
+        }
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in integer_arguments.values()
+        ):
+            raise ValueError("sampler sizes and rank must be integers")
+        if dataset_size < 0:
+            raise ValueError("dataset_size must be non-negative")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if world_size < 1:
+            raise ValueError("world_size must be positive")
+        if rank < 0 or rank >= world_size:
+            raise ValueError("rank must be in [0, world_size)")
+        if block_size < 1:
+            raise ValueError("block_size must be positive")
+
+        self.dataset_size = dataset_size
+        self.batch_size = batch_size
+        self.rank = rank
+        self.world_size = world_size
+        self.seed = seed
+        self.shuffle = shuffle
+        self.block_size = block_size
+        self.epoch = 0
+        self.peak_buffered = 0
+
+    @property
+    def super_batch_size(self):
+        return self.batch_size * self.world_size
+
+    def __len__(self):
+        return self.dataset_size // self.super_batch_size
+
+    def set_epoch(self, epoch):
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+            raise ValueError("epoch must be a non-negative integer")
+        self.epoch = epoch
+
+    def __iter__(self):
+        indices = BlockShuffleIndices(
+            self.dataset_size,
+            self.block_size,
+            self.seed,
+            epoch=self.epoch,
+            shuffle=self.shuffle,
+        )
+        super_batch = []
+        self.peak_buffered = 0
+        rank_start = self.rank * self.batch_size
+        rank_stop = rank_start + self.batch_size
+        for index in indices:
+            super_batch.append(index)
+            self.peak_buffered = max(
+                self.peak_buffered,
+                indices.current_buffered + len(super_batch),
+            )
+            if len(super_batch) == self.super_batch_size:
+                rank_batch = super_batch[rank_start:rank_stop]
+                super_batch = []
+                yield rank_batch
 
 
 def _get_det(box: np.ndarray) -> float:
