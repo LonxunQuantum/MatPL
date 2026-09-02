@@ -58,3 +58,4 @@ src/test/test_workdir*
 src/test/tmp.py
 src/test/template_lmps.json
 src/test/test_util/test_result_detail*
+.worktrees/
