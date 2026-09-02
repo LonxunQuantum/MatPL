@@ -241,6 +241,134 @@ class DistributedFrameBatchSampler:
                 yield rank_batch
 
 
+def select_stat_indices(
+    size,
+    requested,
+    rank,
+    world_size,
+    seed,
+    per_rank_cap=32768,
+):
+    """Select one deterministic global sample and return this rank's sorted slice."""
+    arguments = {
+        "size": size,
+        "requested": requested,
+        "rank": rank,
+        "world_size": world_size,
+        "per_rank_cap": per_rank_cap,
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in arguments.values()
+    ):
+        raise ValueError("statistics sizes and rank must be integers")
+    if size < 0:
+        raise ValueError("size must be non-negative")
+    if requested < 1:
+        raise ValueError("requested must be positive")
+    if world_size < 1:
+        raise ValueError("world_size must be positive")
+    if rank < 0 or rank >= world_size:
+        raise ValueError("rank must be in [0, world_size)")
+    if per_rank_cap < 1:
+        raise ValueError("per_rank_cap must be positive")
+
+    global_count = min(size, requested, per_rank_cap * world_size)
+    global_indices = random.Random(seed).sample(range(size), global_count)
+    return sorted(global_indices[rank::world_size])
+
+
+class LmdbEnergyStatistics:
+    """Mergeable normal equations and atom-count summaries for LMDB frames."""
+
+    def __init__(self, atom_type_count):
+        if (
+            isinstance(atom_type_count, bool)
+            or not isinstance(atom_type_count, int)
+            or atom_type_count < 1
+        ):
+            raise ValueError("atom_type_count must be a positive integer")
+        self.atom_type_count = atom_type_count
+        self.ata = np.zeros((atom_type_count, atom_type_count), dtype=np.float64)
+        self.ate = np.zeros(atom_type_count, dtype=np.float64)
+        self.frame_count = 0
+        self.atom_count_sum = 0
+        self.max_atoms = 0
+
+    def update(self, composition, energy):
+        composition = np.asarray(composition, dtype=np.float64)
+        if composition.shape != (self.atom_type_count,):
+            raise ValueError(
+                "composition has shape {}, expected ({},)".format(
+                    composition.shape, self.atom_type_count
+                )
+            )
+        if (
+            not np.isfinite(composition).all()
+            or (composition < 0).any()
+            or not np.equal(composition, np.floor(composition)).all()
+        ):
+            raise ValueError("composition must contain finite non-negative counts")
+        try:
+            energy = float(energy)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("energy must be a finite scalar") from exc
+        if not np.isfinite(energy):
+            raise ValueError("energy must be a finite scalar")
+
+        atom_count = int(composition.sum())
+        self.ata += np.outer(composition, composition)
+        self.ate += composition * energy
+        self.frame_count += 1
+        self.atom_count_sum += atom_count
+        self.max_atoms = max(self.max_atoms, atom_count)
+
+    def update_from_sample(self, sample):
+        atom_type_map = sample["atom_type_map"]
+        if isinstance(atom_type_map, torch.Tensor):
+            atom_type_map = atom_type_map.detach().cpu().numpy()
+        atom_type_map = np.asarray(atom_type_map, dtype=np.int64).reshape(-1)
+        if (
+            (atom_type_map < 0).any()
+            or (atom_type_map >= self.atom_type_count).any()
+        ):
+            raise ValueError("atom_type_map contains an out-of-range type index")
+        composition = np.bincount(
+            atom_type_map, minlength=self.atom_type_count
+        ).astype(np.float64)
+        energy = sample["energy"]
+        if isinstance(energy, torch.Tensor):
+            energy = energy.detach().cpu().numpy()
+        energy = np.asarray(energy)
+        if energy.size != 1:
+            raise ValueError("sample energy must contain one scalar")
+        self.update(composition, energy.reshape(-1)[0])
+
+    def merge(self, other):
+        if not isinstance(other, LmdbEnergyStatistics):
+            raise TypeError("can only merge LmdbEnergyStatistics")
+        if other.atom_type_count != self.atom_type_count:
+            raise ValueError("statistics atom type counts do not match")
+        self.ata += other.ata
+        self.ate += other.ate
+        self.frame_count += other.frame_count
+        self.atom_count_sum += other.atom_count_sum
+        self.max_atoms = max(self.max_atoms, other.max_atoms)
+        return self
+
+    @property
+    def average_atoms(self):
+        if self.frame_count == 0:
+            return 0.0
+        return self.atom_count_sum / self.frame_count
+
+    def energy_shift(self):
+        if self.frame_count == 0:
+            raise ValueError("cannot solve energy shift with no frames")
+        shift, _, _, _ = np.linalg.lstsq(self.ata, self.ate, rcond=None)
+        return shift.tolist()
+
+
 def _get_det(box: np.ndarray) -> float:
     return float(np.linalg.det(box.reshape((3, 3))))
 
