@@ -56,7 +56,7 @@ def load_calc_ops(torch_module=torch, src_root: Path | None = None):
     if not library_path.is_file():
         raise FileNotFoundError(
             f"CalcOps {backend} library not found at {library_path}. "
-            f"Build it with ./src/build.sh --gpu-backend {backend}."
+            "Build the accelerator and CPU fallback with ./src/build.sh."
         )
 
     torch_module.ops.load_library(str(library_path))

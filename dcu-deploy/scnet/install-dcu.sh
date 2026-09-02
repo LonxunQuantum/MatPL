@@ -15,5 +15,4 @@ source "$SCRIPT_DIR/setup-dcu-env.sh"
 
 "$PROJECT_ROOT/src/build.sh" \
     "$@" \
-    --gpu-backend hip \
     "-j$MATPL_BUILD_JOBS"

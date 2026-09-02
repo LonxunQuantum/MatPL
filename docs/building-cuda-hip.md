@@ -25,29 +25,30 @@ CUDA 与 HIP 构建目录互不复用，切换后端不会覆盖另一后端的�
 
 ## 2. 通用编译入口
 
-在仓库根目录执行：
+在仓库根目录执行统一构建命令：
 
 ```bash
-src/build.sh --gpu-backend auto -j4
+src/build.sh -j4
 ```
 
-`--gpu-backend` 支持：
+脚本根据当前 PyTorch 自动识别后端，并始终构建 CPU 算子作为运行时托底：
 
-- `auto`：根据当前 PyTorch 的 `torch.version.hip` / `torch.version.cuda` 自动选择；
-- `cuda`：只编译 NVIDIA CUDA 算子；
-- `hip`：只编译 DCU/HIP 算子；
-- `cpu`：只编译 CPU 算子。
+- CUDA PyTorch：构建 CUDA 与 CPU 算子；
+- HIP PyTorch：构建 HIP 与 CPU 算子；
+- CPU PyTorch：只构建 CPU 算子。
+
+CPU 算子是必需的 fallback，CPU 构建失败会使整个构建失败。构建脚本不再提供手动选择 CUDA、HIP 或 CPU 的参数。
 
 可以先查看将要执行的命令而不产生构建文件：
 
 ```bash
-src/build.sh --gpu-backend hip --dry-run -j4
+src/build.sh --dry-run -j4
 ```
 
 需要 NN/Linear 的 Fortran 程序时，继续使用原有参数：
 
 ```bash
-src/build.sh --gpu-backend cuda -j8 -m nn
+src/build.sh -j8 -m nn
 ```
 
 ## 3. NVIDIA CUDA 环境
@@ -57,7 +58,7 @@ src/build.sh --gpu-backend cuda -j8 -m nn
 ```bash
 python -c "import torch; print(torch.version.cuda)"
 command -v nvcc
-src/build.sh --gpu-backend cuda -j4
+src/build.sh -j4
 ```
 
 主要产物为：
@@ -75,8 +76,8 @@ src/feature/NEP_GPU/build/cuda/nep_gpu.so
 仓库提供了参数化环境脚本；必须使用 `source`，以便环境保留在当前 shell：
 
 ```bash
-source deploy/scnet/setup-dcu-env.sh
-src/build.sh --gpu-backend hip -j4
+source dcu-deploy/scnet/setup-dcu-env.sh
+src/build.sh -j4
 ```
 
 也可以使用一体化入口：
