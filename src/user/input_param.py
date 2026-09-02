@@ -213,6 +213,11 @@ class InputParam(object):
         self.data_shuffle = get_parameter("data_shuffle", json_input, True)
         self.seed = get_parameter("seed", json_input, 2023)
         self.precision = get_parameter("precision", json_input, "float64")
+        self.lmdb_stat_frames = get_parameter("lmdb_stat_frames", json_input, 32768)
+        if (isinstance(self.lmdb_stat_frames, bool) or
+                not isinstance(self.lmdb_stat_frames, int) or
+                self.lmdb_stat_frames <= 0):
+            raise ValueError("lmdb_stat_frames must be a positive integer")
 
     '''
     description: 
@@ -340,6 +345,8 @@ class InputParam(object):
         file_dir_dict = self.file_paths.to_dict()
         for key in file_dir_dict:
             params_dict[key] = file_dir_dict[key]
+        if self.file_paths.format == "lmdb":
+            params_dict["lmdb_stat_frames"] = self.lmdb_stat_frames
         return params_dict
     
     def print_input_params(self, json_file_save_name="json_all.json"):

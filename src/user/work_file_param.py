@@ -164,6 +164,21 @@ class WorkFileStructure(object):
         if self.model_type.upper() in ["NN", "LINEAR"]:
             if self.format != "pwmat/movement":
                 raise Exception("Error! For NN or Linear model, the input 'format' should be 'pwmat/movement'!")
+
+        if self.format == "lmdb":
+            from src.pre_data.nep_lmdb_dataset import discover_aselmdb_files
+
+            def expand_paths(key):
+                data_paths = get_parameter(key, json_input, [])
+                if not isinstance(data_paths, list):
+                    data_paths = [data_paths]
+                return discover_aselmdb_files(data_paths)
+
+            self.train_data_path = expand_paths("train_data")
+            self.valid_data_path = expand_paths("valid_data")
+            self.test_data_path = expand_paths("test_data")
+            return
+
         train_data = get_parameter("train_data", json_input, [])
         if not isinstance(train_data, list):
             train_data = [train_data]
