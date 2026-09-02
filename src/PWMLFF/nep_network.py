@@ -477,6 +477,23 @@ def _set_data_loader_epoch(loader, epoch):
         sampler.set_epoch(epoch)
 
 
+def _set_training_loader_epoch(loader, epoch, input_param):
+    """Advance the sampler and reject an epoch with no rank-complete work."""
+    _set_data_loader_epoch(loader, epoch)
+    if input_param.file_paths.format != "lmdb":
+        return
+    batch_mode, batch_value = parse_lmdb_batch_size(
+        input_param.optimizer_param.batch_size
+    )
+    _require_lmdb_training_batches(
+        loader.batch_sampler,
+        dataset_size=len(loader.dataset),
+        batch_mode=batch_mode,
+        batch_value=batch_value,
+        world_size=max(int(input_param.world_size), 1),
+    )
+
+
 class nep_network:
     def __init__(self, nep_param:InputParam):
         self.input_param = nep_param
@@ -1234,7 +1251,9 @@ class nep_network:
         for epoch in range(self.input_param.optimizer_param.start_epoch, self.input_param.optimizer_param.epochs + 1):
             time_start = time.time()
             # 设置 sampler 的 epoch 以确保 shuffle 一致
-            _set_data_loader_epoch(train_loader, epoch)
+            _set_training_loader_epoch(
+                train_loader, epoch, self.input_param
+            )
 
             if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
                 loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, loss_l1, loss_l2 = train_KF(

@@ -217,6 +217,30 @@ class NepLmdbLoadDataIntegrationTest(unittest.TestCase):
                 world_size=2,
             )
 
+    def test_mix_batches_are_revalidated_after_each_epoch_shuffle(self):
+        module = _load_network_module()
+        sampler = DistributedAtomBatchSampler(
+            [6, 6, 4, 4],
+            atom_budget=10,
+            rank=0,
+            world_size=3,
+            seed=6,
+            shuffle=True,
+        )
+        loader = SimpleNamespace(batch_sampler=sampler, dataset=range(4))
+        input_param = SimpleNamespace(
+            file_paths=SimpleNamespace(format="lmdb"),
+            optimizer_param=SimpleNamespace(batch_size="mix:10"),
+            world_size=3,
+        )
+        self.assertEqual(len(sampler), 1)
+
+        with self.assertRaisesRegex(ValueError, "mix:10.*3 ranks"):
+            module._set_training_loader_epoch(loader, 1, input_param)
+
+        self.assertEqual(sampler.epoch, 1)
+        self.assertEqual(len(sampler), 0)
+
     def test_empty_multirank_stat_slice_uses_reduction_identities(self):
         module = _load_network_module()
         with tempfile.TemporaryDirectory() as tmpdir:
