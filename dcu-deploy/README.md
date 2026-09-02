@@ -54,40 +54,36 @@ DTK 初始化时可能提示 `rocm_smi` 路径不存在并回退到默认库。�
 
 ### 3.1 提交全部测试
 
-进入快速测试目录：
+快速测试会在 `quick_test` 下创建临时输出目录 `quick_train`，再次运行时会先删除并重建该目录。为避免临时文件污染源码目录或误删需要保留的测试结果，建议先将整个 `quick_test` 复制到源码目录之外，再在副本中执行测试：
+
+脚本必须指定当前环境对应的 Slurm job 文件。DCU 环境使用：
 
 ```bash
-cd /public/home/pwmat/wuxing/MatPL-main-2026.3/dcu-deploy/quick_test
+./run_quick_train.sh dcu.job
 ```
 
-使用默认输出目录 `./quick_train`，并行提交所有测试：
+NVIDIA/CUDA 环境使用：
 
 ```bash
-./run_quick_train.sh
+./run_quick_train.sh cuda.job
 ```
 
-也可以指定其他输出目录：
-
-```bash
-./run_quick_train.sh /public/home/pwmat/wuxing/training_test/my_quick_train
-```
+相对 job 文件名按当前 `quick_test` 副本解析。未指定 job 文件或文件不存在时，脚本会直接报错.
 
 脚本会执行以下操作：
 
 1. 为 5 个测试体系分别准备 `batch_size=1` 和 `batch_size=32`，共 10 个任务；
 2. 将每个案例复制到独立工作目录；
-3. 自动修改复制后的 `nep.json`；
+3. 将指定的 job 文件复制到每个任务目录并命名为 `run.sh`；
 4. 通过 `sbatch` 提交全部任务；
 5. 将任务编号、batch size 和工作目录写入 `jobs.tsv`。
 
-**注意：如果指定的输出目录已经存在，脚本会先将其完整删除再重新创建。不要把源码目录、用户主目录或需要保留数据的目录作为输出目录。**
-
 ### 3.2 任务结束后比较结果
 
-等待全部任务结束后，由用户手动运行：
+等待全部任务结束后，在刚才创建的 `quick_test` 副本中由用户手动运行：
 
 ```bash
-cd /public/home/pwmat/wuxing/MatPL-main-2026.3/dcu-deploy/quick_test
+cd "$test_dir"
 python3 compare_quick_train.py quick_train
 ```
 
@@ -110,42 +106,3 @@ Summary: 10/10 passed, 0/10 failed
 
 该测试用于快速发现数据读取、前向计算、反向传播或算子修改造成的明显回归。它只验证第一个 epoch，不能替代更长时间训练、断点恢复、学习率重启和完整精度验证。
 
-## 4. 推荐工作流程
-
-优化代码后按以下顺序执行：
-
-```bash
-cd /public/home/pwmat/wuxing/MatPL-main-2026.3
-
-# 修改了原生算子或构建文件时重新编译
-MATPL_BUILD_JOBS=4 ./dcu-deploy/scnet/install-dcu.sh
-
-# 加载本次构建
-source dcu-deploy/scnet/setup-dcu-env.sh
-source env.sh
-
-# 提交快速测试
-cd dcu-deploy/quick_test
-./run_quick_train.sh
-
-# 等待 squeue 中的任务全部结束后比较
-python3 compare_quick_train.py quick_train
-```
-
-只有 `Summary: 10/10 passed, 0/10 failed` 才表示本轮快速回归全部通过。
-
-## 5. 仓库路径变化
-
-`quick_test/*/run.sh` 中使用了当前仓库的绝对路径，以确保 Slurm 计算节点加载正确源码。如果仓库被移动或复制到其他位置，需要同步修改这些作业脚本中的两行：
-
-```bash
-source <新的仓库路径>/dcu-deploy/scnet/setup-dcu-env.sh
-source <新的仓库路径>/env.sh
-```
-
-可使用以下命令检查所有案例加载的路径：
-
-```bash
-cd /public/home/pwmat/wuxing/MatPL-main-2026.3/dcu-deploy
-grep -H "^source " quick_test/*/run.sh
-```

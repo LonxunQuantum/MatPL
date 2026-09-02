@@ -53,15 +53,26 @@ assert_not_contains() {
     fi
 }
 
+help_output=$(bash "$BUILD_SCRIPT" -h)
+assert_contains "$help_output" "Environment variables:"
+assert_contains "$help_output" "MATPL_CUDA_ARCHITECTURES"
+assert_contains "$help_output" "Default: 60;70;75;80;86;89;90"
+assert_contains "$help_output" "V100=70, A100=80, RTX 3090=86"
+assert_contains "$help_output" "RTX 4090=89, H20/H100=90"
+assert_contains "$help_output" "export MATPL_CUDA_ARCHITECTURES=86"
+assert_contains "$help_output" 'export MATPL_CUDA_ARCHITECTURES="70;80;86;90"'
+
 cuda_output=$(run_dry cuda)
 assert_contains "$cuda_output" "Resolved accelerator backend: cuda"
 assert_contains "$cuda_output" "Operator build backends: cuda cpu"
+assert_contains "$cuda_output" "-DCMAKE_CUDA_ARCHITECTURES=60;70;75;80;86;89;90"
 assert_contains "$cuda_output" "$PROJECT_ROOT/src/op/build/cuda -DMATPL_GPU_BACKEND=CUDA"
 assert_contains "$cuda_output" "$PROJECT_ROOT/src/op/build/cpu -DMATPL_GPU_BACKEND=CPU"
 
 hip_output=$(run_dry hip)
 assert_contains "$hip_output" "Resolved accelerator backend: hip"
 assert_contains "$hip_output" "Operator build backends: hip cpu"
+assert_not_contains "$hip_output" "-DCMAKE_CUDA_ARCHITECTURES="
 assert_contains "$hip_output" "$PROJECT_ROOT/src/op/build/hip -DMATPL_GPU_BACKEND=HIP"
 assert_contains "$hip_output" "$PROJECT_ROOT/src/op/build/cpu -DMATPL_GPU_BACKEND=CPU"
 

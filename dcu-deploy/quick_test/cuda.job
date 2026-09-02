@@ -1,0 +1,20 @@
+#!/bin/bash -l
+#SBATCH --job-name=matpl_test
+#SBATCH --partition=3080ti,3090,q4
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:1
+
+
+module purge
+
+source /data/home/wuxingxing/anaconda3/etc/profile.d/conda.sh
+conda activate matpl-2026.3
+
+#source  ~/xcode/qnep-elec/env.sh 
+source /data/home/wuxingxing/xcode/MatPL-dcu-merge/env.sh
+
+which MATPL
+MATPL train nep.json
+

@@ -52,23 +52,34 @@ os.replace(temporary, path)
 PY
 }
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+(( $# == 1 )) || die "job file is required. Usage: sh $(basename -- "$0") <job-file>"
+
 command -v python3 >/dev/null 2>&1 || die "python3 was not found"
 command -v sbatch >/dev/null 2>&1 || die "sbatch was not found"
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-output_dir=$(canonical_path "${1:-${PWD}/quick_train}")
+if [[ $1 == /* ]]; then
+    job_file=$(canonical_path "$1")
+else
+    job_file=$(canonical_path "$script_dir/$1")
+fi
+[[ -f "$job_file" ]] || die "job file was not found: $job_file"
+
+output_dir=$(canonical_path "$script_dir/quick_train")
 home_dir=$(canonical_path "${HOME:-/}")
 
 [[ "$output_dir" != "/" ]] || die "refusing to use / as the output directory"
 [[ "$output_dir" != "$home_dir" ]] || die "refusing to use the home directory as output"
 [[ "$output_dir" != "$script_dir" ]] || die "refusing to delete the quick_test source directory"
 [[ "$script_dir" != "$output_dir/"* ]] || die "refusing to delete an ancestor of quick_test"
+[[ "$job_file" != "$output_dir" && "$job_file" != "$output_dir/"* ]] || \
+    die "job file must be outside the output directory: $job_file"
 
 for case in "${CASES[@]}"; do
     case_dir="$script_dir/$case"
     [[ "$output_dir" != "$case_dir" ]] || die "refusing to use source case $case as output"
     [[ "$output_dir" != "$case_dir/"* ]] || die "refusing to use a path inside source case $case as output"
-    for required in nep.json run.sh batch1_epoch_train.dat batch32_epoch_train.dat; do
+    for required in nep.json batch1_epoch_train.dat batch32_epoch_train.dat; do
         [[ -f "$case_dir/$required" ]] || die "missing required file: $case_dir/$required"
     done
 done
@@ -88,6 +99,7 @@ for case in "${CASES[@]}"; do
         job_dir="$output_dir/$case/batch$batch_size"
         mkdir -p -- "$job_dir"
         cp -a -- "$script_dir/$case/." "$job_dir/"
+        cp -a -- "$job_file" "$job_dir/run.sh"
         rm -rf -- "$job_dir/model_record" "$job_dir/test_result"
         find "$job_dir" -maxdepth 1 -type f -name 'slurm-*.out' -delete
         set_batch_size "$job_dir/nep.json" "$batch_size"

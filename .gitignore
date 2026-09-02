@@ -8,6 +8,8 @@ src/test/dev_gpu_nep_dp
 train*
 !dcu-deploy/quick_test/AuAg/train.xyz
 !dcu-deploy/quick_test/LiSiC/train.xyz
+!dcu-deploy/quick_test_cuda/AuAg/train.xyz
+!dcu-deploy/quick_test_cuda/LiSiC/train.xyz
 datas
 datas/*
 *.o
