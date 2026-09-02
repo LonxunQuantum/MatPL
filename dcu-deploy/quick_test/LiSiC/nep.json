@@ -1,0 +1,31 @@
+{
+    "model_type": "NEP",
+    "atom_type": [3, 14, 6],
+    "optimizer": {
+        "optimizer": "ADAM",
+        "epochs": 4,
+        "batch_size": 1,
+        "print_freq": 10,
+        "learning_rate": 0.001,
+        "stop_lr": 3.51e-08,
+        "stop_step": 1000000,
+        "decay_step": 5000,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial": true,
+        "start_pre_fac_force": 1000,
+        "start_pre_fac_etot": 0.02,
+        "start_pre_fac_virial": 50.0,
+        "end_pre_fac_force": 1.0,
+        "end_pre_fac_etot": 1.0,
+        "end_pre_fac_virial": 1.0,
+        "max_norm": 0.5,
+        "norm_type": 2,
+        "t_0": 2,
+        "t_mult": 2
+    },
+    "format":"extxyz",
+    "train_data":"train.xyz"
+}
+
+

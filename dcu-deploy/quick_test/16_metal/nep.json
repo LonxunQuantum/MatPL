@@ -1,0 +1,51 @@
+{
+    "model_type": "NEP",
+    "atom_type": ["Ag", "Al", "Au", "Cr", "Cu", "Mg", "Mo", "Ni", "Pb", "Pd", "Pt", "Ta", "Ti", "V", "W", "Zr"],
+    "model": {
+        "descriptor": {
+            "cutoff": [
+                6.0,
+                4.0
+            ],
+            "n_max": [
+                6,
+                4
+            ],
+            "basis_size": [
+                12,
+                8
+            ],
+            "l_max": [
+                4,
+                2,
+                0
+            ]
+        },
+        "fitting_net": {
+            "network_size": [
+                80,
+                1
+            ]
+        }
+    },
+    "optimizer": {
+        "optimizer": "ADAM",
+        "epochs": 4,
+        "batch_size": 32,
+        "scaling_method":"sqrt",
+        "scale_lr":true,
+      "max_norm": 0.5,
+	"norm_type": 2,
+        "t_0": 2,
+        "t_mult": 2,
+	"print_freq": 10,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial": true
+    },
+    "format": "extxyz",
+    "train_data": [
+        "mini-1comp.xyz",  "mini-2comp.xyz"
+    ]
+}
+

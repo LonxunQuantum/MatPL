@@ -1,0 +1,59 @@
+{
+    "model_type": "NEP",
+    "atom_type": [
+        1,
+        14,
+        8,
+        13,
+        72,
+        57,
+        22,
+        7
+    ],
+    "recover_train": true,
+    "model": {
+        "descriptor": {
+            "cutoff": [
+                6.0,
+                4.0
+            ],
+            "n_max": [
+                16,
+                12
+            ],
+            "basis_size": [
+                12,
+                8
+            ],
+            "l_max": [
+                4,
+                2,
+                1
+            ]
+        },
+        "fitting_net": {
+            "network_size": [
+                60,
+                1
+            ]
+        }
+    },
+    "optimizer": {
+        "optimizer": "ADAM",
+        "epochs": 4,
+        "batch_size": 32,
+        "print_freq": 10,
+        "max_norm": 0.5,
+        "norm_type": 2,
+        "t_0": 2,
+        "t_mult": 2,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial": true,
+        "learning_rate": 0.001
+    },
+    "train_data": [
+        "mini_1420.xyz"
+    ],
+    "format":"extxyz"
+}
