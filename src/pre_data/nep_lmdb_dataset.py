@@ -5,6 +5,7 @@ import math
 import operator
 import os
 import random
+import re
 import tempfile
 import zlib
 from collections import OrderedDict
@@ -18,6 +19,19 @@ from torch.utils.data import Dataset
 
 
 PathLike = Union[str, os.PathLike]
+
+
+def parse_lmdb_batch_size(value):
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return "frames", value
+    if isinstance(value, str):
+        match = re.fullmatch(r"mix:([1-9][0-9]*)", value.strip(), re.IGNORECASE)
+        if match is not None:
+            return "atoms", int(match.group(1))
+    raise ValueError(
+        "LMDB optimizer.batch_size must be a positive integer or 'mix:N' "
+        "with a positive atom budget"
+    )
 
 
 def discover_aselmdb_files(paths: Iterable[PathLike]) -> List[str]:
@@ -130,7 +144,7 @@ class BlockShuffleIndices:
             raise ValueError("block_size must be a positive integer")
         self.size = size
         self.block_size = block_size
-        self.seed = seed
+        self.seed = 0 if seed is None else seed
         self.epoch = epoch
         self.shuffle = shuffle
         self.current_buffered = 0
@@ -276,7 +290,9 @@ def select_stat_indices(
         raise ValueError("per_rank_cap must be positive")
 
     global_count = min(size, requested, per_rank_cap * world_size)
-    global_indices = random.Random(seed).sample(range(size), global_count)
+    global_indices = random.Random(0 if seed is None else seed).sample(
+        range(size), global_count
+    )
     return sorted(global_indices[rank::world_size])
 
 

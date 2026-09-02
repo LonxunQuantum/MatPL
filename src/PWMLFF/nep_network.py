@@ -17,6 +17,15 @@ import numpy as np
 import pandas as pd
 from src.model.nep_net import NEP
 from src.pre_data.nep_data_loader import calculate_neighbor_num_max_min, calculate_neighbor_scaler, UniDataset, variable_length_collate_fn, variable_length_collate_fn_nolimit, calculate_batch, type_map, NepTestData
+from src.pre_data.nep_lmdb_dataset import (
+    DistributedAtomBatchSampler,
+    DistributedFrameBatchSampler,
+    LmdbEnergyStatistics,
+    LmdbNatomsCache,
+    NepLmdbDataset,
+    parse_lmdb_batch_size,
+    select_stat_indices,
+)
 from src.PWMLFF.nep_mods.nep_trainer import train_KF, train, valid, save_checkpoint, predict
 from src.user.input_param import InputParam
 from src.utils.file_operation import write_arrays_to_file, write_force_ei
@@ -399,6 +408,16 @@ def _run_nep_txt_inference_worker(nep_txt_path, indexed_images, input_atom_types
     ]
 
 
+def _set_data_loader_epoch(loader, epoch):
+    batch_sampler = getattr(loader, "batch_sampler", None)
+    if hasattr(batch_sampler, "set_epoch"):
+        batch_sampler.set_epoch(epoch)
+        return
+    sampler = getattr(loader, "sampler", None)
+    if isinstance(sampler, torch.utils.data.distributed.DistributedSampler):
+        sampler.set_epoch(epoch)
+
+
 class nep_network:
     def __init__(self, nep_param:InputParam):
         self.input_param = nep_param
@@ -431,12 +450,240 @@ class nep_network:
 
         self.criterion = nn.MSELoss().to(self.device)
 
+    def _lmdb_loader(self, dataset, batch_sampler, collate_fn, persistent=True):
+        loader_options = {
+            "dataset": dataset,
+            "batch_sampler": batch_sampler,
+            "collate_fn": collate_fn,
+            "num_workers": self.input_param.workers,
+            "pin_memory": True,
+        }
+        if self.input_param.workers > 0:
+            loader_options["prefetch_factor"] = 2
+            loader_options["persistent_workers"] = persistent
+        return torch.utils.data.DataLoader(**loader_options)
+
+    def _reduce_lmdb_statistics(self, local_statistics):
+        atom_type_count = local_statistics.atom_type_count
+        sum_values = np.concatenate(
+            [
+                local_statistics.ata.reshape(-1),
+                local_statistics.ate,
+                np.asarray(
+                    [
+                        local_statistics.frame_count,
+                        local_statistics.atom_count_sum,
+                    ],
+                    dtype=np.float64,
+                ),
+            ]
+        )
+        sum_tensor = torch.as_tensor(
+            sum_values, dtype=torch.float64, device=self.device
+        )
+        max_tensor = torch.tensor(
+            [local_statistics.max_atoms], dtype=torch.int64, device=self.device
+        )
+        world_size = max(int(self.input_param.world_size), 1)
+        if world_size > 1:
+            if not dist.is_initialized():
+                raise RuntimeError(
+                    "distributed LMDB statistics require an initialized process group"
+                )
+            dist.all_reduce(sum_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(max_tensor, op=dist.ReduceOp.MAX)
+
+        reduced = sum_tensor.detach().cpu().numpy()
+        matrix_size = atom_type_count * atom_type_count
+        statistics = LmdbEnergyStatistics(atom_type_count)
+        statistics.ata = reduced[:matrix_size].reshape(
+            atom_type_count, atom_type_count
+        ).copy()
+        statistics.ate = reduced[
+            matrix_size:matrix_size + atom_type_count
+        ].copy()
+        statistics.frame_count = int(round(reduced[-2]))
+        statistics.atom_count_sum = int(round(reduced[-1]))
+        statistics.max_atoms = int(max_tensor.item())
+        return statistics
+
+    def _prepare_lmdb_statistics(self, dataset):
+        world_size = max(int(self.input_param.world_size), 1)
+        rank = int(self.input_param.rank) if world_size > 1 else 0
+        indices = select_stat_indices(
+            len(dataset),
+            self.input_param.lmdb_stat_frames,
+            rank,
+            world_size,
+            self.input_param.seed,
+        )
+        local_statistics = LmdbEnergyStatistics(len(dataset.atom_types))
+        for index in indices:
+            local_statistics.update_from_sample(dataset[index])
+        dataset.close()
+        statistics = self._reduce_lmdb_statistics(local_statistics)
+        if statistics.frame_count == 0:
+            raise ValueError("LMDB training data contains no frames")
+        dataset.energy_shift = statistics.energy_shift()
+        dataset.avg_image_atom = statistics.average_atoms
+        dataset.max_atom_nums = statistics.max_atoms
+        return indices, statistics
+
+    def _lmdb_natoms(self, dataset):
+        cache = LmdbNatomsCache(
+            dataset,
+            os.path.join(
+                self.input_param.file_paths.json_dir, ".matpl_lmdb_cache"
+            ),
+        )
+        world_size = max(int(self.input_param.world_size), 1)
+        rank = int(self.input_param.rank) if world_size > 1 else 0
+        cache.build_assigned(rank, world_size)
+        if world_size > 1:
+            dist.barrier()
+        cache.load()
+        if not hasattr(self, "_lmdb_natoms_caches"):
+            self._lmdb_natoms_caches = []
+        self._lmdb_natoms_caches.append(cache)
+        return cache
+
+    def _lmdb_batch_sampler(self, dataset, batch_mode, batch_value, shuffle):
+        world_size = max(int(self.input_param.world_size), 1)
+        rank = int(self.input_param.rank) if world_size > 1 else 0
+        if batch_mode == "frames":
+            return DistributedFrameBatchSampler(
+                len(dataset),
+                batch_value,
+                rank,
+                world_size,
+                seed=self.input_param.seed,
+                shuffle=shuffle,
+            )
+        natoms = self._lmdb_natoms(dataset) if len(dataset) > 0 else []
+        return DistributedAtomBatchSampler(
+            natoms,
+            batch_value,
+            rank,
+            world_size,
+            seed=self.input_param.seed,
+            shuffle=shuffle,
+        )
+
+    def _load_lmdb_data(self, fill_ion_bec):
+        if self.input_param.precision == "float32":
+            raise ValueError(
+                "NEP LMDB training requires precision 'float64' because the "
+                "current CalcOps descriptor kernel accepts double tensors"
+            )
+        dtype = (
+            torch.float32
+            if self.input_param.precision == "float32"
+            else torch.float64
+        )
+        common_dataset_options = {
+            "atom_types": self.input_param.atom_type,
+            "cutoff_radial": self.input_param.nep_param.cutoff[0],
+            "cutoff_angular": self.input_param.nep_param.cutoff[1],
+            "dtype": dtype,
+            "fill_metal_bec": fill_ion_bec,
+        }
+
+        if self.input_param.inference:
+            test_dataset = NepLmdbDataset(
+                self.input_param.file_paths.test_data_path,
+                cal_energy=False,
+                train_ei=False,
+                **common_dataset_options,
+            )
+            stat_indices, _ = self._prepare_lmdb_statistics(test_dataset)
+            test_sampler = DistributedFrameBatchSampler(
+                len(test_dataset), 1, 0, 1, seed=self.input_param.seed, shuffle=False
+            )
+            test_loader = self._lmdb_loader(
+                test_dataset,
+                test_sampler,
+                variable_length_collate_fn,
+            )
+            stat_batch_size = max(
+                1, calculate_batch(test_dataset.max_atom_nums, 400)
+            )
+            stat_sampler = torch.utils.data.BatchSampler(
+                stat_indices, stat_batch_size, drop_last=False
+            )
+            stat_loader = self._lmdb_loader(
+                test_dataset,
+                stat_sampler,
+                variable_length_collate_fn_nolimit,
+                persistent=False,
+            )
+            return test_dataset.get_energy_shift(), test_loader, None, stat_loader
+
+        train_dataset = NepLmdbDataset(
+            self.input_param.file_paths.train_data_path,
+            batch_max_types=self.input_param.max_allow_atom_type,
+            cal_energy=True,
+            train_ei=self.input_param.optimizer_param.train_ei,
+            **common_dataset_options,
+        )
+        valid_dataset = NepLmdbDataset(
+            self.input_param.file_paths.valid_data_path,
+            cal_energy=False,
+            train_ei=self.input_param.optimizer_param.train_ei,
+            **common_dataset_options,
+        )
+        stat_indices, statistics = self._prepare_lmdb_statistics(train_dataset)
+        batch_mode, batch_value = parse_lmdb_batch_size(
+            self.input_param.optimizer_param.batch_size
+        )
+        self._lr_local_batch_size = (
+            batch_value
+            if batch_mode == "frames"
+            else max(1.0, batch_value / statistics.average_atoms)
+        )
+
+        train_sampler = self._lmdb_batch_sampler(
+            train_dataset,
+            batch_mode,
+            batch_value,
+            self.input_param.data_shuffle,
+        )
+        valid_sampler = self._lmdb_batch_sampler(
+            valid_dataset,
+            batch_mode,
+            batch_value,
+            self.input_param.valid_shuffle,
+        )
+        train_loader = self._lmdb_loader(
+            train_dataset,
+            train_sampler,
+            variable_length_collate_fn,
+        )
+        val_loader = self._lmdb_loader(
+            valid_dataset,
+            valid_sampler,
+            variable_length_collate_fn,
+        )
+
+        stat_batch_size = max(1, calculate_batch(statistics.max_atoms, 400))
+        stat_sampler = torch.utils.data.BatchSampler(
+            stat_indices, stat_batch_size, drop_last=False
+        )
+        stat_loader = self._lmdb_loader(
+            train_dataset,
+            stat_sampler,
+            variable_length_collate_fn_nolimit,
+            persistent=False,
+        )
+        return train_dataset.get_energy_shift(), train_loader, val_loader, stat_loader
+
     def load_data(self):
         fill_ion_bec = (
             self.input_param.optimizer_param.train_bec
             and getattr(
                 self.input_param.optimizer_param, "train_bec_ion", False)
         )
+        if self.input_param.file_paths.format == "lmdb":
+            return self._load_lmdb_data(fill_ion_bec)
         if self.input_param.inference:# 只在debug ckpt 推理时启用
             test_dataset = UniDataset(self.input_param.file_paths.test_data_path, 
                                             self.input_param.file_paths.format, 
@@ -657,7 +904,11 @@ class nep_network:
                     "scale_method",
                     getattr(self.input_param.optimizer_param, "scaling_method", "sqrt"),
                 ),
-                self.input_param.optimizer_param.batch_size,
+                getattr(
+                    self,
+                    "_lr_local_batch_size",
+                    self.input_param.optimizer_param.batch_size,
+                ),
                 self.input_param.world_size,
                 avg_atom_num,
             )
@@ -912,8 +1163,7 @@ class nep_network:
         for epoch in range(self.input_param.optimizer_param.start_epoch, self.input_param.optimizer_param.epochs + 1):
             time_start = time.time()
             # 设置 sampler 的 epoch 以确保 shuffle 一致
-            if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
-                train_loader.sampler.set_epoch(epoch)
+            _set_data_loader_epoch(train_loader, epoch)
 
             if self.input_param.optimizer_param.opt_name == "LKF" or self.input_param.optimizer_param.opt_name == "GKF":
                 loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, loss_l1, loss_l2 = train_KF(

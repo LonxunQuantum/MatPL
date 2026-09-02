@@ -25,6 +25,11 @@ class BlockShuffleIndicesTest(unittest.TestCase):
         indices = BlockShuffleIndices(37, 8, seed=7, epoch=9, shuffle=False)
         self.assertEqual(list(indices), list(range(37)))
 
+    def test_none_seed_is_still_reproducible_across_ranks(self):
+        first = list(BlockShuffleIndices(41, 7, seed=None, epoch=2, shuffle=True))
+        repeated = list(BlockShuffleIndices(41, 7, seed=None, epoch=2, shuffle=True))
+        self.assertEqual(first, repeated)
+
     def test_only_one_index_block_is_buffered(self):
         indices = BlockShuffleIndices(1003, 31, seed=7, epoch=0, shuffle=True)
         self.assertEqual(len(list(indices)), 1003)

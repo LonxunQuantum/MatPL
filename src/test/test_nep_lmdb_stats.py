@@ -65,6 +65,11 @@ class SelectStatIndicesTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     select_stat_indices(*arguments)
 
+    def test_none_seed_remains_globally_deterministic(self):
+        first = [select_stat_indices(100, 40, rank, 2, None) for rank in range(2)]
+        repeated = [select_stat_indices(100, 40, rank, 2, None) for rank in range(2)]
+        self.assertEqual(first, repeated)
+
 
 class LmdbEnergyStatisticsTest(unittest.TestCase):
     def test_merge_matches_direct_global_least_squares_and_atom_counts(self):
