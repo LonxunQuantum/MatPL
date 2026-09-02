@@ -51,6 +51,65 @@ sys.path.append(codepath + '/../aux')
 sys.path.append(codepath + '/../..')
 
 
+def _require_lmdb_training_batches(
+        batch_sampler, dataset_size, batch_mode, batch_value, world_size):
+    """Fail before model setup when ranks cannot receive one complete batch."""
+    if len(batch_sampler) > 0:
+        return
+    batch_description = (
+        str(batch_value)
+        if batch_mode == "frames"
+        else "mix:{}".format(batch_value)
+    )
+    raise ValueError(
+        "LMDB training data with {} frames cannot form a complete batch "
+        "for optimizer.batch_size={} on each of {} ranks; reduce batch_size "
+        "or the number of ranks".format(
+            dataset_size, batch_description, world_size
+        )
+    )
+
+
+def _calculate_lmdb_neighbor_scaler(
+        dataloader,
+        n_max_radial,
+        basis_size_radial,
+        n_max_angular,
+        basis_size_angular,
+        lmax_3,
+        lmax_4,
+        lmax_5,
+        device,
+        num_workers=0):
+    """Return all-reduce identities when this rank has no stat frames."""
+    if len(dataloader) > 0:
+        return calculate_neighbor_scaler(
+            dataloader,
+            n_max_radial,
+            basis_size_radial,
+            n_max_angular,
+            basis_size_angular,
+            lmax_3,
+            lmax_4,
+            lmax_5,
+            device,
+            num_workers=num_workers,
+        )
+
+    angular_channels = lmax_3 + int(lmax_4 > 0) + int(lmax_5 > 0)
+    descriptor_size = (
+        n_max_radial + 1 + (n_max_angular + 1) * angular_channels
+    )
+    dtype = dataloader.dataset.dtype
+    local_max = torch.full(
+        (descriptor_size,), -torch.inf, dtype=dtype, device=device
+    )
+    local_min = torch.full(
+        (descriptor_size,), torch.inf, dtype=dtype, device=device
+    )
+    return local_max, local_min, 0, 0, 0, 0
+
+
 def _periodic_nep_checkpoint_paths(primary_path):
     directory = os.path.dirname(primary_path)
     model_name = os.path.basename(primary_path)
@@ -647,6 +706,13 @@ class nep_network:
             batch_value,
             self.input_param.data_shuffle,
         )
+        _require_lmdb_training_batches(
+            train_sampler,
+            dataset_size=len(train_dataset),
+            batch_mode=batch_mode,
+            batch_value=batch_value,
+            world_size=max(int(self.input_param.world_size), 1),
+        )
         valid_sampler = self._lmdb_batch_sampler(
             valid_dataset,
             batch_mode,
@@ -1030,7 +1096,12 @@ class nep_network:
         # max_NN 训练集计算，之后如果存在nep.txt，取最大值作为max_nn,用于模型初始化。初始化后，如果存在ckpt文件（recover）,则更新为ckpt中的值。 
     
         # print(f"======= rank {self.input_param.rank} len forscaler_loader {len(forscaler_loader)} ======")
-        local_global_max, local_global_min, local_max_NN_radial, local_min_NN_radial, local_max_NN_angular, local_min_NN_angular = calculate_neighbor_scaler(
+        neighbor_scaler = (
+            _calculate_lmdb_neighbor_scaler
+            if self.input_param.file_paths.format == "lmdb"
+            else calculate_neighbor_scaler
+        )
+        local_global_max, local_global_min, local_max_NN_radial, local_min_NN_radial, local_max_NN_angular, local_min_NN_angular = neighbor_scaler(
                     forscaler_loader,
                     self.input_param.nep_param.n_max[0],      # model.n_max_radial,
                     self.input_param.nep_param.basis_size[0], # model.n_base_radial,
@@ -1439,7 +1510,12 @@ class nep_network:
         # do inference
         self.input_param.world_size
         energy_shift, train_loader, val_loader, forscaler_loader = self.load_data()
-        local_global_max, local_global_min, local_max_NN_radial, local_min_NN_radial, local_max_NN_angular, local_min_NN_angular = calculate_neighbor_scaler(
+        neighbor_scaler = (
+            _calculate_lmdb_neighbor_scaler
+            if self.input_param.file_paths.format == "lmdb"
+            else calculate_neighbor_scaler
+        )
+        local_global_max, local_global_min, local_max_NN_radial, local_min_NN_radial, local_max_NN_angular, local_min_NN_angular = neighbor_scaler(
                     forscaler_loader,
                     self.input_param.nep_param.n_max[0],      # model.n_max_radial,
                     self.input_param.nep_param.basis_size[0], # model.n_base_radial,

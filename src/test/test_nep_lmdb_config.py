@@ -123,6 +123,23 @@ class LmdbStatisticsConfigurationTest(unittest.TestCase):
                             "TRAIN",
                         )
 
+    def test_non_lmdb_format_ignores_lmdb_statistics_option(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_path = Path(tmpdir) / "unused.data"
+            data_path.touch()
+
+            param = InputParam(
+                _minimal_nep_json(
+                    data_path,
+                    format="extxyz",
+                    lmdb_stat_frames=0,
+                ),
+                "TRAIN",
+            )
+
+            self.assertEqual(param.lmdb_stat_frames, 0)
+            self.assertNotIn("lmdb_stat_frames", param.to_dict())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ import lmdb
 import numpy as np
 import torch
 
+import src.pre_data.nep_lmdb_dataset as lmdb_dataset_module
 from src.pre_data.nep_lmdb_dataset import AseLmdbShard, NepLmdbDataset
 
 
@@ -54,6 +55,19 @@ def _write_aselmdb(path, rows, *, nextid=None, deleted_ids=None):
 
 
 class AseLmdbShardTest(unittest.TestCase):
+    def test_decoder_uses_orjson_when_available(self):
+        decoder = mock.Mock(return_value={"decoded": True})
+        fake_orjson = mock.Mock(loads=decoder)
+        compressed = zlib.compress(b'{"value": 1}')
+
+        with mock.patch.object(lmdb_dataset_module, "_orjson", fake_orjson, create=True):
+            result = lmdb_dataset_module._decode_compressed_json(
+                compressed, "test frame"
+            )
+
+        self.assertEqual(result, {"decoded": True})
+        decoder.assert_called_once_with(b'{"value": 1}')
+
     def test_metadata_maps_deleted_rows_without_retaining_environment(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "deleted.aselmdb"

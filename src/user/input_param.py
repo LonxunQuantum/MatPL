@@ -214,9 +214,12 @@ class InputParam(object):
         self.seed = get_parameter("seed", json_input, 2023)
         self.precision = get_parameter("precision", json_input, "float64")
         self.lmdb_stat_frames = get_parameter("lmdb_stat_frames", json_input, 32768)
-        if (isinstance(self.lmdb_stat_frames, bool) or
+        is_lmdb = str(get_parameter(
+            "format", json_input, "pwmat/movement"
+        )).lower() == "lmdb"
+        if (is_lmdb and (isinstance(self.lmdb_stat_frames, bool) or
                 not isinstance(self.lmdb_stat_frames, int) or
-                self.lmdb_stat_frames <= 0):
+                self.lmdb_stat_frames <= 0)):
             raise ValueError("lmdb_stat_frames must be a positive integer")
 
     '''

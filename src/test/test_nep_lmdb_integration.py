@@ -17,6 +17,7 @@ from src.pre_data.nep_lmdb_dataset import (
     DistributedFrameBatchSampler,
     NepLmdbDataset,
     parse_lmdb_batch_size,
+    select_stat_indices,
 )
 
 
@@ -189,6 +190,69 @@ class NepLmdbLoadDataIntegrationTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "float64"):
                 network.load_data()
+
+    def test_zero_complete_integer_batches_fail_during_lmdb_loading(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            train = [root / "train.aselmdb"]
+            _write_aselmdb(train[0], [1])
+            network = self._network(_input_stub(root, train, [], batch_size=2))
+
+            with self.assertRaisesRegex(ValueError, "LMDB training.*complete batch"):
+                network.load_data()
+
+    def test_zero_complete_mix_batches_fail_with_context(self):
+        module = _load_network_module()
+        sampler = DistributedAtomBatchSampler(
+            [2, 2], atom_budget=4, rank=0, world_size=2, shuffle=False
+        )
+        self.assertEqual(len(sampler), 0)
+
+        with self.assertRaisesRegex(ValueError, "mix:4.*2 ranks"):
+            module._require_lmdb_training_batches(
+                sampler,
+                dataset_size=2,
+                batch_mode="atoms",
+                batch_value=4,
+                world_size=2,
+            )
+
+    def test_empty_multirank_stat_slice_uses_reduction_identities(self):
+        module = _load_network_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "train.aselmdb"
+            _write_aselmdb(path, [1] * 8)
+            dataset = NepLmdbDataset(
+                [str(path)],
+                atom_types=[1],
+                cutoff_radial=3.0,
+                cutoff_angular=3.0,
+                dtype=torch.float64,
+            )
+            indices = select_stat_indices(
+                len(dataset), requested=1, rank=3, world_size=4, seed=37
+            )
+            self.assertEqual(indices, [])
+            stat_loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_sampler=torch.utils.data.BatchSampler(
+                    indices, batch_size=1, drop_last=False
+                ),
+            )
+
+            result = module._calculate_lmdb_neighbor_scaler(
+                stat_loader, 4, 8, 4, 8, 4, 2, 1, torch.device("cpu")
+            )
+
+            local_max, local_min, max_radial, min_radial, max_angular, min_angular = result
+            self.assertEqual(local_max.shape, (35,))
+            self.assertTrue(torch.isneginf(local_max).all())
+            self.assertTrue(torch.isposinf(local_min).all())
+            self.assertEqual(
+                (max_radial, min_radial, max_angular, min_angular),
+                (0, 0, 0, 0),
+            )
+            dataset.close()
 
     def test_epoch_is_forwarded_to_custom_and_legacy_samplers(self):
         module = _load_network_module()

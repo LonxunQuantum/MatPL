@@ -17,6 +17,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+try:
+    import orjson as _orjson
+except ImportError:
+    _orjson = None
+
 
 PathLike = Union[str, os.PathLike]
 
@@ -63,8 +68,11 @@ def discover_aselmdb_files(paths: Iterable[PathLike]) -> List[str]:
 
 def _decode_compressed_json(value: bytes, context: str):
     try:
-        return json.loads(zlib.decompress(value).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, zlib.error) as exc:
+        decompressed = zlib.decompress(value)
+        if _orjson is not None:
+            return _orjson.loads(decompressed)
+        return json.loads(decompressed.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError, zlib.error) as exc:
         raise ValueError("{}: invalid zlib-compressed JSON".format(context)) from exc
 
 
