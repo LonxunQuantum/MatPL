@@ -1,9 +1,11 @@
 import bisect
+import hashlib
 import json
 import math
 import operator
 import os
 import random
+import tempfile
 import zlib
 from collections import OrderedDict
 from pathlib import Path
@@ -367,6 +369,297 @@ class LmdbEnergyStatistics:
             raise ValueError("cannot solve energy shift with no frames")
         shift, _, _, _ = np.linalg.lstsq(self.ata, self.ate, rcond=None)
         return shift.tolist()
+
+
+class LmdbNatomsCache:
+    """Persistent per-shard atom counts, memory-mapped after distributed build."""
+
+    CACHE_VERSION = 1
+
+    def __init__(self, dataset, cache_dir):
+        if not isinstance(dataset, NepLmdbDataset):
+            raise TypeError("dataset must be a NepLmdbDataset")
+        self.dataset = dataset
+        self.cache_dir = Path(cache_dir).expanduser().resolve()
+        self._arrays = []
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def _paths(self, shard):
+        digest = hashlib.sha256(shard.path.encode("utf-8")).hexdigest()[:24]
+        return (
+            self.cache_dir / (digest + ".natoms.i32"),
+            self.cache_dir / (digest + ".natoms.json"),
+        )
+
+    def _fingerprint(self, shard):
+        source = Path(shard.path).stat()
+        return {
+            "version": self.CACHE_VERSION,
+            "source_path": shard.path,
+            "source_size": source.st_size,
+            "source_mtime_ns": source.st_mtime_ns,
+            "nextid": shard.nextid,
+            "deleted_ids": list(shard.deleted_ids),
+            "logical_length": len(shard),
+        }
+
+    def _is_valid(self, shard):
+        data_path, manifest_path = self._paths(shard)
+        if not data_path.is_file() or not manifest_path.is_file():
+            return False
+        if data_path.stat().st_size != len(shard) * np.dtype(np.int32).itemsize:
+            return False
+        try:
+            with manifest_path.open("r", encoding="utf-8") as stream:
+                manifest = json.load(stream)
+        except (OSError, ValueError):
+            return False
+        return manifest == self._fingerprint(shard)
+
+    def build_assigned(self, rank, world_size):
+        if (
+            isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or isinstance(world_size, bool)
+            or not isinstance(world_size, int)
+            or world_size < 1
+            or rank < 0
+            or rank >= world_size
+        ):
+            raise ValueError("rank must be in [0, world_size)")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        for shard_index, shard in enumerate(self.dataset.shards):
+            if shard_index % world_size == rank and not self._is_valid(shard):
+                self._build_shard(shard)
+
+    def _build_shard(self, shard):
+        data_path, manifest_path = self._paths(shard)
+        data_handle = tempfile.NamedTemporaryFile(
+            prefix=data_path.name + ".tmp-",
+            dir=self.cache_dir,
+            delete=False,
+        )
+        temporary_data = Path(data_handle.name)
+        data_handle.close()
+        temporary_manifest = None
+        env = None
+        counts = None
+        try:
+            if len(shard) > 0:
+                counts = np.memmap(
+                    temporary_data,
+                    dtype=np.int32,
+                    mode="w+",
+                    shape=(len(shard),),
+                )
+                env = lmdb.open(
+                    shard.path,
+                    subdir=False,
+                    readonly=True,
+                    lock=False,
+                    readahead=True,
+                    meminit=False,
+                )
+                with env.begin(buffers=False) as txn:
+                    for logical_index in range(len(shard)):
+                        row_id = shard.row_id(logical_index)
+                        context = "{}: frame key {}".format(shard.path, row_id)
+                        value = txn.get(str(row_id).encode("ascii"))
+                        if value is None:
+                            raise ValueError("{}: row is missing".format(context))
+                        frame = _decode_compressed_json(value, context)
+                        if not isinstance(frame, dict) or not isinstance(
+                            frame.get("numbers"), list
+                        ):
+                            raise ValueError(
+                                "{}: numbers must be a JSON array".format(context)
+                            )
+                        natoms = len(frame["numbers"])
+                        if natoms < 1 or natoms > np.iinfo(np.int32).max:
+                            raise ValueError(
+                                "{}: invalid atom count {}".format(context, natoms)
+                            )
+                        counts[logical_index] = natoms
+                counts.flush()
+                del counts
+                counts = None
+            with temporary_data.open("rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temporary_data, data_path)
+
+            manifest_handle = tempfile.NamedTemporaryFile(
+                prefix=manifest_path.name + ".tmp-",
+                dir=self.cache_dir,
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+            )
+            temporary_manifest = Path(manifest_handle.name)
+            with manifest_handle:
+                json.dump(self._fingerprint(shard), manifest_handle, sort_keys=True)
+                manifest_handle.flush()
+                os.fsync(manifest_handle.fileno())
+            os.replace(temporary_manifest, manifest_path)
+        finally:
+            if counts is not None:
+                del counts
+            if env is not None:
+                env.close()
+            if temporary_data.exists():
+                temporary_data.unlink()
+            if temporary_manifest is not None and temporary_manifest.exists():
+                temporary_manifest.unlink()
+
+    def load(self):
+        self.close()
+        arrays = []
+        for shard in self.dataset.shards:
+            if not self._is_valid(shard):
+                raise ValueError(
+                    "atom-count cache is missing or stale for {}".format(shard.path)
+                )
+            data_path, _ = self._paths(shard)
+            if len(shard) == 0:
+                arrays.append(np.empty(0, dtype=np.int32))
+            else:
+                arrays.append(
+                    np.memmap(
+                        data_path,
+                        dtype=np.int32,
+                        mode="r",
+                        shape=(len(shard),),
+                    )
+                )
+        self._arrays = arrays
+        return self
+
+    def close(self):
+        for array in self._arrays:
+            mmap_object = getattr(array, "_mmap", None)
+            if mmap_object is not None:
+                mmap_object.close()
+        self._arrays = []
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __getitem__(self, index):
+        if not self._arrays:
+            raise RuntimeError("atom-count cache must be loaded before use")
+        shard, shard_index = self.dataset._locate(index)
+        cache_shard_index = bisect.bisect_right(
+            self.dataset._shard_ends,
+            (operator.index(index) % len(self.dataset)),
+        )
+        return int(self._arrays[cache_shard_index][shard_index])
+
+
+class DistributedAtomBatchSampler:
+    """Pack the global shuffled frame stream into equal-step rank atom batches."""
+
+    def __init__(
+        self,
+        natoms,
+        atom_budget,
+        rank,
+        world_size,
+        seed=2023,
+        shuffle=True,
+        block_size=65536,
+    ):
+        integer_arguments = {
+            "atom_budget": atom_budget,
+            "rank": rank,
+            "world_size": world_size,
+            "block_size": block_size,
+        }
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in integer_arguments.values()
+        ):
+            raise ValueError("atom budget, rank, and sampler sizes must be integers")
+        if atom_budget < 1:
+            raise ValueError("atom_budget must be positive")
+        if world_size < 1:
+            raise ValueError("world_size must be positive")
+        if rank < 0 or rank >= world_size:
+            raise ValueError("rank must be in [0, world_size)")
+        if block_size < 1:
+            raise ValueError("block_size must be positive")
+
+        self.natoms = natoms
+        self.atom_budget = atom_budget
+        self.rank = rank
+        self.world_size = world_size
+        self.seed = seed
+        self.shuffle = shuffle
+        self.block_size = block_size
+        self.epoch = 0
+        self.peak_completed_batches = 0
+        self._length_cache = {}
+
+    def set_epoch(self, epoch):
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+            raise ValueError("epoch must be a non-negative integer")
+        self.epoch = epoch
+
+    def _atom_count(self, index):
+        try:
+            count = operator.index(self.natoms[index])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("natoms values must be positive integers") from exc
+        if isinstance(count, bool) or count < 1:
+            raise ValueError("natoms values must be positive integers")
+        return count
+
+    def _global_batches(self):
+        indices = BlockShuffleIndices(
+            len(self.natoms),
+            self.block_size,
+            self.seed,
+            epoch=self.epoch,
+            shuffle=self.shuffle,
+        )
+        batch = []
+        batch_atoms = 0
+        for index in indices:
+            frame_atoms = self._atom_count(index)
+            if batch and batch_atoms + frame_atoms > self.atom_budget:
+                yield batch
+                batch = []
+                batch_atoms = 0
+            if frame_atoms > self.atom_budget:
+                yield [index]
+            else:
+                batch.append(index)
+                batch_atoms += frame_atoms
+        if batch:
+            yield batch
+
+    def __len__(self):
+        cache_key = (self.epoch, self.shuffle)
+        if cache_key not in self._length_cache:
+            global_batch_count = sum(1 for _ in self._global_batches())
+            self._length_cache[cache_key] = global_batch_count // self.world_size
+        return self._length_cache[cache_key]
+
+    def __iter__(self):
+        completed_batches = []
+        self.peak_completed_batches = 0
+        for batch in self._global_batches():
+            completed_batches.append(batch)
+            self.peak_completed_batches = max(
+                self.peak_completed_batches, len(completed_batches)
+            )
+            if len(completed_batches) == self.world_size:
+                rank_batch = completed_batches[self.rank]
+                completed_batches = []
+                yield rank_batch
 
 
 def _get_det(box: np.ndarray) -> float:
