@@ -147,7 +147,7 @@ def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list
             if model.model_type == "DP":
                 _etot_list, _ei_list, _force_list, _virial_list = model.inference(image_read, do_deviation=True)
             elif model.model_type == "NEP":
-                _etot_list, _ei_list, _force_list, _virial_list = model.inference_nep_txt(image_read, do_deviation=True)
+                _etot_list, _ei_list, _force_list, _virial_list, _, _ = model.inference_nep_txt(image_read, do_deviation=True)
             
             for idj in range(0, len(_etot_list)):
                 force_i[id].append(_force_list[idj])
