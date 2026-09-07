@@ -2,6 +2,7 @@
 #include "./utilities/error.cuh"
 #include "./utilities/nep_utilities.cuh"
 #include "./utilities/nep_feature.cuh"
+#include "../include/nep_limits.h"
 #include <iostream>
 #include <c10/cuda/CUDAStream.h>
 
@@ -110,8 +111,8 @@ static __global__ void gpu_find_neighbor_number_with_type(
         //         box_original[0], box_original[1], box_original[2], box_original[8],\
         //         x1, y1, z1, num_cell[0], num_cell[1], num_cell[2]\
         //         , g_num_cell[0], g_num_cell[1], g_num_cell[2]);
-        int64_t count_radial[100] = {0};
-        int64_t count_angular[100] = {0};
+        int64_t count_radial[NEP_MAX_ELEMENT_TYPES] = {0};
+        int64_t count_angular[NEP_MAX_ELEMENT_TYPES] = {0};
         for (int n2 = N1; n2 < N2; ++n2)
         {   
             int t2 = atom_type_map[n2];

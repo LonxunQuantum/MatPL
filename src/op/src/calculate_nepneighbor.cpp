@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include "../include/calculate_nepneighbor.h"
+#include "../include/nep_limits.h"
 
 void torch_launch_calculate_maxneigh(
     const torch::Tensor &num_atoms,
@@ -19,6 +20,13 @@ void torch_launch_calculate_maxneigh(
     const torch::Tensor &atom_type_map
 
 ){
+    TORCH_CHECK(
+        atom_type_num >= 1 && atom_type_num <= NEP_MAX_ELEMENT_TYPES,
+        "NEP atom type count must be between 1 and ",
+        NEP_MAX_ELEMENT_TYPES,
+        ", got ",
+        atom_type_num
+    );
     launch_calculate_maxneigh(
         (const int64_t *) num_atoms.data_ptr(),
         (const int64_t *) num_atoms_sum.data_ptr(),

@@ -696,7 +696,6 @@ class nep_network:
 
         train_dataset = NepLmdbDataset(
             self.input_param.file_paths.train_data_path,
-            batch_max_types=self.input_param.max_allow_atom_type,
             cal_energy=True,
             train_ei=self.input_param.optimizer_param.train_ei,
             **common_dataset_options,
@@ -817,7 +816,6 @@ class nep_network:
                                             self.input_param.atom_type,
                                             cutoff_radial = self.input_param.nep_param.cutoff[0],
                                             cutoff_angular= self.input_param.nep_param.cutoff[1],
-                                            batch_max_types=self.input_param.max_allow_atom_type,
                                             cal_energy=True,
                                             fill_metal_bec=fill_ion_bec)
 

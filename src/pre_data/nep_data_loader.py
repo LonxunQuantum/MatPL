@@ -37,63 +37,9 @@ def get_area(a: np.array, b: np.array):
     return math.sqrt(s1 * s1 + s2 * s2 + s3 * s3)
 
 def variable_length_collate_fn(batch):
-    filtered_batch = []
-    current_types_set = set()  # 跟踪当前batch中已有的元素类型
-    max_allow_atom_type = -1
-    for sample in batch:
-        atom_type_image = sample.get("atom_type_image")
-        max_allow_atom_type = sample.get("max_allow_atom_type")
-        if atom_type_image is not None:
-            # 获取该样本中独特的元素类型
-            unique_types = set(np.unique(atom_type_image))
-            num_new_types = len(unique_types - current_types_set)
-            
-            # 检查加入这个样本后是否会超过类型限制
-            if max_allow_atom_type== -1 or len(current_types_set) + num_new_types <= max_allow_atom_type:
-                filtered_batch.append(sample)
-                current_types_set.update(unique_types)
-            else:
-                # 如果加入这个样本会超过限制，跳过它
-                # print(f"Skip: adding this sample would exceed type limit. "
-                #       f"Current types: {len(current_types_set)}, "
-                #       f"New types: {num_new_types}, "
-                #       f"Limit: {max_allow_atom_type}")
-                continue
-        else:
-            # 如果没有 atom_type_image，默认保留
-            filtered_batch.append(sample)
-
-    # print(f"debug {len(current_types_set)}-{current_types_set}")
-    if len(filtered_batch) == 0:
+    if not batch:
         return {}
-    
-    # 记录实际使用的元素类型数量（调试用）
-    # print(f"Final batch: {len(filtered_batch)} samples, {len(current_types_set)} atom types")
-    
-    # 拼接过滤后的批次
-    keys = filtered_batch[0].keys()
-    res = {}
 
-    def extract_items(tensors, key):
-        return [x[key] for x in tensors]
-
-    for key in keys:
-        if key in ["position", "force", "atom_type_map", "ei", "bec", "fragment", "fragment_charge"]:
-            items = extract_items(filtered_batch, key)
-            if items and items[0] is not None:
-                res[key] = torch.concat(items, dim=0)
-        elif key == "atom_type_image" or key == "max_allow_atom_type":
-            continue
-        else:
-            items = extract_items(filtered_batch, key)
-            if items and items[0] is not None:
-                res[key] = torch.stack(items, dim=0)
-    if "num_atom" in res and len(res["num_atom"]) > 0:
-        res["num_atom_sum"] = res["num_atom"].cumsum(0).to(res["num_atom"].dtype)
-    return res
-
-
-def variable_length_collate_fn_nolimit(batch):
     keys = batch[0].keys()
     res = {}
 
@@ -105,8 +51,6 @@ def variable_length_collate_fn_nolimit(batch):
             items = extract_items(batch, key)
             if items and items[0] is not None:
                 res[key] = torch.concat(items, dim=0)
-        elif key == "atom_type_image" or key == "max_allow_atom_type":
-            continue
         else:
             items = extract_items(batch, key)
             if items and items[0] is not None:
@@ -114,6 +58,10 @@ def variable_length_collate_fn_nolimit(batch):
     if "num_atom" in res and len(res["num_atom"]) > 0:
         res["num_atom_sum"] = res["num_atom"].cumsum(0).to(res["num_atom"].dtype)
     return res
+
+
+def variable_length_collate_fn_nolimit(batch):
+    return variable_length_collate_fn(batch)
 
 class NepTestData():
     def __init__(self, input_param:InputParam):
@@ -143,7 +91,6 @@ class UniDataset(Dataset):
                 cutoff_radial=0, 
                 cutoff_angular=0,
                 cal_energy=False,
-                batch_max_types=-1,
                 dtype: Union[torch.dtype, str] = torch.float64, 
                 index_type: Union[torch.dtype, str] = torch.int64,
                 use_cartesian=True,
@@ -162,7 +109,6 @@ class UniDataset(Dataset):
         self.max_atom_nums = 1
         self.avg_image_atom= None
         self.use_cartesian = use_cartesian
-        self.batch_max_types = batch_max_types
         self.fill_metal_bec = fill_metal_bec
         self.dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
         self.index_type = (
@@ -259,7 +205,6 @@ class UniDataset(Dataset):
         num_cell = np.zeros(3, dtype=int)
         box = np.zeros(18, dtype=float) 
         volume = self.expand_box(self.image_list[index].lattice.T.flatten(), self.cutoff_radial, num_cell, box)
-        data["max_allow_atom_type"] = torch.tensor([self.batch_max_types]).to(self.index_type)
         data["box"] = torch.from_numpy(box).to(self.dtype)
         data["box_original"] = torch.from_numpy(self.image_list[index].lattice.T.flatten()).to(self.dtype)
         data["num_cell"] = torch.from_numpy(num_cell).to(self.index_type)
@@ -267,7 +212,6 @@ class UniDataset(Dataset):
         # data["atom_type"] = torch.from_numpy(self.image_list[index].atom_type).to(self.index_type)
         data["atom_type_map"] = torch.from_numpy(self.image_list[index].atom_type_map).to(self.index_type)
         data["num_atom"] = torch.from_numpy(np.array([len(data["atom_type_map"])])).to(self.index_type)
-        data["atom_type_image"] = torch.from_numpy(self.image_list[index].atom_type).to(self.index_type)
         data["force"] = torch.from_numpy(self.image_list[index].force).to(self.dtype)
         data["ei"] = torch.from_numpy(self.image_list[index].atomic_energy).to(self.dtype)
         data["energy"] = torch.from_numpy(np.array([self.image_list[index].Ep])).to(self.dtype)

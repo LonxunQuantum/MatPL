@@ -2,6 +2,7 @@
 #include <iostream>
 #include "../include/CalcOps.h"
 #include "../include/cpu_calculate_nepneighbor.h"
+#include "../include/nep_limits.h"
 
 torch::autograd::variable_list calculateForce_cpu(
     at::Tensor list_neigh,
@@ -47,6 +48,13 @@ std::vector<torch::Tensor> calculate_maxneigh_cpu(
     const torch::Tensor &atom_type_map,
     const bool with_type
 ){
+    TORCH_CHECK(
+        atom_type_num >= 1 && atom_type_num <= NEP_MAX_ELEMENT_TYPES,
+        "NEP atom type count must be between 1 and ",
+        NEP_MAX_ELEMENT_TYPES,
+        ", got ",
+        atom_type_num
+    );
     auto dtype = position.dtype();
     auto index_dtype = num_atoms.dtype();
     auto device = position.device();
@@ -244,4 +252,3 @@ std::vector<torch::Tensor> calculate_descriptor_cpu(
         num_types);
     return {feats};
 }
-

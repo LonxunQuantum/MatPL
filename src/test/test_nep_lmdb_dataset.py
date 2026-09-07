@@ -121,7 +121,7 @@ class NepLmdbDatasetTest(unittest.TestCase):
             self.assertEqual(len(dataset._env_cache), 0)
             self.assertEqual(dataset[1]["num_atom"].item(), 2)
             self.assertEqual(len(dataset._env_cache), 1)
-            self.assertEqual(dataset[-1]["atom_type_image"].tolist(), [8])
+            self.assertEqual(dataset[-1]["atom_type_map"].tolist(), [1])
             with self.assertRaises(IndexError):
                 dataset[-4]
             with self.assertRaises(IndexError):
@@ -131,6 +131,18 @@ class NepLmdbDatasetTest(unittest.TestCase):
             self.assertEqual(len(state["_env_cache"]), 0)
             dataset.close()
             self.assertEqual(len(dataset._env_cache), 0)
+
+    def test_samples_do_not_expose_removed_type_limit_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "types.aselmdb"
+            _write_aselmdb(path, {1: _frame([1, 8])})
+            dataset = self._dataset([path])
+
+            sample = dataset[0]
+
+            self.assertNotIn("max_allow_atom_type", sample)
+            self.assertNotIn("atom_type_image", sample)
+            dataset.close()
 
     def test_decodes_expected_training_tensors_and_stress_convention(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -146,14 +158,13 @@ class NepLmdbDatasetTest(unittest.TestCase):
                     )
                 },
             )
-            dataset = self._dataset([path], train_ei=True, batch_max_types=5)
+            dataset = self._dataset([path], train_ei=True)
 
             sample = dataset[0]
 
             self.assertEqual(sample["position"].shape, (2, 3))
             self.assertEqual(sample["force"].shape, (2, 3))
             self.assertEqual(sample["atom_type_map"].tolist(), [0, 1])
-            self.assertEqual(sample["atom_type_image"].tolist(), [1, 8])
             self.assertEqual(sample["num_atom"].tolist(), [2])
             self.assertEqual(sample["box"].shape, (18,))
             self.assertEqual(sample["box_original"].shape, (9,))
@@ -165,7 +176,6 @@ class NepLmdbDatasetTest(unittest.TestCase):
             self.assertEqual(sample["fragment"].tolist(), [-1, -1])
             self.assertTrue(torch.isnan(sample["fragment_charge"]).all())
             self.assertEqual(sample["charge"].tolist(), [0.0])
-            self.assertEqual(sample["max_allow_atom_type"].tolist(), [5])
             self.assertEqual(sample["position"].dtype, torch.float32)
             self.assertEqual(sample["atom_type_map"].dtype, torch.int64)
             expected_virial = torch.tensor(

@@ -83,7 +83,6 @@ def _input_stub(root, train_paths, valid_paths, batch_size):
         ),
         nep_param=SimpleNamespace(cutoff=[3.0, 3.0]),
         atom_type=[1],
-        max_allow_atom_type=-1,
         precision="float64",
         workers=0,
         world_size=1,

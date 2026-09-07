@@ -278,7 +278,6 @@ if [ -d "$OP_DIR" ]; then
         esac
         rm -rf "$OP_BUILD_DIR"
         mkdir -p "$OP_BUILD_DIR"
-        # for bigmodel the types should be 100
         if cmake -S "$OP_DIR" -B "$OP_BUILD_DIR" \
             -DMATPL_GPU_BACKEND="$OP_BACKEND_UPPER" && \
             cmake --build "$OP_BUILD_DIR" --parallel "$JOBS"; then

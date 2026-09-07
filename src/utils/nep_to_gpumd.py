@@ -39,6 +39,8 @@ element_table_2 = {
     'Mc': 115, 'Lv': 116, 'Ts': 117, 'Og': 118
 }
 
+MAX_ATOMIC_NUMBER = len(element_table) - 1
+
 def get_atomic_number_from_name(atomic_names:list[str]):
     res = []
     for name in atomic_names:
@@ -56,6 +58,25 @@ def get_atomic_name_from_str(atom_strs):
         return [int(_) for _ in atom_strs]
     except ValueError:
         return get_atomic_number_from_name(atom_strs)
+
+def validate_nep_atom_types(atom_types):
+    if not atom_types:
+        raise ValueError("NEP atom_type must contain at least one element")
+    if any(
+        isinstance(atomic_number, bool)
+        or not isinstance(atomic_number, int)
+        or atomic_number < 1
+        or atomic_number > MAX_ATOMIC_NUMBER
+        for atomic_number in atom_types
+    ):
+        raise ValueError(
+            "NEP atom_type atomic numbers must be integers from 1 through {}".format(
+                MAX_ATOMIC_NUMBER
+            )
+        )
+    if len(set(atom_types)) != len(atom_types):
+        raise ValueError("NEP atom_type elements must be unique")
+    return atom_types
 
 def check_atom_type_name(atom_types:list[str]):
     return all([_ in element_table_2.keys() for _ in atom_types])

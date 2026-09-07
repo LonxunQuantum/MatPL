@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 // #include "op_declare.h"
 #include "../include/calculate_nepfeat.h"
+#include "../include/nep_limits.h"
 // #include "../include/calculate_nepfeat_grad.h"
 
 //2b
@@ -238,6 +239,13 @@ void torch_launch_calculate_nepmbfeat_secondgradout_c3(
                         const int64_t multi_feat_num,
                         torch::Tensor &gradsecond_c3
 ){
+    TORCH_CHECK(
+        atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES,
+        "NEP atom type count must be between 1 and ",
+        NEP_MAX_ELEMENT_TYPES,
+        ", got ",
+        atom_types
+    );
     auto dtype = de_feat.dtype();
     int device_id = de_feat.device().index();
     launch_calculate_nepmbfeat_secondgradout_c3(

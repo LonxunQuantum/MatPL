@@ -748,7 +748,6 @@ class NepLmdbDataset(Dataset):
         cutoff_radial=0,
         cutoff_angular=0,
         cal_energy=False,
-        batch_max_types=-1,
         dtype=torch.float64,
         index_type=torch.int64,
         use_cartesian=True,
@@ -787,7 +786,6 @@ class NepLmdbDataset(Dataset):
         self.cutoff_radial = cutoff_radial
         self.cutoff_angular = cutoff_angular
         self.cal_energy = cal_energy
-        self.batch_max_types = batch_max_types
         self.fill_metal_bec = fill_metal_bec
         self.train_ei = train_ei
         self.max_open_shards = max_open_shards
@@ -969,18 +967,12 @@ class NepLmdbDataset(Dataset):
             raise ValueError("charge must be finite")
 
         return {
-            "max_allow_atom_type": torch.tensor(
-                [self.batch_max_types], dtype=self.index_type
-            ),
             "box": torch.as_tensor(box, dtype=self.dtype),
             "box_original": torch.as_tensor(lattice, dtype=self.dtype),
             "num_cell": torch.as_tensor(num_cell, dtype=self.index_type),
             "volume": torch.tensor([expanded_volume], dtype=self.dtype),
             "atom_type_map": torch.as_tensor(atom_type_map, dtype=self.index_type),
             "num_atom": torch.tensor([natoms], dtype=self.index_type),
-            "atom_type_image": torch.as_tensor(
-                np.unique(numbers), dtype=self.index_type
-            ),
             "force": torch.as_tensor(forces, dtype=self.dtype),
             "ei": torch.as_tensor(atomic_energy, dtype=self.dtype),
             "energy": torch.tensor([energy], dtype=self.dtype),

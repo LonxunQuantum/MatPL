@@ -1,5 +1,6 @@
 #include "nep_utilities.cuh"
 #include "nep_utilities_mb_secondc.cuh"
+#include "../../include/nep_limits.h"
 __global__ void buildTypeMapKernel(
     const int64_t* atom_type_map, 
     int* type_index_map, 
@@ -51,8 +52,8 @@ static __global__ void find_angular_gardc_neigh(
   )
 {
   // 计算共享内存大小
-  const int uniq_map_size = 100;
-  const int uniq_type_size = 100;
+  const int uniq_map_size = num_types;
+  const int uniq_type_size = num_types;
   const int Fp_size = MAX_DIM_ANGULAR;
   const int sum_fxyz_size = max_3b * NUM_OF_ABC;
   
@@ -229,12 +230,12 @@ static __global__ void find_angular_gardc_neigh_bk(
   const int feat_3b_nums // 3b + 4b + 5b
   )
 {
-  __shared__ int s_uniq_map[100];
-  __shared__ int s_uniq_type[100];
+  __shared__ int s_uniq_map[NEP_MAX_ELEMENT_TYPES];
+  __shared__ int s_uniq_type[NEP_MAX_ELEMENT_TYPES];
   int tid = threadIdx.x;
   int threads_per_block = blockDim.x;
-  // 每个线程处理多个元素，确保覆盖100个位置
-  for (int i = tid; i < 100; i += threads_per_block) {
+  // 每个线程处理多个元素，覆盖模型配置的全部元素类型。
+  for (int i = tid; i < num_types; i += threads_per_block) {
     s_uniq_map[i] = uniq_map[i];
     s_uniq_type[i] = uniq_type[i];
   }

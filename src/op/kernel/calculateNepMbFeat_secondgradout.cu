@@ -93,23 +93,23 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     
     int cpu_num_value = 0;
     
-    unique_types.resize(100, -1);
+    unique_types.resize(atom_types, -1);
     num_unique.resize(1, 0);
-    unique_types_map.resize(100, -1);
+    unique_types_map.resize(atom_types, -1);
     buildTypeMapKernel<<<(N + 256 - 1) / 256, 256>>>(atom_map, unique_types_map.data(), unique_types.data(), atom_nums, num_unique.data());
     std::vector<int> cpu_num_unique(1);
     num_unique.copy_to_host(cpu_num_unique.data());
     cpu_num_value = cpu_num_unique[0];
 
-    // std::vector<int> cpu_unique_types_map(100);
+    // std::vector<int> cpu_unique_types_map(atom_types);
     // unique_types_map.copy_to_host(cpu_unique_types_map.data());
-    // for(int ii = 0; ii < 100; ii++){
+    // for(int ii = 0; ii < atom_types; ii++){
     //     printf("I-%d=%d ", ii, cpu_unique_types_map[ii]);
     // }
     // printf("\n");
-    // std::vector<int> cpu_unique_types(100);
+    // std::vector<int> cpu_unique_types(atom_types);
     // unique_types.copy_to_host(cpu_unique_types.data());
-    // for(int ii = 0; ii < 100; ii++){
+    // for(int ii = 0; ii < atom_types; ii++){
     //     printf("U-%d=%d ", ii, cpu_unique_types[ii]);
     // }
     // printf("\n");
@@ -249,8 +249,8 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     double rcinv_angular = 1.0 / rcut_angular;
     int atom_types_sq = atom_types * atom_types;
     // 计算共享内存大小
-    const int uniq_map_size = 100;
-    const int uniq_type_size = 100;
+    const int uniq_map_size = atom_types;
+    const int uniq_type_size = atom_types;
     const int Fp_size = MAX_DIM_ANGULAR;
     const int sum_fxyz_size = n_max_3b * NUM_OF_ABC;
     
@@ -281,9 +281,9 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     int cpu_num_value = 0;
 
     GPU_Vector<double> tmp_dfeat_c3(atom_nums * atom_types * n_max_3b * n_base_3b, 0.0);
-    GPU_Vector<int> unique_types(100, -1);     // atom_map 中元素的不重复子表，顺序为它在atom_map中的顺序 例如 对于[0,1,29,4,39,1,1,1,1,1,4,29,...]这个atom_map,这里为[0,1,29,4,39], num_unique=5
+    GPU_Vector<int> unique_types(atom_types, -1);     // atom_map 中元素的不重复子表，顺序为它在atom_map中的顺序 例如 对于[0,1,29,4,39,1,1,1,1,1,4,29,...]这个atom_map,这里为[0,1,29,4,39], num_unique=5
     GPU_Vector<int> num_unique(1, 0);
-    GPU_Vector<int> unique_types_map(100, -1); // 不重复子表在周期表中位置，例如这里为[0,1,-1,-1,3,-1,...,2,-1,...,4,-1,-1,...]，即它的下标[0,1,4,29,39]值分别为[0,1,3,2,4]，周期表其他位置填充-1
+    GPU_Vector<int> unique_types_map(atom_types, -1); // 不重复子表在周期表中位置，例如这里为[0,1,-1,-1,3,-1,...,2,-1,...,4,-1,-1,...]，即它的下标[0,1,4,29,39]值分别为[0,1,3,2,4]，周期表其他位置填充-1
     buildTypeMapKernel<<<(atom_nums + 256 - 1) / 256, 256>>>(
         atom_map, unique_types_map.data(), unique_types.data(), 
         atom_nums, num_unique.data());

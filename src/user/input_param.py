@@ -1,7 +1,7 @@
 import os
 import json
 from src.utils.json_operation import get_parameter, get_required_parameter
-from src.utils.nep_to_gpumd import get_atomic_name_from_str
+from src.utils.nep_to_gpumd import get_atomic_name_from_str, validate_nep_atom_types
 from src.user.model_param import ModelParam
 from src.user.optimizer_param import OptimizerParam
 from src.user.work_file_param import WorkFileStructure
@@ -31,12 +31,13 @@ class InputParam(object):
         self.model_type = get_required_parameter("model_type", json_input).upper()
         # self.atom_type = get_required_parameter("atom_type", json_input)
         self.atom_type = get_atomic_name_from_str(get_required_parameter("atom_type", json_input))
+        if self.model_type == "NEP":
+            self.atom_type = validate_nep_atom_types(self.atom_type)
         self.model_num = get_parameter("model_num", json_input, 1)
         self.recover_train = get_parameter("recover_train", json_input, True)
         self.max_neigh_num = get_parameter("max_neigh_num", json_input, 100)
         self.save_step = get_parameter("save_step", json_input, None)
         self.max_save_num = get_parameter("max_save_num", json_input, 10)
-        self.max_allow_atom_type = get_parameter("batch_max_types", json_input, -1)  # for nep multi batch training
         self.profiling = get_parameter("profiling", json_input, False)#not realized
 
         self.set_feature_params(json_input)
