@@ -132,6 +132,13 @@ class NepLmdbDatasetTest(unittest.TestCase):
             dataset.close()
             self.assertEqual(len(dataset._env_cache), 0)
 
+    def test_empty_path_list_creates_empty_optional_dataset(self):
+        dataset = self._dataset([])
+
+        self.assertEqual(len(dataset), 0)
+        self.assertEqual(dataset.dirs, [])
+        self.assertEqual(dataset.shards, [])
+
     def test_invalid_shards_are_warned_and_skipped(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             valid = Path(tmpdir) / "valid.aselmdb"

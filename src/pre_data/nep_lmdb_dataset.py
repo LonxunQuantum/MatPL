@@ -785,7 +785,7 @@ class NepLmdbDataset(Dataset):
                 continue
             self.dirs.append(path)
             self.shards.append(shard)
-        if not self.shards:
+        if discovered_dirs and not self.shards:
             raise ValueError(
                 "No valid .aselmdb files remain after filtering invalid shards"
             )
