@@ -132,6 +132,64 @@ class NepLmdbDatasetTest(unittest.TestCase):
             dataset.close()
             self.assertEqual(len(dataset._env_cache), 0)
 
+    def test_invalid_shards_are_warned_and_skipped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            valid = Path(tmpdir) / "valid.aselmdb"
+            empty = Path(tmpdir) / "empty.aselmdb"
+            zero_rows = Path(tmpdir) / "zero-rows.aselmdb"
+            corrupt_metadata = Path(tmpdir) / "corrupt-metadata.aselmdb"
+            _write_aselmdb(valid, {1: _frame([1])})
+
+            empty_env = lmdb.open(
+                str(empty), subdir=False, map_size=8 * 1024 * 1024
+            )
+            empty_env.close()
+
+            zero_rows_env = lmdb.open(
+                str(zero_rows), subdir=False, map_size=8 * 1024 * 1024
+            )
+            try:
+                with zero_rows_env.begin(write=True) as txn:
+                    txn.put(b"nextid", _compressed_json(1))
+            finally:
+                zero_rows_env.close()
+
+            corrupt_env = lmdb.open(
+                str(corrupt_metadata), subdir=False, map_size=8 * 1024 * 1024
+            )
+            try:
+                with corrupt_env.begin(write=True) as txn:
+                    txn.put(b"nextid", b"not zlib")
+            finally:
+                corrupt_env.close()
+
+            with self.assertWarnsRegex(
+                RuntimeWarning, r"Skipping invalid ASE-LMDB shard"
+            ):
+                dataset = self._dataset(
+                    [valid, empty, zero_rows, corrupt_metadata]
+                )
+
+            self.assertEqual(len(dataset), 1)
+            self.assertEqual(dataset.dirs, [str(valid.resolve())])
+            self.assertEqual([shard.path for shard in dataset.shards], dataset.dirs)
+
+    def test_all_invalid_shards_raise_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            empty = Path(tmpdir) / "empty.aselmdb"
+            empty_env = lmdb.open(
+                str(empty), subdir=False, map_size=8 * 1024 * 1024
+            )
+            empty_env.close()
+
+            with self.assertWarnsRegex(
+                RuntimeWarning, r"empty\.aselmdb.*missing nextid metadata"
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, r"No valid \.aselmdb files remain"
+                ):
+                    self._dataset([empty])
+
     def test_samples_do_not_expose_removed_type_limit_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "types.aselmdb"

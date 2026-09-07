@@ -324,7 +324,7 @@ PARENT_DIR=$(dirname "$BASE_DIR")
 # write environment to env.sh
 cat <<EOF > "$PARENT_DIR/env.sh"
 # Environment for MatPL
-export PYTHONPATH=$PARENT_DIR:\$PYTHONPATH
+export PYTHONPATH="$PARENT_DIR\${PYTHONPATH:+:\$PYTHONPATH}"
 export PATH=$BIN_DIR:\$PATH
 EOF
 
@@ -345,6 +345,6 @@ echo "Recommended method:"
 echo "  source $PARENT_DIR/env.sh"
 echo ""
 echo "Or manually set environment variables:"
-echo "  export PYTHONPATH=$PARENT_DIR:\$PYTHONPATH"
+echo "  export PYTHONPATH=\"$PARENT_DIR\${PYTHONPATH:+:\$PYTHONPATH}\""
 echo "  export PATH=$BIN_DIR:\$PATH"
 echo "================================="

@@ -7,6 +7,7 @@ import os
 import random
 import re
 import tempfile
+import warnings
 import zlib
 from collections import OrderedDict
 from pathlib import Path
@@ -767,8 +768,27 @@ class NepLmdbDataset(Dataset):
             if isinstance(index_type, torch.dtype)
             else getattr(torch, index_type)
         )
-        self.dirs = discover_aselmdb_files(data_paths)
-        self.shards = [AseLmdbShard(path) for path in self.dirs]
+        discovered_dirs = discover_aselmdb_files(data_paths)
+        self.dirs = []
+        self.shards = []
+        for path in discovered_dirs:
+            try:
+                shard = AseLmdbShard(path)
+                if len(shard) == 0:
+                    raise ValueError("{}: shard contains no frames".format(path))
+            except (lmdb.Error, OSError, ValueError) as exc:
+                warnings.warn(
+                    "Skipping invalid ASE-LMDB shard {}: {}".format(path, exc),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            self.dirs.append(path)
+            self.shards.append(shard)
+        if not self.shards:
+            raise ValueError(
+                "No valid .aselmdb files remain after filtering invalid shards"
+            )
         self._shard_ends = []
         total = 0
         for shard in self.shards:
