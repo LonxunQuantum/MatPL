@@ -35,12 +35,6 @@ __constant__ double C5B[3] = {0.026596810706114, 0.053193621412227, 0.0265968107
 const int SIZE_BOX_AND_INVERSE_BOX = 18; // (3 * 3) * 2
 const int MAX_NUM_N = 20;                // n_max+1 = 19+1
 
-#ifndef TYPESIN
-#define TYPESIN 20
-#endif
-const int TYPES = TYPESIN;
-
-// const int TYPES = 20;
 const int MAX_LMAX = 6; // 4 + 1 + 1
 const int MAX_DIM = MAX_NUM_N * 7;
 const int MAX_DIM_ANGULAR = MAX_NUM_N * 6;

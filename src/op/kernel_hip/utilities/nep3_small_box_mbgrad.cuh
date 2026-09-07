@@ -158,34 +158,36 @@ static __global__ void find_angular_gardc_small_box(
           gn12 += fn12[k] * coeff3[c_index];
           gnp12 += fnp12[k] * coeff3[c_index];
         }
-        // double f12d[MAX_LMAX * 4] = {0.0}; // dfeat/drij [nl+n+n, 4]
-        double f12k[TYPES * MAX_NUM_N * 4] = {0.0};// max type is 20
-        if (L_max5 > 0) {
-          scd_accumulate_f12_with_5body(
-            n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
-              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-              f12, f12k, scd_r12, fn12, fnp12,
-              t2, num_types, L_max3,
-              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1);
-        } else if (L_max4 > 0) {
-          scd_accumulate_f12_with_4body(
-            n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
-              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-              f12, f12k, scd_r12, fn12, fnp12,
-              t2, num_types, L_max3,
-              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1);
-        } else {
-          scd_accumulate_f12(
-            n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
-              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-              f12, f12k, scd_r12, fn12, fnp12,
-              t2, num_types, L_max3,
-              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1);
-        }
-        for (int j = 0; j < num_types; ++j){
+        // Process one element type at a time so the per-thread scratch
+        // space does not grow with the number of model element types.
+        for (int j = 0; j < num_types; ++j) {
+          double f12k[MAX_NUM_N * 4] = {0.0};
+          bool same_type = (t2 == j);
+          if (L_max5 > 0) {
+            scd_accumulate_f12_with_5body(
+              n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
+                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
+                f12, f12k, scd_r12, fn12, fnp12,
+                j, num_types, L_max3,
+                max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+          } else if (L_max4 > 0) {
+            scd_accumulate_f12_with_4body(
+              n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
+                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
+                f12, f12k, scd_r12, fn12, fnp12,
+                j, num_types, L_max3,
+                max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+          } else {
+            scd_accumulate_f12(
+              n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
+                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
+                f12, f12k, scd_r12, fn12, fnp12,
+                j, num_types, L_max3,
+                max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+          }
           for (int k = 0; k < base_3b; ++k){
             int dc_id = dc_start_idx + j * max_3b * base_3b + n*base_3b + k;
-            int k_id = j * base_3b * 4 + k * 4;
+            int k_id = k * 4;
             dfeat_c3[dc_id] += (f12k[k_id] + f12k[k_id+1] + f12k[k_id+2] + f12k[k_id+3]);
             // if (n1 == 0){
             //   printf("n1=%d t1=%d n2=%d t2=%d n=%d k=%d dc=%f frxyz = %f %f %f %f\n",n1, t1, i1, t2, n, k,
@@ -324,34 +326,36 @@ static __global__ void find_angular_gardc_neigh(
         gn12 += fn12[k] * coeff3[c_index];
         gnp12 += fnp12[k] * coeff3[c_index];
       }
-      // double f12d[MAX_LMAX * 4] = {0.0}; // dfeat/drij [nl+n+n, 4]
-      double f12k[TYPES * MAX_NUM_N * 4] = {0.0};// max type is 20
-      if (L_max5 > 0) {
-        scd_accumulate_f12_with_5body(
-          n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
-            blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-            f12, f12k, scd_r12, fn12, fnp12,
-            t2, num_types, L_max3,
-            max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1);
-      } else if (L_max4 > 0) {
-        scd_accumulate_f12_with_4body(
-          n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
-            blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-            f12, f12k, scd_r12, fn12, fnp12,
-            t2, num_types, L_max3,
-            max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1);
-      } else {
-        scd_accumulate_f12(
-          n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
-            blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-            f12, f12k, scd_r12, fn12, fnp12,
-            t2, num_types, L_max3,
-            max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1);
-      }
-      for (int j = 0; j < num_types; ++j){
+      // Process one element type at a time so the per-thread scratch
+      // space does not grow with the number of model element types.
+      for (int j = 0; j < num_types; ++j) {
+        double f12k[MAX_NUM_N * 4] = {0.0};
+        bool same_type = (t2 == j);
+        if (L_max5 > 0) {
+          scd_accumulate_f12_with_5body(
+            n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
+              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
+              f12, f12k, scd_r12, fn12, fnp12,
+              j, num_types, L_max3,
+              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+        } else if (L_max4 > 0) {
+          scd_accumulate_f12_with_4body(
+            n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
+              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
+              f12, f12k, scd_r12, fn12, fnp12,
+              j, num_types, L_max3,
+              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+        } else {
+          scd_accumulate_f12(
+            n, d12, r12, gn12, gnp12, Fp, dsnlm_dc, sum_fxyz,
+              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
+              f12, f12k, scd_r12, fn12, fnp12,
+              j, num_types, L_max3,
+              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+        }
         for (int k = 0; k < base_3b; ++k){
           int dc_id = dc_start_idx + j * max_3b * base_3b + n*base_3b + k;
-          int k_id = j * base_3b * 4 + k * 4;
+          int k_id = k * 4;
           dfeat_c3[dc_id] += (f12k[k_id] + f12k[k_id+1] + f12k[k_id+2] + f12k[k_id+3]);
           // if (n1 == 0){
           //   printf("n1=%d t1=%d n2=%d t2=%d n=%d k=%d dc=%f frxyz = %f %f %f %f\n",n1, t1, i1, t2, n, k,
@@ -471,7 +475,7 @@ static __global__ void find_angular_gardc_neigh_optimized(
         gnp12 += fnp12[k] * coeff3[c_index];
       }
       // double f12d[MAX_LMAX * 4] = {0.0}; // dfeat/drij [nl+n+n, 4]
-      // double f12k[TYPES * MAX_NUM_N * 4] = {0.0};// max type is 20
+      // Reuse one fixed-size f12k buffer for each element type.
       for (int j = 0; j < num_types; ++j) {
         double f12k[MAX_NUM_N * 4] = {0.0}; // (20*4)*8=640 Bytes
         bool same_type = (t2 == j);
@@ -622,7 +626,7 @@ static __global__ void find_angular_gardc_neigh_optimized_2(
         gnp12 += fnp12[k] * coeff3[c_index];
       }
       // min (1*20*4)*8=640 Bytes, max (20*20*4)*8=12800 Bytes
-      // double f12k[TYPES * MAX_NUM_N * 4] = {0.0};// max type is 20
+      // Reuse one fixed-size f12k buffer for each element type.
       for (int j = 0; j < num_types; ++j) {
         double f12k[MAX_NUM_N * 4] = {0.0}; // (20*4)*8=640 Bytes
         bool same_type = (t2 == j);
