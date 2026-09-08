@@ -13,6 +13,14 @@ KERNEL = "nep_mb_secondgrad_fused"
 
 
 @dataclasses.dataclass(frozen=True)
+class CalleeRecord:
+    name: str
+    stack_bytes: int
+    spill_load_bytes: int
+    spill_store_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
 class ResourceRecord:
     name: str
     sm: int
@@ -21,6 +29,7 @@ class ResourceRecord:
     stack_bytes: int
     spill_load_bytes: int
     spill_store_bytes: int
+    callees: tuple[CalleeRecord, ...] = ()
 
 
 ENTRY = re.compile(r"Compiling entry function '([^']+)' for 'sm_(\d+)'")
@@ -37,10 +46,15 @@ def parse(log):
     pending = None
     properties_seen = False
     memory = None
+    active_index = None
+    callee = None
     for line in log.splitlines():
         entry = ENTRY.search(line)
         properties = PROPERTIES.search(line)
         if entry:
+            if callee is not None:
+                raise SystemExit(f"incomplete fused callee resource record: {callee}")
+            active_index = None
             if pending is not None:
                 raise SystemExit(f"incomplete fused resource record: {pending[0]}")
             name, sm = entry.groups()
@@ -64,7 +78,23 @@ def parse(log):
                     raise SystemExit(f"incomplete fused resource record: {pending[0]}")
                 stack, stores, loads = memory
                 records.append(ResourceRecord(*pending, int(match[1]), stack, loads, stores))
+                active_index = len(records) - 1
                 pending = None
+        elif active_index is not None:
+            # ptxas emits callee properties after the entry's register line.
+            # They belong to that fused entry until the next compiling entry.
+            if properties:
+                if callee is not None:
+                    raise SystemExit(f"incomplete fused callee resource record: {callee}")
+                callee = properties[1]
+            elif callee is not None and (match := MEMORY.search(line)):
+                stack, stores, loads = map(int, match.groups())
+                record = records[active_index]
+                helper = CalleeRecord(callee, stack, loads, stores)
+                records[active_index] = dataclasses.replace(record, callees=record.callees + (helper,))
+                callee = None
+    if callee is not None:
+        raise SystemExit(f"incomplete fused callee resource record: {callee}")
     if pending is not None:
         raise SystemExit(f"incomplete fused resource record: {pending[0]}")
     return records
@@ -77,6 +107,10 @@ def validate(records):
     if missing := required - present:
         raise SystemExit(f"missing fused resource records: {sorted(missing)}")
     for record in fused:
+        for callee in record.callees:
+            if callee.spill_load_bytes or callee.spill_store_bytes:
+                raise SystemExit(f"sm_{record.sm} CTA={record.cta_threads} {record.name}: "
+                                 f"callee spills detected: {callee}")
         if record.spill_load_bytes or record.spill_store_bytes:
             raise SystemExit(f"{record.name}: spills detected: {record}")
         if record.registers >= 253:
@@ -92,6 +126,9 @@ def main():
         print(f"sm_{record.sm} CTA={record.cta_threads} registers={record.registers} "
               f"stack={record.stack_bytes} spill_loads={record.spill_load_bytes} "
               f"spill_stores={record.spill_store_bytes}")
+        for callee in record.callees:
+            print(f"  callee={callee.name} stack={callee.stack_bytes} "
+                  f"spill_loads={callee.spill_load_bytes} spill_stores={callee.spill_store_bytes}")
     validate(records)
     print(f"PASS: {len(records)} fused resource records; no spills and registers < 253")
 
