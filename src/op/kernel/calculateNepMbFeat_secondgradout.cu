@@ -230,7 +230,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     cudaDeviceSynchronize();
 }
 
-void launch_calculate_nepmbfeat_secondgradout_c3_legacy(
+static void launch_calculate_nepmbfeat_secondgradout_c3_legacy(
     const double * grad_second,
     const double * d12,
     const int64_t * NL,

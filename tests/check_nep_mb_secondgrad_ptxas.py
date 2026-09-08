@@ -40,6 +40,18 @@ REGISTERS = re.compile(r"Used (\d+) registers")
 # NMAX, NBASIS, LMAX3, and TYPE_TILE and must not be confused with it.
 CTA = re.compile(r"nep_mb_secondgrad_fusedI.*Li(\d+)EEv")
 
+# CUDA 11.8 emits these out-of-line callees for the supported 5/9/4,
+# four-/five-body specialization, for both CTA widths. Check the set rather
+# than a following entry or a particular callee order: a complete log may end
+# here, and a truncated log may omit whole property blocks.
+REQUIRED_CALLEES = frozenset(
+    [f"_ZN21nep_mb_secondgrad_opt22accumulate_cross_basisILi{i}ELi5ELi9ELi4EEEvRKNS_19AngularContributionEii" for i in range(1, 5)] +
+    [f"_ZN21nep_mb_secondgrad_opt23accumulate_direct_basisILi{i}ELi5ELi9ELi4EEEvRKNS_19AngularContributionEii" for i in range(1, 5)] +
+    [f"_ZN21nep_mb_secondgrad_opt24accumulate_angular_orderILi{i}ELi5ELi9ELi4ELb1ELb1ELi4EEEvRKNS_15NeighborContextIXT1_EEE" for i in range(1, 5)] +
+    [f"_ZN21nep_mb_secondgrad_opt26accumulate_{body}_body_basisILb{i}ELi5ELi9ELi4EEEvRKNS_19AngularContributionEii" for body in ("four", "five") for i in (0, 1)] +
+    ["__internal_trig_reduction_slowpathd"]
+)
+
 
 def parse(log):
     records = []
@@ -107,6 +119,11 @@ def validate(records):
     if missing := required - present:
         raise SystemExit(f"missing fused resource records: {sorted(missing)}")
     for record in fused:
+        missing_callees = REQUIRED_CALLEES - {callee.name for callee in record.callees}
+        if missing_callees:
+            raise SystemExit(
+                f"incomplete fused callee coverage: sm_{record.sm} "
+                f"CTA={record.cta_threads} {record.name}: missing {sorted(missing_callees)}")
         for callee in record.callees:
             if callee.spill_load_bytes or callee.spill_store_bytes:
                 raise SystemExit(f"sm_{record.sm} CTA={record.cta_threads} {record.name}: "

@@ -6,22 +6,40 @@ from pathlib import Path
 import pytest
 
 CHECKER = Path(__file__).with_name("check_nep_mb_secondgrad_ptxas.py")
+CALLEE_NAMES = (
+    [f"_ZN21nep_mb_secondgrad_opt22accumulate_cross_basisILi{i}ELi5ELi9ELi4EEEvRKNS_19AngularContributionEii" for i in range(1, 5)] +
+    [f"_ZN21nep_mb_secondgrad_opt23accumulate_direct_basisILi{i}ELi5ELi9ELi4EEEvRKNS_19AngularContributionEii" for i in range(1, 5)] +
+    [f"_ZN21nep_mb_secondgrad_opt24accumulate_angular_orderILi{i}ELi5ELi9ELi4ELb1ELb1ELi4EEEvRKNS_15NeighborContextIXT1_EEE" for i in range(1, 5)] +
+    [f"_ZN21nep_mb_secondgrad_opt26accumulate_{body}_body_basisILb{i}ELi5ELi9ELi4EEEvRKNS_19AngularContributionEii" for body in ("four", "five") for i in (0, 1)] +
+    ["__internal_trig_reduction_slowpathd"]
+)
 
 
-def record(sm, threads, registers=252, stack=0, stores=0, loads=0):
+def callee_resource(name):
+    return (f"ptxas info    : Function properties for {name}\n"
+            "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\n")
+
+
+def entry_resource(sm, threads, registers=252, stack=0, stores=0, loads=0):
     name = f"_Z23nep_mb_secondgrad_fusedILi5ELi9ELi4ELb1ELb1ELi4ELi{threads}EEv19NepMbSecondGradArgs"
     return (
         f"ptxas info    : Compiling entry function '{name}' for 'sm_{sm}'\n"
         f"ptxas info    : Function properties for {name}\n"
         f"    {stack} bytes stack frame, {stores} bytes spill stores, {loads} bytes spill loads\n"
         f"ptxas info    : Used {registers} registers, 544 bytes cmem[0]\n"
-        "ptxas info    : Function properties for __internal_trig_reduction_slowpathd\n"
-        "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\n"
+    )
+
+
+def record(sm, threads, registers=252, stack=0, stores=0, loads=0):
+    return (
+        entry_resource(sm, threads, registers, stack, stores, loads) +
+        "".join(callee_resource(name) for name in CALLEE_NAMES)
     )
 
 
 def complete_log():
-    return "build noise\n" + "".join(record(sm, cta) for sm in (60, 70, 86) for cta in (32, 64))
+    return ("build noise\n" +
+            "".join(record(sm, cta) for sm in (60, 70, 86) for cta in (32, 64)))
 
 
 def run_checker(tmp_path, log):
@@ -86,9 +104,35 @@ def test_incomplete_helper_fails(tmp_path):
     assert "incomplete" in result.stderr.lower()
 
 
+def test_truncated_after_last_required_entry_registers_fails(tmp_path):
+    complete_pairs = [(60, 32), (60, 64), (70, 64), (86, 32), (86, 64)]
+    log = ("build noise\n" +
+           "".join(record(sm, cta) for sm, cta in complete_pairs) +
+           entry_resource(70, 32))
+    result = run_checker(tmp_path, log)
+    assert result.returncode != 0
+    assert "incomplete" in result.stderr.lower()
+
+
 def test_unrelated_entry_helper_spills_are_ignored(tmp_path):
     unrelated = ("ptxas info    : Compiling entry function '_Z6legacyv' for 'sm_70'\n"
                  "ptxas info    : Function properties for _Z19accumulate_neighbor_helper\n"
                  "    96 bytes stack frame, 8 bytes spill stores, 16 bytes spill loads\n")
     result = run_checker(tmp_path, complete_log() + unrelated)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("name", CALLEE_NAMES)
+def test_missing_required_callee_fails_even_before_next_entry(tmp_path, name):
+    log = complete_log().replace(callee_resource(name), "", 1)
+    result = run_checker(tmp_path, log)
+    assert result.returncode != 0
+    assert "incomplete fused callee coverage" in result.stderr.lower()
+    assert "sm_60" in result.stderr and "CTA=32" in result.stderr
+
+
+def test_complete_callees_in_reverse_order_at_eof_pass(tmp_path):
+    normal = "".join(callee_resource(name) for name in CALLEE_NAMES)
+    reverse = "".join(callee_resource(name) for name in reversed(CALLEE_NAMES))
+    result = run_checker(tmp_path, complete_log().replace(normal, reverse))
     assert result.returncode == 0, result.stderr
