@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import re
 
 import pytest
 import torch
@@ -145,9 +146,49 @@ def test_invalid_secondgrad_mode_is_rejected():
         _coefficient_second_grad(_single_type_case(), "invalid")
 
 
-def test_optimized_secondgrad_mode_reports_unavailable_specialization():
-    with pytest.raises(RuntimeError, match="specialization is unavailable"):
+def test_optimized_secondgrad_mode_reports_unsupported_specialization():
+    with pytest.raises(RuntimeError, match="unsupported optimized NEP"):
         _coefficient_second_grad(_single_type_case(), "optimized")
+
+
+@pytest.mark.parametrize("lmax", [(4, 0, 0), (4, 2, 0), (4, 2, 1)])
+def test_auto_matches_legacy_for_body_combinations(lmax):
+    case = _repeated_type_case(n_max=4, n_base=8, lmax=lmax)
+    _assert_triplet_close(
+        _coefficient_second_grad(case, "auto"),
+        _coefficient_second_grad(case, "legacy"),
+    )
+
+
+@pytest.mark.parametrize("n_max,n_base,lmax", [
+    (4, 9, (4, 2, 1)),
+    (5, 8, (4, 2, 1)),
+    (5, 9, (3, 2, 1)),
+    (5, 9, (4, 0, 1)),
+    (5, 9, (4, 2, 0)),
+], ids=["radial", "basis", "three-body", "four-body", "five-body"])
+def test_forced_optimized_rejects_unsupported_shape(n_max, n_base, lmax):
+    case = _single_type_case(n_max=n_max, n_base=n_base, lmax=lmax)
+    with pytest.raises(RuntimeError, match="unsupported optimized NEP") as error:
+        _coefficient_second_grad(case, "optimized")
+    message = str(error.value)
+    for key, value in zip(
+        ("n_max_3b", "n_base_3b", "lmax_3", "lmax_4", "lmax_5"),
+        (n_max, n_base, *lmax),
+    ):
+        assert f"{key}={value}" in message
+    required = re.search(r"required_shared_bytes=(\d+)", message)
+    available = re.search(r"available_shared_bytes=(\d+)", message)
+    assert required and int(required.group(1)) > 0
+    assert available and int(available.group(1)) > 0
+
+
+def test_auto_matches_optimized_for_omat24_shape():
+    case = _six_local_type_case()
+    _assert_triplet_close(
+        _coefficient_second_grad(case, "auto"),
+        _coefficient_second_grad(case, "optimized"),
+    )
 
 
 @pytest.mark.parametrize("case", [

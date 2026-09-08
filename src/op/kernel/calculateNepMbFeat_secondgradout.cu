@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAStream.h>
 
 __global__ void compute_gradsecond_mbgradout(
@@ -387,9 +389,13 @@ void launch_calculate_nepmbfeat_secondgradout_c3_legacy(
     cudaDeviceSynchronize();
 }
 
-static bool is_omat24_specialization(
-    int nmax, int nbasis, int lmax3, int lmax4, int lmax5) {
-    return nmax == 5 && nbasis == 9 && lmax3 == 4 && lmax4 > 0 && lmax5 > 0;
+static bool nep_mb_secondgrad_optimized_supported(
+    int nmax, int nbasis, int lmax3, int lmax4, int lmax5,
+    size_t shared_bytes, const cudaDeviceProp& prop) {
+    return prop.major >= 6 &&
+           nmax == 5 && nbasis == 9 && lmax3 == 4 &&
+           lmax4 > 0 && lmax5 > 0 &&
+           shared_bytes <= prop.sharedMemPerBlock;
 }
 
 bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device) {
@@ -448,26 +454,41 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     const int multi_feat_num,
     const int device
 ) {
-    switch (nep_mb_secondgrad_mode()) {
-    case NepMbSecondGradMode::Auto:
-    case NepMbSecondGradMode::Legacy:
-        launch_calculate_nepmbfeat_secondgradout_c3_legacy(
-            grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
-            coeff3, gradsecond_c3, rcut_angular, atom_nums, maxneighs,
-            n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5,
-            feat_2b_num, multi_feat_num, device);
-        return;
-    case NepMbSecondGradMode::Optimized:
-        if (is_omat24_specialization(n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5)
-            && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES) {
+    const auto mode = nep_mb_secondgrad_mode();
+    if (mode != NepMbSecondGradMode::Legacy) {
+        cudaDeviceProp prop{};
+        C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+        constexpr size_t shared_bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
+        const bool supported = nep_mb_secondgrad_optimized_supported(
+            n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5, shared_bytes, prop)
+            && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES;
+        if (mode == NepMbSecondGradMode::Optimized) {
+            if (!supported) {
+                throw std::runtime_error(
+                    "unsupported optimized NEP many-body second gradient: "
+                    "n_max_3b=" + std::to_string(n_max_3b) +
+                    ", n_base_3b=" + std::to_string(n_base_3b) +
+                    ", lmax_3=" + std::to_string(lmax_3) +
+                    ", lmax_4=" + std::to_string(lmax_4) +
+                    ", lmax_5=" + std::to_string(lmax_5) +
+                    ", atom_types=" + std::to_string(atom_types) +
+                    ", compute_capability=" + std::to_string(prop.major) +
+                    "." + std::to_string(prop.minor) +
+                    ", required_shared_bytes=" + std::to_string(shared_bytes) +
+                    ", available_shared_bytes=" + std::to_string(prop.sharedMemPerBlock));
+            }
             const NepMbSecondGradArgs args{
                 grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
                 coeff3, gradsecond_c3, rcut_angular, 1.0 / rcut_angular,
                 atom_nums, maxneighs, atom_types, feat_2b_num, multi_feat_num};
-            if (launch_nep_mb_secondgrad_omat24(args, device)) return;
+            launch_nep_mb_secondgrad_omat24(args, device);
+            return;
         }
-        throw std::runtime_error(
-            "optimized NEP many-body second-gradient specialization is unavailable");
+        // Auto deliberately retains legacy until the Task 6 performance gates pass.
     }
-    throw std::runtime_error("unreachable NEP many-body second-gradient mode");
+    launch_calculate_nepmbfeat_secondgradout_c3_legacy(
+        grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
+        coeff3, gradsecond_c3, rcut_angular, atom_nums, maxneighs,
+        n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5,
+        feat_2b_num, multi_feat_num, device);
 }
