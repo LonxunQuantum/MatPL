@@ -203,22 +203,37 @@ def test_auto_matches_optimized_for_omat24_shape():
     _repeated_type_case(),
     _six_local_type_case(),
     _wide_neighbor_case(),
+    _wide_neighbor_case(valid_neighbors=65, max_neighbors=67),
     _empty_slot_case(),
     dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
-], ids=["single-type", "repeated-types", "six-local-types", "wide-neighbors", "empty-slots", "radial-prefix"])
+], ids=[
+    "single-type", "repeated-types", "six-local-types",
+    "cta32-wide_neighbor-43", "cta64-wide_neighbor-67",
+    "empty-slots", "radial-prefix",
+])
 def test_optimized_matches_legacy(case):
     legacy = _coefficient_second_grad(case, "legacy")
     optimized = _coefficient_second_grad(case, "optimized")
     _assert_triplet_close(optimized, legacy)
 
 
-@pytest.mark.parametrize("case", [
-    dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
-    _wide_neighbor_case(),
-], ids=["32-threads-radial-prefix", "64-threads"])
-def test_optimized_secondgrad_obeys_current_stream(case):
+@pytest.mark.parametrize("case,expected_threads", [
+    (dataclasses.replace(_repeated_type_case(), feat_2b_num=6), 32),
+    (_wide_neighbor_case(), 32),
+    (_wide_neighbor_case(valid_neighbors=65, max_neighbors=67), 64),
+], ids=[
+    "cta32-radial-prefix", "cta32-wide_neighbor-43", "cta64-wide_neighbor-67",
+])
+def test_optimized_secondgrad_obeys_current_stream(case, expected_threads):
     legacy = _coefficient_second_grad(case, "legacy")
     stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        optimized = _coefficient_second_grad(case, "optimized", delay_default_stream=True)
+    with torch.profiler.profile(activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ]) as profiler:
+        with torch.cuda.stream(stream):
+            optimized = _coefficient_second_grad(case, "optimized", delay_default_stream=True)
+    kernel_names = [event.key for event in profiler.key_averages()]
+    cta_pattern = rf"nep_mb_secondgrad_fused.*(?:\(int\){expected_threads}|, {expected_threads}>)"
+    assert any(re.search(cta_pattern, name) for name in kernel_names), kernel_names
     _assert_triplet_close(optimized, legacy)
