@@ -199,6 +199,101 @@ class _FusedFitting(torch.autograd.Function):
         return (*gradients, None, None, None)
 
 
+def _pack_charge_parameters(fitting_net: Sequence, type_ids: Sequence[int]):
+    """Pack QNEP heads separately so unused original parameters keep grad=None."""
+    if not fitting_net:
+        raise ValueError("charge fitting requires at least one fitting network")
+    selected_ids = tuple(int(type_id) for type_id in type_ids)
+    if not selected_ids:
+        net = fitting_net[0]
+        if not (hasattr(net, "energy_head") and hasattr(net, "charge_head")):
+            raise ValueError("charge fitting requires QNEPFittingNet instances")
+        W0 = net.layers[0].weight
+        D, H = W0.shape
+        return (
+            W0.new_empty((0, D, H)), W0.new_empty((0, H)),
+            W0.new_empty((0, H, 1)), W0.new_empty((0, 1)),
+            W0.new_empty((0, H, 1)), W0.new_empty((0, 1)),
+        )
+
+    packed = ([], [], [], [], [], [])
+    for type_id in selected_ids:
+        if type_id < 0 or type_id >= len(fitting_net):
+            raise ValueError(f"atom type id {type_id} has no fitting network")
+        net = fitting_net[type_id]
+        if not (hasattr(net, "energy_head") and hasattr(net, "charge_head")):
+            raise ValueError("charge fitting requires QNEPFittingNet instances")
+        if len(net.layers) != 1:
+            raise ValueError("fused QNEP fitting requires exactly one hidden layer")
+        hidden = net.layers[0]
+        W = hidden.weight
+        b = (
+            hidden.bias.reshape(-1)
+            if net.bias_flag and hidden.bias is not None
+            else _zero_bias(W, W.shape[1])
+        )
+        VE = net.energy_head.weight
+        CE = (
+            net.energy_head.bias.reshape(-1)
+            if net.energy_head.bias is not None else _zero_bias(W, 1)
+        )
+        VQ = net.charge_head.weight
+        CQ = (
+            net.charge_head.bias.reshape(-1)
+            if net.charge_head.bias is not None else _zero_bias(W, 1)
+        )
+        for values, value in zip(packed, (W, b, VE, CE, VQ, CQ)):
+            values.append(value)
+    return tuple(torch.stack(values) for values in packed)
+
+
+class _FusedChargeFitting(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, X, W, b, VE, CE, VQ, CQ, atom_ids, offsets, counts):
+        ctx.set_materialize_grads(False)
+        ctx.counts = tuple(counts)
+        ctx.save_for_backward(X, W, b, VE, CE, VQ, CQ, atom_ids, offsets)
+        V = torch.cat((VE, VQ), dim=2)
+        c = torch.cat((CE, CQ), dim=1)
+        Y, G = _load_raw_ops().nep_fitting_forward(
+            X, W, b, V, c, atom_ids, offsets, list(ctx.counts)
+        )
+        return Y[0], Y[1], G[0], G[1]
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, gradEi, gradCharge, gradGE, gradGQ):
+        X, W, b, VE, CE, VQ, CQ, atom_ids, offsets = ctx.saved_tensors
+        N, D = X.shape
+        use_e_weight = gradEi is not None or gradGE is not None
+        use_q_weight = gradCharge is not None or gradGQ is not None
+        use_e_bias = gradEi is not None
+        use_q_bias = gradCharge is not None
+        if gradEi is None:
+            gradEi = X.new_zeros(N)
+        if gradCharge is None:
+            gradCharge = X.new_zeros(N)
+        if gradGE is None:
+            gradGE = X.new_zeros((N, D))
+        if gradGQ is None:
+            gradGQ = X.new_zeros((N, D))
+        V = torch.cat((VE, VQ), dim=2)
+        c = torch.cat((CE, CQ), dim=1)
+        gradX, gradW, gradb, gradV, gradc = _load_raw_ops().nep_fitting_backward(
+            X, W, b, V, c, atom_ids, offsets, list(ctx.counts),
+            torch.stack((gradEi, gradCharge)).contiguous(),
+            torch.stack((gradGE, gradGQ)).contiguous(),
+        )
+        return (
+            gradX, gradW, gradb,
+            gradV[:, :, 0:1] if use_e_weight else None,
+            gradc[:, 0:1] if use_e_bias else None,
+            gradV[:, :, 1:2] if use_q_weight else None,
+            gradc[:, 1:2] if use_q_bias else None,
+            None, None, None,
+        )
+
+
 def fused_fitting(X, W, b, V, c, groups: FittingGroups):
     """Evaluate energy/charge and descriptor gradients with the fused raw op."""
     if X.dtype != torch.float64 or any(t.dtype != torch.float64 for t in (W, b, V, c)):
@@ -221,4 +316,36 @@ def fused_fitting(X, W, b, V, c, groups: FittingGroups):
     return _FusedFitting.apply(X, W, b, V, c, groups.atom_ids, groups.offsets, groups.counts)
 
 
-__all__ = ["FittingGroups", "build_fitting_groups", "pack_fitting_parameters", "fused_fitting"]
+def fused_charge_fitting(X, fitting_net: Sequence, groups: FittingGroups):
+    """Evaluate QNEP heads while preserving per-head unused-gradient semantics."""
+    W, b, VE, CE, VQ, CQ = _pack_charge_parameters(fitting_net, groups.type_ids)
+    if X.dtype != torch.float64 or any(
+        tensor.dtype != torch.float64 for tensor in (W, b, VE, CE, VQ, CQ)
+    ):
+        raise TypeError("fused QNEP fitting requires float64 inputs")
+    if X.ndim != 2 or W.ndim != 3 or b.ndim != 2:
+        raise ValueError("invalid fused QNEP fitting tensor ranks")
+    N, D = X.shape
+    Ta, packed_D, H = W.shape
+    if packed_D != D or b.shape != (Ta, H):
+        raise ValueError("inconsistent fused QNEP hidden parameter shapes")
+    if any(tensor.shape != (Ta, H, 1) for tensor in (VE, VQ)):
+        raise ValueError("inconsistent fused QNEP head weight shapes")
+    if any(tensor.shape != (Ta, 1) for tensor in (CE, CQ)):
+        raise ValueError("inconsistent fused QNEP head bias shapes")
+    if D > 96 or H > 100:
+        raise ValueError("fused QNEP fitting supports D<=96 and H<=100")
+    if len(groups.type_ids) != Ta or len(groups.counts) != Ta or sum(groups.counts) != N:
+        raise ValueError("fitting groups do not match packed parameters and input rows")
+    if groups.atom_ids.device != X.device or groups.offsets.device != X.device:
+        raise ValueError("fitting group indices must be on the input device")
+    return _FusedChargeFitting.apply(
+        X, W, b, VE, CE, VQ, CQ,
+        groups.atom_ids, groups.offsets, groups.counts,
+    )
+
+
+__all__ = [
+    "FittingGroups", "build_fitting_groups", "pack_fitting_parameters",
+    "fused_fitting", "fused_charge_fitting",
+]

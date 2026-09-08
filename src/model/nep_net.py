@@ -15,6 +15,7 @@ from src.utils.debug_operation import check_cuda_memory
 from src.utils.op_loader import load_calc_ops
 sys.path.append(os.getcwd())
 from src.model.nep_fitting import FittingNet, QNEPFittingNet
+from src.model.nep_fused_fitting import fused_fitting, fused_charge_fitting, pack_fitting_parameters
 CalcOps = load_calc_ops()
    
 class NEP(nn.Module):
@@ -443,7 +444,8 @@ class NEP(nn.Module):
                 need_force: Optional[bool] = True,
                 need_bec: Optional[bool] = True,
                 need_charge_virial: Optional[bool] = True,
-                need_charge_energy: Optional[bool] = True) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+                need_charge_energy: Optional[bool] = True,
+                fitting_groups=None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass of the model.
 
@@ -559,7 +561,8 @@ class NEP(nn.Module):
         feats_in = self.q_scaler * feats
         # feats_in = (feats-self.q_min)/(self.q_max-self.q_min)
         if use_analytical_nep_grad:
-            Ei, charge, grad_feat_E_scaled, grad_feat_Q_scaled = self.calculate_Ei_with_grad(atom_type_map, feats_in, device)
+            Ei, charge, grad_feat_E_scaled, grad_feat_Q_scaled = self.calculate_Ei_with_grad(
+                atom_type_map, feats_in, device, fitting_groups=fitting_groups)
         else:
             Ei, charge = self.calculate_Ei(atom_type_map, feats_in, device)
             grad_feat_E_scaled, grad_feat_Q_scaled = None, None
@@ -1235,8 +1238,27 @@ class NEP(nn.Module):
             self,
             Imagetype_map: torch.Tensor,
             feats_scaled: torch.Tensor,
-            device: torch.device
+            device: torch.device,
+            fitting_groups=None
             ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+        if (fitting_groups is not None and fitting_groups.type_ids and
+                feats_scaled.is_cuda and not torch.version.hip and
+                feats_scaled.dtype == torch.float64 and
+                len(self.neuron) == 2 and 1 <= self.neuron[0] <= 100 and
+                1 <= feats_scaled.shape[1] <= 96):
+            if self.charge_mode:
+                Ei, charge, grad_e, grad_q = fused_charge_fitting(
+                    feats_scaled, self.fitting_net, fitting_groups)
+            else:
+                parameters = pack_fitting_parameters(self.fitting_net, fitting_groups.type_ids)
+                outputs, input_grads = fused_fitting(feats_scaled, *parameters, fitting_groups)
+                Ei, charge, grad_e, grad_q = outputs[0], None, input_grads[0], None
+            if self.charge_mode and self.gpumd_nep4:
+                Ei = Ei + self.common_bias
+            # Every head retains the full [N,D] row stride required by the
+            # existing radial/angular descriptor gradient kernels.
+            return Ei, charge, grad_e, grad_q
+
         Ei = torch.zeros(Imagetype_map.shape[0], dtype=self.dtype, device=device)
         grad_feat_E_scaled = torch.zeros_like(feats_scaled)
         if self.charge_mode:

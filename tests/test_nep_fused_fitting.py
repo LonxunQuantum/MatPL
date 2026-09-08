@@ -185,9 +185,12 @@ class TestPackFittingParameters(unittest.TestCase):
         self.assertIsNone(net.layers[0].bias.grad)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA/HIP GPU")
+@unittest.skipUnless(torch.cuda.is_available() and not torch.version.hip,
+                     "requires a CUDA allocation")
 class TestFusedFittingGPU(unittest.TestCase):
-    CASES = ((35, 40, 1), (35, 60, 2), (31, 33, 1), (65, 99, 2), (96, 100, 2))
+    CASES = tuple((D, H, Q) for D, H in
+                  ((35, 40), (35, 60), (31, 33), (65, 99), (96, 100))
+                  for Q in (1, 2))
 
     def _inputs(self, D, H, Q, atom_types=(2, 0, 2, 3, 0)):
         torch.manual_seed(D * 10000 + H * 10 + Q)
@@ -244,6 +247,22 @@ class TestFusedFittingGPU(unittest.TestCase):
                         self.assertIsNone(got)
                     else:
                         self._assert_close(got, want)
+
+    def test_imbalanced_groups_and_reused_reduction_slots_match_reference(self):
+        # With 89 types and maximum D/H, the 16 MiB workspace holds only a
+        # few slots per group. The common type must reuse them across chunks.
+        types = torch.tensor([0] * 1701 + list(range(1, 89)) * 2)
+        order = torch.randperm(len(types), generator=torch.Generator().manual_seed(47))
+        groups, values = self._inputs(96, 100, 2, tuple(types[order].tolist()))
+        actual = _adapter().fused_fitting(*values, groups)
+        expected = _reference(*values, groups)
+        for got, want in zip(actual, expected):
+            self._assert_close(got, want)
+        seeds = tuple(torch.randn_like(tensor) for tensor in actual)
+        actual_grad = torch.autograd.grad(actual, values, seeds)
+        expected_grad = torch.autograd.grad(expected, values, seeds)
+        for got, want in zip(actual_grad, expected_grad):
+            self._assert_close(got, want)
 
     def test_ragged_missing_types_permuted_rows_and_empty_atoms(self):
         for atom_types in ((4, 1, 4, 1, 4, 0), ()):

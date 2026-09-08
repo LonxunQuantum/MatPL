@@ -434,6 +434,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
             position=sample.get("position"),
             box_original=sample.get("box_original"),
             volume=sample.get("volume"),
+            fitting_groups=sample.get("fitting_groups"),
             **output_requests
         )
         # check_cuda_memory(epoch, -1, "end forword", False, args.rank)
@@ -831,6 +832,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                             position=sample.get("position"),
                             box_original=sample.get("box_original"),
                             volume=sample.get("volume"),
+                            fitting_groups=sample.get("fitting_groups"),
                             need_force=True,
                             need_bec=batch_has_bec_label,
                             need_charge_virial=need_charge_virial,
@@ -1045,6 +1047,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
                         position=sample.get("position"),
                         box_original=sample.get("box_original"),
                         volume=sample.get("volume"),
+                        fitting_groups=sample.get("fitting_groups"),
                         need_force=True,
                         need_bec=batch_has_bec_label,
                         need_charge_virial=need_charge_virial,
