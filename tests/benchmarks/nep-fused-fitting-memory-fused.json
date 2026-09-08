@@ -1,0 +1,12 @@
+{
+  "backend": "fused",
+  "structures": 256,
+  "atoms": 2045,
+  "seed": 2023,
+  "sampled_process_peak_mib": 3675,
+  "sample_interval_ms": 20,
+  "sample_count": 321,
+  "torch_peak_allocated": 621188096,
+  "torch_peak_reserved": 652214272,
+  "scope": "fresh process; includes CUDA context/native allocations; sampling may miss brief peaks; not a speed benchmark"
+}
