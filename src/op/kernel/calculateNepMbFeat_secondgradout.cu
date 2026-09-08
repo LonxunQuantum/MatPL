@@ -4,6 +4,9 @@
 #include "./utilities/error.cuh"
 #include "./utilities/gpu_vector.cuh"
 #include <iostream>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 #include <cuda_runtime.h>
 
 __global__ void compute_gradsecond_mbgradout(
@@ -222,7 +225,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3_bk(
     cudaDeviceSynchronize();
 }
 
-void launch_calculate_nepmbfeat_secondgradout_c3(
+void launch_calculate_nepmbfeat_secondgradout_c3_legacy(
     const double * grad_second,
     const double * d12,
     const int64_t * NL,
@@ -379,4 +382,60 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     n_base_3b);   
     CUDA_CHECK_KERNEL
     cudaDeviceSynchronize();
+}
+
+enum class NepMbSecondGradMode { Auto, Optimized, Legacy };
+
+static NepMbSecondGradMode nep_mb_secondgrad_mode() {
+    const char* value = std::getenv("MATPL_NEP_MB_SECONDGRAD_MODE");
+    if (value == nullptr || std::strcmp(value, "auto") == 0) {
+        return NepMbSecondGradMode::Auto;
+    }
+    if (std::strcmp(value, "optimized") == 0) {
+        return NepMbSecondGradMode::Optimized;
+    }
+    if (std::strcmp(value, "legacy") == 0) {
+        return NepMbSecondGradMode::Legacy;
+    }
+    throw std::runtime_error(
+        "MATPL_NEP_MB_SECONDGRAD_MODE must be auto, optimized, or legacy");
+}
+
+void launch_calculate_nepmbfeat_secondgradout_c3(
+    const double * grad_second,
+    const double * d12,
+    const int64_t * NL,
+    const double * de_dfeat,
+    const double * dsnlm_dc,
+    const double * sum_fxyz,
+    const int64_t * atom_map,
+    const double * coeff3,
+    double * gradsecond_c3,
+    const double rcut_angular,
+    const int atom_nums,
+    const int maxneighs,
+    const int n_max_3b,
+    const int n_base_3b,
+    const int atom_types,
+    const int lmax_3,
+    const int lmax_4,
+    const int lmax_5,
+    const int feat_2b_num,
+    const int multi_feat_num,
+    const int device
+) {
+    switch (nep_mb_secondgrad_mode()) {
+    case NepMbSecondGradMode::Auto:
+    case NepMbSecondGradMode::Legacy:
+        launch_calculate_nepmbfeat_secondgradout_c3_legacy(
+            grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
+            coeff3, gradsecond_c3, rcut_angular, atom_nums, maxneighs,
+            n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5,
+            feat_2b_num, multi_feat_num, device);
+        return;
+    case NepMbSecondGradMode::Optimized:
+        throw std::runtime_error(
+            "optimized NEP many-body second-gradient specialization is unavailable");
+    }
+    throw std::runtime_error("unreachable NEP many-body second-gradient mode");
 }
