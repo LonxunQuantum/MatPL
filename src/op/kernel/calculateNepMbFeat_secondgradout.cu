@@ -1,6 +1,7 @@
 #include "./utilities/nep_utilities.cuh"
 #include "./utilities/nep_feature.cuh"
 #include "./utilities/nep_mbgrad.cuh"
+#include "./utilities/nep_mbgrad_opt.cuh"
 #include "./utilities/error.cuh"
 #include "./utilities/gpu_vector.cuh"
 #include <iostream>
@@ -384,6 +385,26 @@ void launch_calculate_nepmbfeat_secondgradout_c3_legacy(
     cudaDeviceSynchronize();
 }
 
+static bool is_omat24_specialization(
+    int nmax, int nbasis, int lmax3, int lmax4, int lmax5) {
+    return nmax == 5 && nbasis == 9 && lmax3 == 4 && lmax4 > 0 && lmax5 > 0;
+}
+
+bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device) {
+    cudaSetDevice(device);
+    if (args.atom_count == 0) return true;
+    constexpr size_t bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
+    if (args.max_neighbors <= 32) {
+        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 32>
+            <<<args.atom_count, 32, bytes>>>(args);
+    } else {
+        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 64>
+            <<<args.atom_count, 64, bytes>>>(args);
+    }
+    CUDA_CHECK_KERNEL
+    return true;
+}
+
 enum class NepMbSecondGradMode { Auto, Optimized, Legacy };
 
 static NepMbSecondGradMode nep_mb_secondgrad_mode() {
@@ -434,6 +455,14 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
             feat_2b_num, multi_feat_num, device);
         return;
     case NepMbSecondGradMode::Optimized:
+        if (is_omat24_specialization(n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5)
+            && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES) {
+            const NepMbSecondGradArgs args{
+                grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
+                coeff3, gradsecond_c3, rcut_angular, 1.0 / rcut_angular,
+                atom_nums, maxneighs, atom_types, feat_2b_num, multi_feat_num};
+            if (launch_nep_mb_secondgrad_omat24(args, device)) return;
+        }
         throw std::runtime_error(
             "optimized NEP many-body second-gradient specialization is unavailable");
     }

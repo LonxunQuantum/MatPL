@@ -28,8 +28,40 @@ class CaseSpec:
     lmax_5: int
 
 
-def _single_type_case():
-    return CaseSpec((0, 0), ((1,), (0,)), 2, 2, 0, 1, 0, 0)
+def _single_type_case(n_max=2, n_base=2, lmax=(1, 0, 0)):
+    return CaseSpec((0, 0), ((1,), (0,)), n_max, n_base, 0, *lmax)
+
+
+def _repeated_type_case(n_types=3, n_max=5, n_base=9, lmax=(4, 2, 1)):
+    types = tuple(range(n_types)) * 2
+    neighbors = tuple(tuple(j for j in range(len(types)) if j != i) for i in range(len(types)))
+    return CaseSpec(types, neighbors, n_max, n_base, 0, *lmax)
+
+
+def _six_local_type_case(n_max=5, n_base=9, lmax=(4, 2, 1)):
+    types = (0, 0, 1, 2, 3, 4, 5)
+    neighbors = tuple(tuple(j for j in range(7) if j != i) for i in range(7))
+    return CaseSpec(types, neighbors, n_max, n_base, 0, *lmax)
+
+
+def _wide_neighbor_case(valid_neighbors=39, max_neighbors=43, n_max=5, n_base=9, lmax=(4, 2, 1)):
+    natoms = valid_neighbors + 1
+    types = tuple(i % 3 for i in range(natoms))
+    neighbors = tuple(
+        tuple(j for j in range(natoms) if j != i) + (-1,) * (max_neighbors - valid_neighbors)
+        for i in range(natoms)
+    )
+    return CaseSpec(types, neighbors, n_max, n_base, 0, *lmax)
+
+
+def _empty_slot_case(max_neighbors=8, n_max=5, n_base=9, lmax=(4, 2, 1)):
+    return CaseSpec(
+        (0, 1, 2),
+        ((1,) + (-1,) * (max_neighbors - 1),
+         (0,) + (-1,) * (max_neighbors - 1),
+         (-1,) * max_neighbors),
+        n_max, n_base, 0, *lmax,
+    )
 
 
 def _make_case(case):
@@ -39,7 +71,7 @@ def _make_case(case):
     nl = torch.tensor(case.neighbors, dtype=torch.int64, device=device)
     natoms, max_neighbors = nl.shape
     coords = torch.randn(natoms, max_neighbors, 3, dtype=dtype, device=device) * 0.25
-    distance = coords.square().sum(-1, keepdim=True).sqrt() + 0.8
+    distance = 0.8 + 2.7 * torch.rand(natoms, max_neighbors, 1, dtype=dtype, device=device)
     d12 = torch.cat((distance, coords), dim=-1).detach().requires_grad_(True)
     ntypes = max(case.atom_types) + 1
     coeff = torch.randn(
@@ -53,7 +85,11 @@ def _make_case(case):
         natoms, case.feat_2b_num + many_body, dtype=dtype, device=device,
         requires_grad=True,
     )
-    seed = torch.randn_like(feats, requires_grad=True)
+    # The custom VJP takes the many-body view of a full descriptor seed. Keep
+    # the full row stride and storage offset expected by the CUDA launchers;
+    # its backward returns only the many-body columns.
+    seed_storage = torch.randn_like(feats)
+    seed = seed_storage[:, case.feat_2b_num:].detach().requires_grad_(True)
     probe = torch.randn_like(d12)
     return coeff, d12, nl, atom_map, feats, seed, probe
 
@@ -102,3 +138,17 @@ def test_invalid_secondgrad_mode_is_rejected():
 def test_optimized_secondgrad_mode_reports_unavailable_specialization():
     with pytest.raises(RuntimeError, match="specialization is unavailable"):
         _coefficient_second_grad(_single_type_case(), "optimized")
+
+
+@pytest.mark.parametrize("case", [
+    _single_type_case(n_max=5, n_base=9, lmax=(4, 2, 1)),
+    _repeated_type_case(),
+    _six_local_type_case(),
+    _wide_neighbor_case(),
+    _empty_slot_case(),
+    dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
+], ids=["single-type", "repeated-types", "six-local-types", "wide-neighbors", "empty-slots", "radial-prefix"])
+def test_optimized_matches_legacy(case):
+    legacy = _coefficient_second_grad(case, "legacy")
+    optimized = _coefficient_second_grad(case, "optimized")
+    _assert_triplet_close(optimized, legacy)
