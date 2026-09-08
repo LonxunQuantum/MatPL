@@ -94,7 +94,7 @@ def _make_case(case):
     return coeff, d12, nl, atom_map, feats, seed, probe
 
 
-def _coefficient_second_grad(case, mode):
+def _coefficient_second_grad(case, mode, *, delay_default_stream=False):
     if CalcOps is None or not torch.cuda.is_available():
         pytest.skip("CUDA extension is unavailable")
     previous = os.environ.get("MATPL_NEP_MB_SECONDGRAD_MODE")
@@ -112,9 +112,19 @@ def _coefficient_second_grad(case, mode):
             5.0, 0,
         )
         loss = (vjp * probe).sum()
+        if delay_default_stream:
+            # Finish setup before introducing the stream-ordering challenge.
+            # The custom VJP node was created on the caller's non-default
+            # stream, which is also where autograd must run its backward.
+            torch.cuda.synchronize()
+            with torch.cuda.stream(torch.cuda.default_stream()):
+                torch.cuda._sleep(100_000_000)
         grad_seed, grad_coeff = torch.autograd.grad(loss, (seed, coeff))
+        # Consume both outputs on the calling stream before any device-wide
+        # synchronization can conceal a kernel launched on the wrong stream.
+        result = loss.detach(), grad_seed.detach().clone(), grad_coeff.detach().clone()
         torch.cuda.synchronize()
-        return loss.detach(), grad_seed.detach(), grad_coeff.detach()
+        return result
     finally:
         if previous is None:
             os.environ.pop("MATPL_NEP_MB_SECONDGRAD_MODE", None)
@@ -151,4 +161,16 @@ def test_optimized_secondgrad_mode_reports_unavailable_specialization():
 def test_optimized_matches_legacy(case):
     legacy = _coefficient_second_grad(case, "legacy")
     optimized = _coefficient_second_grad(case, "optimized")
+    _assert_triplet_close(optimized, legacy)
+
+
+@pytest.mark.parametrize("case", [
+    dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
+    _wide_neighbor_case(),
+], ids=["32-threads-radial-prefix", "64-threads"])
+def test_optimized_secondgrad_obeys_current_stream(case):
+    legacy = _coefficient_second_grad(case, "legacy")
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        optimized = _coefficient_second_grad(case, "optimized", delay_default_stream=True)
     _assert_triplet_close(optimized, legacy)

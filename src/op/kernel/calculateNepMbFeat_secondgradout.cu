@@ -9,6 +9,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAStream.h>
 
 __global__ void compute_gradsecond_mbgradout(
     const double *grad_second, // Shape: [batch_size, atom_nums, maxneighs, 4]
@@ -46,7 +47,8 @@ void launch_calculate_nepmbfeat_secondgradout(
     cudaSetDevice(device);
     dim3 blockDim(16, 16);
     dim3 gridDim((atom_nums + blockDim.x - 1) / blockDim.x, (feat_mb_nums + blockDim.y - 1) / blockDim.y);
-    compute_gradsecond_mbgradout<<<gridDim, blockDim>>>(
+    const auto stream = c10::cuda::getCurrentCUDAStream(device);
+    compute_gradsecond_mbgradout<<<gridDim, blockDim, 0, stream.stream()>>>(
         grad_second, 
         dfeat_b, 
         gradsecond_gradout,
@@ -394,12 +396,13 @@ bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device
     cudaSetDevice(device);
     if (args.atom_count == 0) return true;
     constexpr size_t bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
+    const auto stream = c10::cuda::getCurrentCUDAStream(device);
     if (args.max_neighbors <= 32) {
         nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 32>
-            <<<args.atom_count, 32, bytes>>>(args);
+            <<<args.atom_count, 32, bytes, stream.stream()>>>(args);
     } else {
         nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 64>
-            <<<args.atom_count, 64, bytes>>>(args);
+            <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
     }
     CUDA_CHECK_KERNEL
     return true;
