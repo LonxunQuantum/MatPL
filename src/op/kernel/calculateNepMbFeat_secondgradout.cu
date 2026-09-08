@@ -403,7 +403,7 @@ bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device
     if (args.atom_count == 0) return true;
     constexpr size_t bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
     const auto stream = c10::cuda::getCurrentCUDAStream(device);
-    if (args.max_neighbors <= 32) {
+    if (args.max_neighbors <= 64) {
         nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 32>
             <<<args.atom_count, 32, bytes, stream.stream()>>>(args);
     } else {
@@ -462,21 +462,21 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
         const bool supported = nep_mb_secondgrad_optimized_supported(
             n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5, shared_bytes, prop)
             && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES;
-        if (mode == NepMbSecondGradMode::Optimized) {
-            if (!supported) {
-                throw std::runtime_error(
-                    "unsupported optimized NEP many-body second gradient: "
-                    "n_max_3b=" + std::to_string(n_max_3b) +
-                    ", n_base_3b=" + std::to_string(n_base_3b) +
-                    ", lmax_3=" + std::to_string(lmax_3) +
-                    ", lmax_4=" + std::to_string(lmax_4) +
-                    ", lmax_5=" + std::to_string(lmax_5) +
-                    ", atom_types=" + std::to_string(atom_types) +
-                    ", compute_capability=" + std::to_string(prop.major) +
-                    "." + std::to_string(prop.minor) +
-                    ", required_shared_bytes=" + std::to_string(shared_bytes) +
-                    ", available_shared_bytes=" + std::to_string(prop.sharedMemPerBlock));
-            }
+        if (mode == NepMbSecondGradMode::Optimized && !supported) {
+            throw std::runtime_error(
+                "unsupported optimized NEP many-body second gradient: "
+                "n_max_3b=" + std::to_string(n_max_3b) +
+                ", n_base_3b=" + std::to_string(n_base_3b) +
+                ", lmax_3=" + std::to_string(lmax_3) +
+                ", lmax_4=" + std::to_string(lmax_4) +
+                ", lmax_5=" + std::to_string(lmax_5) +
+                ", atom_types=" + std::to_string(atom_types) +
+                ", compute_capability=" + std::to_string(prop.major) +
+                "." + std::to_string(prop.minor) +
+                ", required_shared_bytes=" + std::to_string(shared_bytes) +
+                ", available_shared_bytes=" + std::to_string(prop.sharedMemPerBlock));
+        }
+        if (supported) {
             const NepMbSecondGradArgs args{
                 grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
                 coeff3, gradsecond_c3, rcut_angular, 1.0 / rcut_angular,
@@ -484,7 +484,6 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
             launch_nep_mb_secondgrad_omat24(args, device);
             return;
         }
-        // Auto deliberately retains legacy until the Task 6 performance gates pass.
     }
     launch_calculate_nepmbfeat_secondgradout_c3_legacy(
         grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,

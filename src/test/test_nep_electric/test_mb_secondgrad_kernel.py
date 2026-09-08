@@ -185,8 +185,15 @@ def test_forced_optimized_rejects_unsupported_shape(n_max, n_base, lmax):
 
 def test_auto_matches_optimized_for_omat24_shape():
     case = _six_local_type_case()
+    with torch.profiler.profile(activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ]) as profiler:
+        automatic = _coefficient_second_grad(case, "auto")
+    kernel_names = [event.key for event in profiler.key_averages()]
+    assert any("nep_mb_secondgrad_fused" in name for name in kernel_names), kernel_names
     _assert_triplet_close(
-        _coefficient_second_grad(case, "auto"),
+        automatic,
         _coefficient_second_grad(case, "optimized"),
     )
 
