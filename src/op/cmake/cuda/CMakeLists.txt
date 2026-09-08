@@ -29,6 +29,9 @@ list(REMOVE_ITEM GPU_SOURCES ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
 
 # 5. 创建核心计算库（把所有.cpp和.cu文件都编译到这里）
 add_library(CalcOps_cuda SHARED ${GPU_SOURCES})
+target_compile_definitions(CalcOps_cuda PRIVATE MATPL_ENABLE_FUSED_FITTING)
+set_source_files_properties(${CMAKE_SOURCE_DIR}/kernel/nep_fitting.cu PROPERTIES
+    COMPILE_OPTIONS "-O3;--ptxas-options=-v")
 
 # 设置头文件包含路径
 target_include_directories(CalcOps_cuda PRIVATE
@@ -54,6 +57,7 @@ target_link_libraries(CalcOps_cuda PRIVATE ${TORCH_LIBRARIES})
 
 # 6. 创建Python绑定库
 add_library(CalcOps_bind SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
+target_compile_definitions(CalcOps_bind PRIVATE MATPL_ENABLE_FUSED_FITTING)
 target_compile_features(CalcOps_bind PRIVATE cxx_std_17)
 
 # 设置绑定库的头文件路径

@@ -11,6 +11,7 @@ import time
 # from src.feature.nep_find_neigh.findneigh import FindNeigh
 from typing import Union, Optional
 from tqdm import tqdm
+from src.model.nep_fused_fitting import build_fitting_groups
 CalcOps = load_calc_ops()
 
 # 无 BEC 标签时，可为指定离子生成价态对角张量；其他原子保持 -1e6 掩码。
@@ -57,6 +58,8 @@ def variable_length_collate_fn(batch):
                 res[key] = torch.stack(items, dim=0)
     if "num_atom" in res and len(res["num_atom"]) > 0:
         res["num_atom_sum"] = res["num_atom"].cumsum(0).to(res["num_atom"].dtype)
+    if "atom_type_map" in res:
+        res["fitting_groups"] = build_fitting_groups(res["atom_type_map"])
     return res
 
 

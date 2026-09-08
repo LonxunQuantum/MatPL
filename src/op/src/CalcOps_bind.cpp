@@ -2,8 +2,15 @@
 #include <torch/extension.h>
 
 #include "../include/CalcOps.h"
+#ifdef MATPL_ENABLE_FUSED_FITTING
+#include "../include/calculate_nepfitting.h"
+#endif
 
 TORCH_LIBRARY(CalcOps_cuda, m) {
+#ifdef MATPL_ENABLE_FUSED_FITTING
+    m.def("nep_fitting_forward", nep_fitting_forward);
+    m.def("nep_fitting_backward", nep_fitting_backward);
+#endif
     m.def("calculateForce", calculateForce);
     m.def("calculateVirial", calculateVirial);
     m.def("calculateCompress", calculateCompress);
