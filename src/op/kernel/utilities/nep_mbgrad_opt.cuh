@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// Correctness-first OMat24 path. Numerical expressions below are ported from
+// FP64 OMat24 path with per-angular-order scratch lifetimes. Numerical expressions below are ported from
 // nep_utilities_mb_secondc.cuh; only indexing and accumulation destinations differ.
 struct NepMbSecondGradArgs {
   const double* grad_second;
@@ -77,6 +77,198 @@ struct SharedTileSink {
   }
 };
 
+// Each angular order owns only its 2L+1 FP64 components. In particular, do
+// not rebuild the legacy six 24-element arrays in the neighbor scope.
+template<int L>
+struct AngularScratch {
+  static_assert(L >= 1 && L <= 4, "Supported angular orders");
+  double blm[2 * L + 1];
+  double rij_blm[2 * L + 1];
+  double dblm_x[2 * L + 1];
+  double dblm_y[2 * L + 1];
+  double dblm_z[2 * L + 1];
+  double dblm_r[2 * L + 1];
+};
+
+template<int L>
+__device__ __forceinline__ void build_angular_scratch(
+    double d12, double x, double y, double z, AngularScratch<L>& scratch) {
+
+  double d12inv = 1.0 / d12;
+  double x12 = x * d12inv;
+  double y12 = y * d12inv;
+  double z12 = z * d12inv;
+  double x2 = x * x;
+  double y2 = y * y;
+  double z2 = z * z;
+  double xy = x * y;
+  double xz = x * z;
+  double yz = y * z;
+  double r2 = d12 * d12;
+  double x2my2 = x2 - y2;
+  double xyz = x * yz;
+  double x3 = x * x2;
+  double y3 = y * y2;
+  double z3 = z * z2;
+  double r3 = d12 * r2;
+  double x12sq = x12 * x12;
+  double y12sq = y12 * y12;
+  double z12sq = z12 * z12;
+  double x12sq_minus_y12sq = x12sq - y12sq;
+  if constexpr (L == 1) {
+    scratch.blm[0]     = z;                                             // Y10 blm
+    scratch.dblm_r[0]  = 0.0;                                           // Y10 blm/dr
+    scratch.dblm_x[0]  = 0.0;                                           // Y10 blm/dx
+    scratch.dblm_y[0]  = 0.0;                                           // Y10 blm/dy
+    scratch.dblm_z[0]  = 1.0;                                           // Y10 blm/dz
+    scratch.rij_blm[0] = z12;                                           // Y10 sij_blm
+    scratch.blm[1]     = x;                                             // Y11_real
+    scratch.dblm_r[1]  = 0.0;
+    scratch.dblm_x[1]  = 1.0;
+    scratch.dblm_y[1]  = 0.0;
+    scratch.dblm_z[1]  = 0.0;
+    scratch.rij_blm[1] = x12;
+    scratch.blm[2]     = y;                                             // Y11_imag
+    scratch.dblm_r[2]  = 0.0;
+    scratch.dblm_x[2]  = 0.0;
+    scratch.dblm_y[2]  = 1.0;
+    scratch.dblm_z[2]  = 0.0;
+    scratch.rij_blm[2] = y12;
+  }
+  if constexpr (L == 2) {
+    scratch.blm[0]     = 3.0 * z2- d12 * d12;                           // Y20
+    scratch.dblm_r[0]  = -2.0 * d12;
+    scratch.dblm_x[0]  = 0.0;
+    scratch.dblm_y[0]  = 0.0;
+    scratch.dblm_z[0]  = 6.0 * z;
+    scratch.rij_blm[0] = 3.0 * z12sq - 1.0;
+    scratch.blm[1]    = xz;                                             // Y21_real
+    scratch.dblm_r[1] = 0.0;
+    scratch.dblm_x[1] = z;
+    scratch.dblm_y[1] = 0.0;
+    scratch.dblm_z[1] = x;
+    scratch.rij_blm[1]= x12 * z12;
+    scratch.blm[2]    = yz;                                             // Y21_imag
+    scratch.dblm_r[2] = 0.0;
+    scratch.dblm_x[2] = 0.0;
+    scratch.dblm_y[2] = z;
+    scratch.dblm_z[2] = y;
+    scratch.rij_blm[2]= y12 * z12;
+    scratch.blm[3]    = x2 - y2;                                        // Y22_real
+    scratch.dblm_r[3] = 0.0;
+    scratch.dblm_x[3] = 2.0 * x;
+    scratch.dblm_y[3] = -2.0 * y;
+    scratch.dblm_z[3] = 0.0;
+    scratch.rij_blm[3]= x12sq_minus_y12sq;
+    scratch.blm[4]     = 2.0 * xy;                                      // Y22_imag
+    scratch.dblm_r[4]  = 0.0;
+    scratch.dblm_x[4]  = 2.0 * y;
+    scratch.dblm_y[4]  = 2.0 * x;
+    scratch.dblm_z[4]  = 0.0;
+    scratch.rij_blm[4] = 2.0 * x12 * y12;
+  }
+  if constexpr (L == 3) {
+    scratch.blm[0]     = (5.0 * z2 - 3.0 * r2) * z;                     // Y30
+    scratch.dblm_r[0]  = -6.0 * z * d12;
+    scratch.dblm_x[0]  = 0.0;
+    scratch.dblm_y[0]  = 0.0;
+    scratch.dblm_z[0]  = 15 * z2 - 3 * r2;
+    scratch.rij_blm[0] = (5.0 * z12sq - 3.0) * z12;
+    scratch.blm[1]     = (5.0 * z2 - r2) * x;                          // Y31_real
+    scratch.dblm_r[1]  = -2.0 * x * d12;
+    scratch.dblm_x[1]  = 5.0 * z2 - r2;
+    scratch.dblm_y[1]  = 0.0;
+    scratch.dblm_z[1]  = 10.0 * xz;
+    scratch.rij_blm[1] = (5.0 * z12sq - 1.0) * x12;
+    scratch.blm[2]    = (5.0 * z2 - r2) * y;                          // Y31_imag
+    scratch.dblm_r[2] = -2.0 * y * d12;
+    scratch.dblm_x[2] = 0.0;
+    scratch.dblm_y[2] = 5.0 * z2 - r2;
+    scratch.dblm_z[2] = 10.0 * yz;
+    scratch.rij_blm[2]= (5.0 * z12sq - 1.0) * y12;
+    scratch.blm[3]    = (x2 - y2) * z;                                // Y32_real
+    scratch.dblm_r[3] = 0.0;
+    scratch.dblm_x[3] = 2.0 * xz;
+    scratch.dblm_y[3] = -2.0 * yz;
+    scratch.dblm_z[3] = x2 - y2;
+    scratch.rij_blm[3]= x12sq_minus_y12sq * z12;
+    scratch.blm[4]     = 2.0 * xyz;                                // Y32_imag
+    scratch.dblm_r[4]  = 0.0;
+    scratch.dblm_x[4]  = 2.0 * yz;
+    scratch.dblm_y[4]  = 2.0 * xz;
+    scratch.dblm_z[4]  = 2.0 * xy;
+    scratch.rij_blm[4] = 2.0 * x12 * y12 * z12;
+    scratch.blm[5]    = (x2 - 3.0 * y2) * x;                           // Y33_real
+    scratch.dblm_r[5] = 0.0;
+    scratch.dblm_x[5] = 3.0 * (x2 - y2);
+    scratch.dblm_y[5] = -6.0 * xy;
+    scratch.dblm_z[5] = 0.0;
+    scratch.rij_blm[5]= (x12 * x12 - 3.0 * y12 * y12) * x12;
+    scratch.blm[6]    = (3.0 * x2 - y2) * y;                           // Y33_imag
+    scratch.dblm_r[6] = 0.0;
+    scratch.dblm_x[6] = 6.0 * xy;
+    scratch.dblm_y[6] = 3.0 * (x2 - y2);
+    scratch.dblm_z[6] = 0.0;
+    scratch.rij_blm[6]= (3.0 * x12 * x12 - y12 * y12) * y12;
+  }
+  if constexpr (L == 4) {
+    scratch.blm[0]    = (35.0 * z2 - 30.0 * r2) * z2 + 3.0 * r2 * r2;   // Y40
+    scratch.dblm_r[0] = (-60.0) * z2 * d12 + 12.0 * r3;
+    scratch.dblm_x[0] = 0.0;
+    scratch.dblm_y[0] = 0.0;
+    scratch.dblm_z[0] = 140.0 * z3 - 60.0 * z * r2;
+    scratch.rij_blm[0]= ((35.0 * z12sq - 30.0) * z12sq + 3.0);
+    scratch.blm[1]    = (7.0 * z2 - 3.0 * r2) * xz;                    // Y41_real
+    scratch.dblm_r[1] = -6.0 * xz * d12;
+    scratch.dblm_x[1] = 7.0 * z3 - 3.0 * z * r2;
+    scratch.dblm_y[1] = 0.0;
+    scratch.dblm_z[1]  = 21.0 * x * z2 - 3.0 * x * r2;
+    scratch.rij_blm[1] = (7.0 * z12sq - 3.0) * x12 * z12;
+    scratch.blm[2]    = (7.0 * z2 - 3.0 * r2) * yz;                    // Y41_iamg
+    scratch.dblm_r[2] = -6.0 * yz * d12;
+    scratch.dblm_x[2] = 0.0;
+    scratch.dblm_y[2] = 7.0 * z3 - 3.0 * z * r2;
+    scratch.dblm_z[2] = 21.0 * y * z2 - 3.0 * y * r2;
+    scratch.rij_blm[2]= (7.0 * z12sq - 3.0) * y12 * z12;
+    scratch.blm[3]    = (7.0 * z2 - r2) * x2my2;                       // Y42_real
+    scratch.dblm_r[3] = 2.0 * d12 * (y2 - x2);
+    scratch.dblm_x[3] = 14.0 * x * z2 - 2.0 * x * r2;
+    scratch.dblm_y[3] = 2.0 * y *(r2 - 7.0 * z2);
+    scratch.dblm_z[3] = 14.0 * x2 * z - 14.0 * y2 * z;
+    scratch.rij_blm[3]= (7.0 * z12sq - 1.0) * x12sq_minus_y12sq;
+    scratch.blm[4]    = (7.0 * z2 - r2) * 2.0 * xy;                    // Y42_imag
+    scratch.dblm_r[4] = -4.0 * xy * d12;
+    scratch.dblm_x[4] = 2.0 * y * (7.0 * z2 - r2);
+    scratch.dblm_y[4] = 2.0 * x * (7.0 * z2 - r2);
+    scratch.dblm_z[4] = 28.0 * xyz;
+    scratch.rij_blm[4]= (7.0 * z12sq - 1.0) * x12 * y12 * 2.0;
+    scratch.blm[5]    = (x2 - 3.0 * y2) * xz;                          // Y43_real
+    scratch.dblm_r[5] = 0.0;
+    scratch.dblm_x[5] = 3.0 * z * (x2 - y2);
+    scratch.dblm_y[5] = -6.0 * xyz;
+    scratch.dblm_z[5] = x3 - 3.0 * x * y2;
+    scratch.rij_blm[5]= (x12sq - 3.0 * y12sq) * x12 * z12;
+    scratch.blm[6]    = (3.0 * x2 - y2) * yz;                         // Y43_imag
+    scratch.dblm_r[6] = 0.0;
+    scratch.dblm_x[6] = 6.0 * xyz;
+    scratch.dblm_y[6] = 3.0 * x2 * z - 3.0 * y2 * z;
+    scratch.dblm_z[6] = 3.0 * y * x2 - y3;
+    scratch.rij_blm[6]= (3.0 * x12sq - y12sq) * y12 * z12;
+    scratch.blm[7]    = x2my2 * x2my2 - 4.0 * x2 * y2;                // Y44_real
+    scratch.dblm_r[7] = 0.0;
+    scratch.dblm_x[7] = 4.0 * x3 - 12.0 * x * y2;
+    scratch.dblm_y[7] = 4.0 * y3 - 12.0 * x2 * y;
+    scratch.dblm_z[7] = 0.0;
+    scratch.rij_blm[7]= (x12sq_minus_y12sq * x12sq_minus_y12sq - 4.0 * x12sq * y12sq);
+    scratch.blm[8]    = 4.0 * x2my2 * xy;                            // Y44_imag
+    scratch.dblm_r[8] = 0.0;
+    scratch.dblm_x[8] = 12.0 * x2 * y - 4.0 * y3;
+    scratch.dblm_y[8] = 4.0 * x3 - 12.0 * x * y2;
+    scratch.dblm_z[8] = 0.0;
+    scratch.rij_blm[8]= (4.0 * x12 * y12 * x12sq_minus_y12sq);
+  }
+}
+
 template<int L, int NMAX, int NBASIS, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_direct(
   const double* fn12, const double* fnp12,
@@ -91,18 +283,19 @@ __device__ __forceinline__ void accumulate_direct(
 
     double dfk = 0.0;
     int dsnlm_idx = 0 + type_slot * NBASIS * NUM_OF_ABC;
+    #pragma unroll
     for(int k=0; k < NBASIS; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
       double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       double rr0 = 0.0, rr1 = 0.0, rr2 = 0.0;
       double rrr0 = 0.0, rrr1 = 0.0, rrr2=0.0;
-      rr0 =       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0];
-      rr1 = 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fnp * blm[1];
-      rr2 = 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fnp * blm[2];
+      rr0 =       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0 - (L * L - 1)];
+      rr1 = 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fnp * blm[1 - (L * L - 1)];
+      rr2 = 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fnp * blm[2 - (L * L - 1)];
       dfk = fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq;
-      rrr0 =       s[0] * dfk * blm[0];
-      rrr1 = 2.0 * s[1] * dfk * blm[1];
-      rrr2 = 2.0 * s[2] * dfk * blm[2];
+      rrr0 =       s[0] * dfk * blm[0 - (L * L - 1)];
+      rrr1 = 2.0 * s[1] * dfk * blm[1 - (L * L - 1)];
+      rrr2 = 2.0 * s[2] * dfk * blm[2 - (L * L - 1)];
       tmpr = rr0 + rr1 + rr2 + rrr0 + rrr1 + rrr2;
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
       tmpx += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fn;
@@ -121,44 +314,45 @@ __device__ __forceinline__ void accumulate_direct(
     if (type_slot < 0) return;
 
     int dsnlm_idx = 0 + type_slot * NBASIS * NUM_OF_ABC;
+    #pragma unroll
     for(int k=0; k < NBASIS; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
       double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
-      tmpr +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * (fnp * blm[3] + fn * dblm_r[3]) +
-                    2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fnp * blm[4] +
-                    2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fnp * blm[5] +
-                    2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fnp * blm[6] +
-                    2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fnp * blm[7];
-      tmpr += s[0] * ((fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[3] + fn12[k] * rij_Lsq * dblm_r[3]) +
-              2.0 * s[1] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[4] +
-              2.0 * s[2] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[5] +
-              2.0 * s[3] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[6] +
-              2.0 * s[4] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[7];
+      tmpr +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * (fnp * blm[3 - (L * L - 1)] + fn * dblm_r[3 - (L * L - 1)]) +
+                    2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fnp * blm[4 - (L * L - 1)] +
+                    2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fnp * blm[5 - (L * L - 1)] +
+                    2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fnp * blm[6 - (L * L - 1)] +
+                    2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fnp * blm[7 - (L * L - 1)];
+      tmpr += s[0] * ((fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[3 - (L * L - 1)] + fn12[k] * rij_Lsq * dblm_r[3 - (L * L - 1)]) +
+              2.0 * s[1] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[4 - (L * L - 1)] +
+              2.0 * s[2] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[5 - (L * L - 1)] +
+              2.0 * s[3] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[6 - (L * L - 1)] +
+              2.0 * s[4] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[7 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
       tmpx +=
-                    2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_x[4] +
-                    2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_x[6] +
-                    2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_x[7];
+                    2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_x[4 - (L * L - 1)] +
+                    2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_x[6 - (L * L - 1)] +
+                    2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_x[7 - (L * L - 1)];
       tmpx +=
-              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[4] +
-              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[6] +
-              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[7];
+              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[4 - (L * L - 1)] +
+              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[6 - (L * L - 1)] +
+              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[7 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
       tmpy +=
-                    2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_y[5] +
-                    2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_y[6] +
-                    2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_y[7];
+                    2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_y[5 - (L * L - 1)] +
+                    2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_y[6 - (L * L - 1)] +
+                    2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_y[7 - (L * L - 1)];
       tmpy +=
-              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[5] +
-              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[6] +
-              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[7];
+              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[5 - (L * L - 1)] +
+              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[6 - (L * L - 1)] +
+              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[7 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
-      tmpz +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * fn * dblm_z[3] +
-                    2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_z[4] +
-                    2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_z[5];
-      tmpz +=  s[0] * fn12[k] * rij_Lsq * dblm_z[3] +
-                    2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[4] +
-                    2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[5];
+      tmpz +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * fn * dblm_z[3 - (L * L - 1)] +
+                    2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_z[4 - (L * L - 1)] +
+                    2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_z[5 - (L * L - 1)];
+      tmpz +=  s[0] * fn12[k] * rij_Lsq * dblm_z[3 - (L * L - 1)] +
+                    2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[4 - (L * L - 1)] +
+                    2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[5 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
     }
 
@@ -167,60 +361,61 @@ __device__ __forceinline__ void accumulate_direct(
     if (type_slot < 0) return;
 
     int dsnlm_idx = 0 + type_slot * NBASIS * NUM_OF_ABC;
+    #pragma unroll
     for(int k=0; k < NBASIS; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
       double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
-      tmpr +=         C3B[8]  * dsnlm_dc[dsnlm_i+8] * (fnp * blm[8]  + fn * dblm_r[8]) +
-                2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9] * (fnp * blm[9]  + fn * dblm_r[9]) +
-                2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * (fnp * blm[10] + fn * dblm_r[10])+
-                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] *  fnp * blm[11] +
-                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] *  fnp * blm[12] +
-                2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] *  fnp * blm[13] +
-                2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] *  fnp * blm[14];
-      tmpr +=       s[0] * ((fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[8]  + fn12[k] * rij_Lsq * dblm_r[8]) +
-              2.0 * s[1] * ((fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[9]  + fn12[k] * rij_Lsq * dblm_r[9]) +
-              2.0 * s[2] * ((fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[10] + fn12[k] * rij_Lsq * dblm_r[10])+
-              2.0 * s[3] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[11] +
-              2.0 * s[4] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[12] +
-              2.0 * s[5] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[13] +
-              2.0 * s[6] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[14];
+      tmpr +=         C3B[8]  * dsnlm_dc[dsnlm_i+8] * (fnp * blm[8 - (L * L - 1)]  + fn * dblm_r[8 - (L * L - 1)]) +
+                2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9] * (fnp * blm[9 - (L * L - 1)]  + fn * dblm_r[9 - (L * L - 1)]) +
+                2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * (fnp * blm[10 - (L * L - 1)] + fn * dblm_r[10 - (L * L - 1)])+
+                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] *  fnp * blm[11 - (L * L - 1)] +
+                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] *  fnp * blm[12 - (L * L - 1)] +
+                2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] *  fnp * blm[13 - (L * L - 1)] +
+                2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] *  fnp * blm[14 - (L * L - 1)];
+      tmpr +=       s[0] * ((fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[8 - (L * L - 1)]  + fn12[k] * rij_Lsq * dblm_r[8 - (L * L - 1)]) +
+              2.0 * s[1] * ((fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[9 - (L * L - 1)]  + fn12[k] * rij_Lsq * dblm_r[9 - (L * L - 1)]) +
+              2.0 * s[2] * ((fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[10 - (L * L - 1)] + fn12[k] * rij_Lsq * dblm_r[10 - (L * L - 1)])+
+              2.0 * s[3] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[11 - (L * L - 1)] +
+              2.0 * s[4] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[12 - (L * L - 1)] +
+              2.0 * s[5] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[13 - (L * L - 1)] +
+              2.0 * s[6] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[14 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
       tmpx +=
-                2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_x[9] +
-                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_x[11] +
-                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_x[12] +
-                2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_x[13] +
-                2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_x[14];
+                2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_x[9 - (L * L - 1)] +
+                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_x[11 - (L * L - 1)] +
+                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_x[12 - (L * L - 1)] +
+                2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_x[13 - (L * L - 1)] +
+                2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_x[14 - (L * L - 1)];
       tmpx +=
-                2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[9]  +
-                2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[11] +
-                2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[12] +
-                2.0 * s[5] * fn12[k] * rij_Lsq * dblm_x[13] +
-                2.0 * s[6] * fn12[k] * rij_Lsq * dblm_x[14];
+                2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[9 - (L * L - 1)]  +
+                2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[11 - (L * L - 1)] +
+                2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[12 - (L * L - 1)] +
+                2.0 * s[5] * fn12[k] * rij_Lsq * dblm_x[13 - (L * L - 1)] +
+                2.0 * s[6] * fn12[k] * rij_Lsq * dblm_x[14 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
       tmpy +=
-                2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_y[10] +
-                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_y[11] +
-                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_y[12] +
-                2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_y[13] +
-                2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_y[14];
+                2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_y[10 - (L * L - 1)] +
+                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_y[11 - (L * L - 1)] +
+                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_y[12 - (L * L - 1)] +
+                2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_y[13 - (L * L - 1)] +
+                2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_y[14 - (L * L - 1)];
       tmpy +=
-                2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[10] +
-                2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[11] +
-                2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[12] +
-                2.0 * s[5] * fn12[k] * rij_Lsq * dblm_y[13] +
-                2.0 * s[6] * fn12[k] * rij_Lsq * dblm_y[14];
+                2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[10 - (L * L - 1)] +
+                2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[11 - (L * L - 1)] +
+                2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[12 - (L * L - 1)] +
+                2.0 * s[5] * fn12[k] * rij_Lsq * dblm_y[13 - (L * L - 1)] +
+                2.0 * s[6] * fn12[k] * rij_Lsq * dblm_y[14 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
-      tmpz +=         C3B[8]  * dsnlm_dc[dsnlm_i+8]  * fn * dblm_z[8] +
-                2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_z[9] +
-                2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_z[10] +
-                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_z[11] +
-                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_z[12];
-      tmpz +=         s[0] * fn12[k] * rij_Lsq * dblm_z[8] +
-                2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[9] +
-                2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[10]+
-                2.0 * s[3] * fn12[k] * rij_Lsq * dblm_z[11]+
-                2.0 * s[4] * fn12[k] * rij_Lsq * dblm_z[12];
+      tmpz +=         C3B[8]  * dsnlm_dc[dsnlm_i+8]  * fn * dblm_z[8 - (L * L - 1)] +
+                2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_z[9 - (L * L - 1)] +
+                2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_z[10 - (L * L - 1)] +
+                2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_z[11 - (L * L - 1)] +
+                2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_z[12 - (L * L - 1)];
+      tmpz +=         s[0] * fn12[k] * rij_Lsq * dblm_z[8 - (L * L - 1)] +
+                2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[9 - (L * L - 1)] +
+                2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[10 - (L * L - 1)]+
+                2.0 * s[3] * fn12[k] * rij_Lsq * dblm_z[11 - (L * L - 1)]+
+                2.0 * s[4] * fn12[k] * rij_Lsq * dblm_z[12 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
     }
 
@@ -229,84 +424,85 @@ __device__ __forceinline__ void accumulate_direct(
     if (type_slot < 0) return;
 
     int dsnlm_idx = 0 + type_slot * NBASIS * NUM_OF_ABC;
+    #pragma unroll
     for(int k=0; k < NBASIS; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
       double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
-      tmpr +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * (fnp * blm[15] + fn * dblm_r[15]) +
-              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * (fnp * blm[16] + fn * dblm_r[16]) +
-              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * (fnp * blm[17] + fn * dblm_r[17]) +
-              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * (fnp * blm[18] + fn * dblm_r[18]) +
-              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * (fnp * blm[19] + fn * dblm_r[19]) +
-              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] *  fnp * blm[20] +
-              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] *  fnp * blm[21] +
-              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] *  fnp * blm[22] +
-              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] *  fnp * blm[23];
-      tmpr +=       s[0] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[15] + fn12[k]* rij_Lsq * dblm_r[15]) +
-              2.0 * s[1] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[16] + fn12[k]* rij_Lsq * dblm_r[16]) +
-              2.0 * s[2] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[17] + fn12[k]* rij_Lsq * dblm_r[17]) +
-              2.0 * s[3] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[18] + fn12[k]* rij_Lsq * dblm_r[18]) +
-              2.0 * s[4] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[19] + fn12[k]* rij_Lsq * dblm_r[19]) +
-              2.0 * s[5] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[20]) +
-              2.0 * s[6] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[21]) +
-              2.0 * s[7] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[22]) +
-              2.0 * s[8] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[23]);
+      tmpr +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * (fnp * blm[15 - (L * L - 1)] + fn * dblm_r[15 - (L * L - 1)]) +
+              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * (fnp * blm[16 - (L * L - 1)] + fn * dblm_r[16 - (L * L - 1)]) +
+              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * (fnp * blm[17 - (L * L - 1)] + fn * dblm_r[17 - (L * L - 1)]) +
+              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * (fnp * blm[18 - (L * L - 1)] + fn * dblm_r[18 - (L * L - 1)]) +
+              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * (fnp * blm[19 - (L * L - 1)] + fn * dblm_r[19 - (L * L - 1)]) +
+              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] *  fnp * blm[20 - (L * L - 1)] +
+              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] *  fnp * blm[21 - (L * L - 1)] +
+              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] *  fnp * blm[22 - (L * L - 1)] +
+              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] *  fnp * blm[23 - (L * L - 1)];
+      tmpr +=       s[0] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[15 - (L * L - 1)] + fn12[k]* rij_Lsq * dblm_r[15 - (L * L - 1)]) +
+              2.0 * s[1] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[16 - (L * L - 1)] + fn12[k]* rij_Lsq * dblm_r[16 - (L * L - 1)]) +
+              2.0 * s[2] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[17 - (L * L - 1)] + fn12[k]* rij_Lsq * dblm_r[17 - (L * L - 1)]) +
+              2.0 * s[3] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[18 - (L * L - 1)] + fn12[k]* rij_Lsq * dblm_r[18 - (L * L - 1)]) +
+              2.0 * s[4] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[19 - (L * L - 1)] + fn12[k]* rij_Lsq * dblm_r[19 - (L * L - 1)]) +
+              2.0 * s[5] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[20 - (L * L - 1)]) +
+              2.0 * s[6] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[21 - (L * L - 1)]) +
+              2.0 * s[7] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[22 - (L * L - 1)]) +
+              2.0 * s[8] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[23 - (L * L - 1)]);
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
-      tmpx +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_x[15] +
-              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_x[16] +
-              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_x[17] +
-              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_x[18] +
-              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_x[19] +
-              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_x[20] +
-              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_x[21] +
-              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_x[22] +
-              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_x[23];
-      tmpx +=       s[0] * fn12[k] * rij_Lsq * dblm_x[15] +
-              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[16] +
-              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_x[17] +
-              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[18] +
-              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[19] +
-              2.0 * s[5] * fn12[k] * rij_Lsq * dblm_x[20] +
-              2.0 * s[6] * fn12[k] * rij_Lsq * dblm_x[21] +
-              2.0 * s[7] * fn12[k] * rij_Lsq * dblm_x[22] +
-              2.0 * s[8] * fn12[k] * rij_Lsq * dblm_x[23];
+      tmpx +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_x[15 - (L * L - 1)] +
+              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_x[16 - (L * L - 1)] +
+              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_x[17 - (L * L - 1)] +
+              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_x[18 - (L * L - 1)] +
+              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_x[19 - (L * L - 1)] +
+              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_x[20 - (L * L - 1)] +
+              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_x[21 - (L * L - 1)] +
+              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_x[22 - (L * L - 1)] +
+              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_x[23 - (L * L - 1)];
+      tmpx +=       s[0] * fn12[k] * rij_Lsq * dblm_x[15 - (L * L - 1)] +
+              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[16 - (L * L - 1)] +
+              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_x[17 - (L * L - 1)] +
+              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[18 - (L * L - 1)] +
+              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[19 - (L * L - 1)] +
+              2.0 * s[5] * fn12[k] * rij_Lsq * dblm_x[20 - (L * L - 1)] +
+              2.0 * s[6] * fn12[k] * rij_Lsq * dblm_x[21 - (L * L - 1)] +
+              2.0 * s[7] * fn12[k] * rij_Lsq * dblm_x[22 - (L * L - 1)] +
+              2.0 * s[8] * fn12[k] * rij_Lsq * dblm_x[23 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
-      tmpy +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_y[15] +
-              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_y[16] +
-              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_y[17] +
-              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_y[18] +
-              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_y[19] +
-              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_y[20] +
-              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_y[21] +
-              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_y[22] +
-              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_y[23];
-      tmpy +=       s[0] * fn12[k] * rij_Lsq * dblm_y[15] +
-              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_y[16] +
-              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[17] +
-              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[18] +
-              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[19] +
-              2.0 * s[5] * fn12[k] * rij_Lsq * dblm_y[20] +
-              2.0 * s[6] * fn12[k] * rij_Lsq * dblm_y[21] +
-              2.0 * s[7] * fn12[k] * rij_Lsq * dblm_y[22] +
-              2.0 * s[8] * fn12[k] * rij_Lsq * dblm_y[23];
+      tmpy +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_y[15 - (L * L - 1)] +
+              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_y[16 - (L * L - 1)] +
+              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_y[17 - (L * L - 1)] +
+              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_y[18 - (L * L - 1)] +
+              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_y[19 - (L * L - 1)] +
+              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_y[20 - (L * L - 1)] +
+              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_y[21 - (L * L - 1)] +
+              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_y[22 - (L * L - 1)] +
+              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_y[23 - (L * L - 1)];
+      tmpy +=       s[0] * fn12[k] * rij_Lsq * dblm_y[15 - (L * L - 1)] +
+              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_y[16 - (L * L - 1)] +
+              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[17 - (L * L - 1)] +
+              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[18 - (L * L - 1)] +
+              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[19 - (L * L - 1)] +
+              2.0 * s[5] * fn12[k] * rij_Lsq * dblm_y[20 - (L * L - 1)] +
+              2.0 * s[6] * fn12[k] * rij_Lsq * dblm_y[21 - (L * L - 1)] +
+              2.0 * s[7] * fn12[k] * rij_Lsq * dblm_y[22 - (L * L - 1)] +
+              2.0 * s[8] * fn12[k] * rij_Lsq * dblm_y[23 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
-      tmpz +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_z[15] +
-              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_z[16] +
-              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_z[17] +
-              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_z[18] +
-              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_z[19] +
-              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_z[20] +
-              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_z[21] +
-              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_z[22] +
-              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_z[23];
-      tmpz +=       s[0] * fn12[k] * rij_Lsq * dblm_z[15] +
-              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[16] +
-              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[17] +
-              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_z[18] +
-              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_z[19] +
-              2.0 * s[5] * fn12[k] * rij_Lsq * dblm_z[20] +
-              2.0 * s[6] * fn12[k] * rij_Lsq * dblm_z[21] +
-              2.0 * s[7] * fn12[k] * rij_Lsq * dblm_z[22] +
-              2.0 * s[8] * fn12[k] * rij_Lsq * dblm_z[23];
+      tmpz +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_z[15 - (L * L - 1)] +
+              2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_z[16 - (L * L - 1)] +
+              2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_z[17 - (L * L - 1)] +
+              2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_z[18 - (L * L - 1)] +
+              2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_z[19 - (L * L - 1)] +
+              2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_z[20 - (L * L - 1)] +
+              2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_z[21 - (L * L - 1)] +
+              2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_z[22 - (L * L - 1)] +
+              2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_z[23 - (L * L - 1)];
+      tmpz +=       s[0] * fn12[k] * rij_Lsq * dblm_z[15 - (L * L - 1)] +
+              2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[16 - (L * L - 1)] +
+              2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[17 - (L * L - 1)] +
+              2.0 * s[3] * fn12[k] * rij_Lsq * dblm_z[18 - (L * L - 1)] +
+              2.0 * s[4] * fn12[k] * rij_Lsq * dblm_z[19 - (L * L - 1)] +
+              2.0 * s[5] * fn12[k] * rij_Lsq * dblm_z[20 - (L * L - 1)] +
+              2.0 * s[6] * fn12[k] * rij_Lsq * dblm_z[21 - (L * L - 1)] +
+              2.0 * s[7] * fn12[k] * rij_Lsq * dblm_z[22 - (L * L - 1)] +
+              2.0 * s[8] * fn12[k] * rij_Lsq * dblm_z[23 - (L * L - 1)];
       sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
     }
 
@@ -328,13 +524,15 @@ __device__ __forceinline__ void accumulate_cross(
       if (type_slot == j) continue;
       int dsnlm_idx = 0 + j * NBASIS * NUM_OF_ABC;
 
+      #pragma unroll
+
       for(int k=0; k < NBASIS; k++) {
         int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
         double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
 
-        tmpr +=       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0];
-        tmpr += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fnp * blm[1];
-        tmpr += 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fnp * blm[2];
+        tmpr +=       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0 - (L * L - 1)];
+        tmpr += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fnp * blm[1 - (L * L - 1)];
+        tmpr += 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fnp * blm[2 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
         tmpx += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fn;
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
@@ -353,29 +551,32 @@ __device__ __forceinline__ void accumulate_cross(
       int dsnlm_idx = 0 + j * NBASIS * NUM_OF_ABC;
 
 
+      #pragma unroll
+
+
       for(int k=0; k < NBASIS; k++) {
         int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
         double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
 
-        tmpr +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * (fnp * blm[3] + fn * dblm_r[3]) +
-                      2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fnp * blm[4] +
-                      2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fnp * blm[5] +
-                      2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fnp * blm[6] +
-                      2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fnp * blm[7];
+        tmpr +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * (fnp * blm[3 - (L * L - 1)] + fn * dblm_r[3 - (L * L - 1)]) +
+                      2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fnp * blm[4 - (L * L - 1)] +
+                      2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fnp * blm[5 - (L * L - 1)] +
+                      2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fnp * blm[6 - (L * L - 1)] +
+                      2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fnp * blm[7 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
         tmpx +=
-                      2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_x[4] +
-                      2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_x[6] +
-                      2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_x[7];
+                      2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_x[4 - (L * L - 1)] +
+                      2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_x[6 - (L * L - 1)] +
+                      2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_x[7 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
         tmpy +=
-                      2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_y[5] +
-                      2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_y[6] +
-                      2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_y[7];
+                      2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_y[5 - (L * L - 1)] +
+                      2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_y[6 - (L * L - 1)] +
+                      2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_y[7 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
-        tmpz +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * fn * dblm_z[3] +
-                      2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_z[4] +
-                      2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_z[5];
+        tmpz +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * fn * dblm_z[3 - (L * L - 1)] +
+                      2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_z[4 - (L * L - 1)] +
+                      2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_z[5 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
       }
     }
@@ -387,37 +588,39 @@ __device__ __forceinline__ void accumulate_cross(
       if (type_slot == j) continue;
       int dsnlm_idx = 0 + j * NBASIS * NUM_OF_ABC;
 
+      #pragma unroll
+
       for(int k=0; k < NBASIS; k++) {
         int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
         double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
 
-        tmpr +=         C3B[8]  * dsnlm_dc[dsnlm_i+8] * (fnp * blm[8]  + fn * dblm_r[8]) +
-                  2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9] * (fnp * blm[9]  + fn * dblm_r[9]) +
-                  2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * (fnp * blm[10] + fn * dblm_r[10])+
-                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] *  fnp * blm[11] +
-                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] *  fnp * blm[12] +
-                  2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] *  fnp * blm[13] +
-                  2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] *  fnp * blm[14];
+        tmpr +=         C3B[8]  * dsnlm_dc[dsnlm_i+8] * (fnp * blm[8 - (L * L - 1)]  + fn * dblm_r[8 - (L * L - 1)]) +
+                  2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9] * (fnp * blm[9 - (L * L - 1)]  + fn * dblm_r[9 - (L * L - 1)]) +
+                  2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * (fnp * blm[10 - (L * L - 1)] + fn * dblm_r[10 - (L * L - 1)])+
+                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] *  fnp * blm[11 - (L * L - 1)] +
+                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] *  fnp * blm[12 - (L * L - 1)] +
+                  2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] *  fnp * blm[13 - (L * L - 1)] +
+                  2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] *  fnp * blm[14 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
         tmpx +=
-                  2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_x[9] +
-                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_x[11] +
-                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_x[12] +
-                  2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_x[13] +
-                  2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_x[14];
+                  2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_x[9 - (L * L - 1)] +
+                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_x[11 - (L * L - 1)] +
+                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_x[12 - (L * L - 1)] +
+                  2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_x[13 - (L * L - 1)] +
+                  2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_x[14 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
         tmpy +=
-                  2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_y[10] +
-                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_y[11] +
-                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_y[12] +
-                  2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_y[13] +
-                  2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_y[14];
+                  2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_y[10 - (L * L - 1)] +
+                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_y[11 - (L * L - 1)] +
+                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_y[12 - (L * L - 1)] +
+                  2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_y[13 - (L * L - 1)] +
+                  2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_y[14 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
-        tmpz +=         C3B[8]  * dsnlm_dc[dsnlm_i+8]  * fn * dblm_z[8] +
-                  2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_z[9] +
-                  2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_z[10] +
-                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_z[11] +
-                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_z[12];
+        tmpz +=         C3B[8]  * dsnlm_dc[dsnlm_i+8]  * fn * dblm_z[8 - (L * L - 1)] +
+                  2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_z[9 - (L * L - 1)] +
+                  2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_z[10 - (L * L - 1)] +
+                  2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_z[11 - (L * L - 1)] +
+                  2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_z[12 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
       }
     }
@@ -429,49 +632,51 @@ __device__ __forceinline__ void accumulate_cross(
       if (type_slot == j) continue;
       int dsnlm_idx = 0 + j * NBASIS * NUM_OF_ABC;
 
+      #pragma unroll
+
       for(int k=0; k < NBASIS; k++) {
         int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
         double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
 
-        tmpr +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * (fnp * blm[15] + fn * dblm_r[15]) +
-                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * (fnp * blm[16] + fn * dblm_r[16]) +
-                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * (fnp * blm[17] + fn * dblm_r[17]) +
-                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * (fnp * blm[18] + fn * dblm_r[18]) +
-                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * (fnp * blm[19] + fn * dblm_r[19]) +
-                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] *  fnp * blm[20] +
-                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] *  fnp * blm[21] +
-                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] *  fnp * blm[22] +
-                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] *  fnp * blm[23];
+        tmpr +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * (fnp * blm[15 - (L * L - 1)] + fn * dblm_r[15 - (L * L - 1)]) +
+                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * (fnp * blm[16 - (L * L - 1)] + fn * dblm_r[16 - (L * L - 1)]) +
+                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * (fnp * blm[17 - (L * L - 1)] + fn * dblm_r[17 - (L * L - 1)]) +
+                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * (fnp * blm[18 - (L * L - 1)] + fn * dblm_r[18 - (L * L - 1)]) +
+                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * (fnp * blm[19 - (L * L - 1)] + fn * dblm_r[19 - (L * L - 1)]) +
+                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] *  fnp * blm[20 - (L * L - 1)] +
+                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] *  fnp * blm[21 - (L * L - 1)] +
+                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] *  fnp * blm[22 - (L * L - 1)] +
+                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] *  fnp * blm[23 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
-        tmpx +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_x[15] +
-                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_x[16] +
-                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_x[17] +
-                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_x[18] +
-                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_x[19] +
-                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_x[20] +
-                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_x[21] +
-                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_x[22] +
-                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_x[23];
+        tmpx +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_x[15 - (L * L - 1)] +
+                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_x[16 - (L * L - 1)] +
+                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_x[17 - (L * L - 1)] +
+                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_x[18 - (L * L - 1)] +
+                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_x[19 - (L * L - 1)] +
+                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_x[20 - (L * L - 1)] +
+                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_x[21 - (L * L - 1)] +
+                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_x[22 - (L * L - 1)] +
+                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_x[23 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
-        tmpy +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_y[15] +
-                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_y[16] +
-                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_y[17] +
-                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_y[18] +
-                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_y[19] +
-                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_y[20] +
-                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_y[21] +
-                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_y[22] +
-                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_y[23];
+        tmpy +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_y[15 - (L * L - 1)] +
+                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_y[16 - (L * L - 1)] +
+                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_y[17 - (L * L - 1)] +
+                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_y[18 - (L * L - 1)] +
+                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_y[19 - (L * L - 1)] +
+                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_y[20 - (L * L - 1)] +
+                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_y[21 - (L * L - 1)] +
+                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_y[22 - (L * L - 1)] +
+                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_y[23 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
-        tmpz +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_z[15] +
-                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_z[16] +
-                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_z[17] +
-                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_z[18] +
-                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_z[19] +
-                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_z[20] +
-                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_z[21] +
-                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_z[22] +
-                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_z[23];
+        tmpz +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_z[15 - (L * L - 1)] +
+                2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_z[16 - (L * L - 1)] +
+                2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_z[17 - (L * L - 1)] +
+                2.0 * C3B[18] * dsnlm_dc[dsnlm_i+18] * fn * dblm_z[18 - (L * L - 1)] +
+                2.0 * C3B[19] * dsnlm_dc[dsnlm_i+19] * fn * dblm_z[19 - (L * L - 1)] +
+                2.0 * C3B[20] * dsnlm_dc[dsnlm_i+20] * fn * dblm_z[20 - (L * L - 1)] +
+                2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_z[21 - (L * L - 1)] +
+                2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_z[22 - (L * L - 1)] +
+                2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_z[23 - (L * L - 1)];
         sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
       }
     }
@@ -479,6 +684,8 @@ __device__ __forceinline__ void accumulate_cross(
   }
 }
 
+// Prepare each direction inside its basis contribution so derivative arrays
+// are released immediately after their r/x/y/z atomic, in the legacy order.
 template<bool CROSS, int NMAX, int NBASIS, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_four_body(
   const double* fn12, const double* fnp12,
@@ -489,30 +696,6 @@ __device__ __forceinline__ void accumulate_four_body(
   int type_slot, int tile_count, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
   if constexpr (CROSS) {
-    double dnlm_drij[5] = {0.0};
-    dnlm_drij[0] = fnp * blm[3] + fn * dblm_r[3];
-    dnlm_drij[1] = fnp * blm[4];
-    dnlm_drij[2] = fnp * blm[5];
-    dnlm_drij[3] = fnp * blm[6];
-    dnlm_drij[4] = fnp * blm[7];
-    double dnlm_dxij[5] = {0.0};
-    dnlm_dxij[0] = 0.0;
-    dnlm_dxij[1] = fn * dblm_x[4];
-    dnlm_dxij[2] = 0.0;
-    dnlm_dxij[3] = fn * dblm_x[6];
-    dnlm_dxij[4] = fn * dblm_x[7];
-    double dnlm_dyij[5] = {0.0};
-    dnlm_dyij[0] = 0.0;
-    dnlm_dyij[1] = 0.0;
-    dnlm_dyij[2] = fn * dblm_y[5];
-    dnlm_dyij[3] = fn * dblm_y[6];
-    dnlm_dyij[4] = fn * dblm_y[7];
-    double dnlm_dzij[5] = {0.0};
-    dnlm_dzij[0] = fn * dblm_z[3];
-    dnlm_dzij[1] = fn * dblm_z[4];
-    dnlm_dzij[2] = fn * dblm_z[5];
-    dnlm_dzij[3] = 0.0;
-    dnlm_dzij[4] = 0.0;
     double dnlm_dc[5] = {0.0};
 
     for (int uj =0; uj < tile_count; uj++) {
@@ -520,135 +703,172 @@ __device__ __forceinline__ void accumulate_four_body(
       if (type_slot == j) continue;
       int dsnlm_idx = 0 + j * NBASIS * NUM_OF_ABC;
 
+      #pragma unroll
+
       for(int k=0; k < NBASIS; k++) {
         int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-        double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
 
         dnlm_dc[0] = dsnlm_dc[dsnlm_i + 3];
         dnlm_dc[1] = dsnlm_dc[dsnlm_i + 4];
         dnlm_dc[2] = dsnlm_dc[dsnlm_i + 5];
         dnlm_dc[3] = dsnlm_dc[dsnlm_i + 6];
         dnlm_dc[4] = dsnlm_dc[dsnlm_i + 7];
-        tmpr += 3.0 * C4B[0] * (
-          2.0 * s[0] * dnlm_dc[0] * dnlm_drij[0]);
-        tmpr += C4B[1] * (
-          dnlm_drij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-        );
-        tmpr += 2.0 * C4B[1] * (
-          dnlm_dc[0] * (s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2]) +
-          s[0] * (dnlm_dc[1] * dnlm_drij[1] +
-                    dnlm_dc[2] * dnlm_drij[2])
-        );
-        tmpr += C4B[2] * (
-          dnlm_drij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-        tmpr += 2.0 * C4B[2] * (
-          dnlm_dc[0] * (s[3] * dnlm_drij[3] + s[4] * dnlm_drij[4]) +
-          s[0] * (dnlm_dc[3] * dnlm_drij[3] +
-                    dnlm_dc[4] * dnlm_drij[4])
-        );
-        tmpr += C4B[3] * (
-          dnlm_drij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-        tmpr += 2.0 * C4B[3] * (
-          dnlm_dc[3] * (s[2] * dnlm_drij[2] - s[1] * dnlm_drij[1]) +
-            s[3] * (dnlm_dc[2] * dnlm_drij[2] -
-                    dnlm_dc[1] * dnlm_drij[1])
-        );
-        tmpr += C4B[4] * (
-          dnlm_drij[1] * dnlm_dc[2] * s[4] + dnlm_drij[1] * s[2] * dnlm_dc[4] +
-          dnlm_dc[1] * dnlm_drij[2] * s[4] + s[1] * dnlm_drij[2] * dnlm_dc[4] +
-          dnlm_dc[1] * s[2] * dnlm_drij[4] + s[1] * dnlm_dc[2] * dnlm_drij[4]
-        );
-        sink.add(uj, n, k, Fp * scd_r12[0] * tmpr);
-        tmpx += 3.0 * C4B[0] * (
-          2.0 * s[0] * dnlm_dc[0] * dnlm_dxij[0]);
-        tmpx += C4B[1] * (
-          dnlm_dxij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-        );
-        tmpx += 2.0 * C4B[1] * (
-          dnlm_dc[0] * (s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2]) +
-          s[0] * (dnlm_dc[1] * dnlm_dxij[1] +
-                    dnlm_dc[2] * dnlm_dxij[2])
-        );
-        tmpx += C4B[2] * (
-          dnlm_dxij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-        tmpx += 2.0 * C4B[2] * (
-          dnlm_dc[0] * (s[3] * dnlm_dxij[3] + s[4] * dnlm_dxij[4]) +
-          s[0] * (dnlm_dc[3] * dnlm_dxij[3] +
-                    dnlm_dc[4] * dnlm_dxij[4])
-        );
-        tmpx += C4B[3] * (
-          dnlm_dxij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-        tmpx += 2.0 * C4B[3] * (
-          dnlm_dc[3] * (s[2] * dnlm_dxij[2] - s[1] * dnlm_dxij[1]) +
-            s[3] * (dnlm_dc[2] * dnlm_dxij[2] -
-                    dnlm_dc[1] * dnlm_dxij[1])
-        );
-        tmpx += C4B[4] * (
-          dnlm_dxij[1] * dnlm_dc[2] * s[4] + dnlm_dxij[1] * s[2] * dnlm_dc[4] +
-          dnlm_dc[1] * dnlm_dxij[2] * s[4] + s[1] * dnlm_dxij[2] * dnlm_dc[4] +
-          dnlm_dc[1] * s[2] * dnlm_dxij[4] + s[1] * dnlm_dc[2] * dnlm_dxij[4]
-        );
-        sink.add(uj, n, k, Fp * scd_r12[1] * tmpx);
-        tmpy += 3.0 * C4B[0] * (
-          2.0 * s[0] * dnlm_dc[0] * dnlm_dyij[0]);
-        tmpy += C4B[1] * (
-          dnlm_dyij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-        );
-        tmpy += 2.0 * C4B[1] * (
-          dnlm_dc[0] * (s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2]) +
-          s[0] * (dnlm_dc[1] * dnlm_dyij[1] +
-                    dnlm_dc[2] * dnlm_dyij[2])
-        );
-        tmpy += C4B[2] * (
-          dnlm_dyij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-        tmpy += 2.0 * C4B[2] * (
-          dnlm_dc[0] * (s[3] * dnlm_dyij[3] + s[4] * dnlm_dyij[4]) +
-          s[0] * (dnlm_dc[3] * dnlm_dyij[3] +
-                    dnlm_dc[4] * dnlm_dyij[4])
-        );
-        tmpy += C4B[3] * (
-          dnlm_dyij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-        tmpy += 2.0 * C4B[3] * (
-          dnlm_dc[3] * (s[2] * dnlm_dyij[2] - s[1] * dnlm_dyij[1]) +
-            s[3] * (dnlm_dc[2] * dnlm_dyij[2] -
-                    dnlm_dc[1] * dnlm_dyij[1])
-        );
-        tmpy += C4B[4] * (
-          dnlm_dyij[1] * dnlm_dc[2] * s[4] + dnlm_dyij[1] * s[2] * dnlm_dc[4] +
-          dnlm_dc[1] * dnlm_dyij[2] * s[4] + s[1] * dnlm_dyij[2] * dnlm_dc[4] +
-          dnlm_dc[1] * s[2] * dnlm_dyij[4] + s[1] * dnlm_dc[2] * dnlm_dyij[4]
-        );
-        sink.add(uj, n, k, Fp * scd_r12[2] * tmpy);
-        tmpz += 3.0 * C4B[0] * (
-          2.0 * s[0] * dnlm_dc[0] * dnlm_dzij[0]);
-        tmpz += C4B[1] * (
-          dnlm_dzij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-        );
-        tmpz += 2.0 * C4B[1] * (
-          dnlm_dc[0] * (s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2]) +
-          s[0] * (dnlm_dc[1] * dnlm_dzij[1] +
-                    dnlm_dc[2] * dnlm_dzij[2])
-        );
-        tmpz += C4B[2] * (
-          dnlm_dzij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-        tmpz += 2.0 * C4B[2] * (
-          dnlm_dc[0] * (s[3] * dnlm_dzij[3] + s[4] * dnlm_dzij[4]) +
-          s[0] * (dnlm_dc[3] * dnlm_dzij[3] +
-                    dnlm_dc[4] * dnlm_dzij[4])
-        );
-        tmpz += C4B[3] * (
-          dnlm_dzij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-        tmpz += 2.0 * C4B[3] * (
-          dnlm_dc[3] * (s[2] * dnlm_dzij[2] - s[1] * dnlm_dzij[1]) +
-            s[3] * (dnlm_dc[2] * dnlm_dzij[2] -
-                    dnlm_dc[1] * dnlm_dzij[1])
-        );
-        tmpz += C4B[4] * (
-          dnlm_dzij[1] * dnlm_dc[2] * s[4] + dnlm_dzij[1] * s[2] * dnlm_dc[4] +
-          dnlm_dc[1] * dnlm_dzij[2] * s[4] + s[1] * dnlm_dzij[2] * dnlm_dc[4] +
-          dnlm_dc[1] * s[2] * dnlm_dzij[4] + s[1] * dnlm_dc[2] * dnlm_dzij[4]
-        );
-        sink.add(uj, n, k, Fp * scd_r12[3] * tmpz);
+        {
+          double tmpr = 0.0;
+          double dnlm_drij[5] = {0.0};
+          dnlm_drij[0] = fnp * blm[0] + fn * dblm_r[0];
+          dnlm_drij[1] = fnp * blm[1];
+          dnlm_drij[2] = fnp * blm[2];
+          dnlm_drij[3] = fnp * blm[3];
+          dnlm_drij[4] = fnp * blm[4];
+          tmpr += 3.0 * C4B[0] * (
+            2.0 * s[0] * dnlm_dc[0] * dnlm_drij[0]);
+          tmpr += C4B[1] * (
+            dnlm_drij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+          );
+          tmpr += 2.0 * C4B[1] * (
+            dnlm_dc[0] * (s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2]) +
+            s[0] * (dnlm_dc[1] * dnlm_drij[1] +
+                      dnlm_dc[2] * dnlm_drij[2])
+          );
+          tmpr += C4B[2] * (
+            dnlm_drij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+          tmpr += 2.0 * C4B[2] * (
+            dnlm_dc[0] * (s[3] * dnlm_drij[3] + s[4] * dnlm_drij[4]) +
+            s[0] * (dnlm_dc[3] * dnlm_drij[3] +
+                      dnlm_dc[4] * dnlm_drij[4])
+          );
+          tmpr += C4B[3] * (
+            dnlm_drij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+          tmpr += 2.0 * C4B[3] * (
+            dnlm_dc[3] * (s[2] * dnlm_drij[2] - s[1] * dnlm_drij[1]) +
+              s[3] * (dnlm_dc[2] * dnlm_drij[2] -
+                      dnlm_dc[1] * dnlm_drij[1])
+          );
+          tmpr += C4B[4] * (
+            dnlm_drij[1] * dnlm_dc[2] * s[4] + dnlm_drij[1] * s[2] * dnlm_dc[4] +
+            dnlm_dc[1] * dnlm_drij[2] * s[4] + s[1] * dnlm_drij[2] * dnlm_dc[4] +
+            dnlm_dc[1] * s[2] * dnlm_drij[4] + s[1] * dnlm_dc[2] * dnlm_drij[4]
+          );
+          sink.add(uj, n, k, Fp * scd_r12[0] * tmpr);
+        }
+        {
+          double tmpx = 0.0;
+          double dnlm_dxij[5] = {0.0};
+          dnlm_dxij[0] = 0.0;
+          dnlm_dxij[1] = fn * dblm_x[1];
+          dnlm_dxij[2] = 0.0;
+          dnlm_dxij[3] = fn * dblm_x[3];
+          dnlm_dxij[4] = fn * dblm_x[4];
+          tmpx += 3.0 * C4B[0] * (
+            2.0 * s[0] * dnlm_dc[0] * dnlm_dxij[0]);
+          tmpx += C4B[1] * (
+            dnlm_dxij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+          );
+          tmpx += 2.0 * C4B[1] * (
+            dnlm_dc[0] * (s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2]) +
+            s[0] * (dnlm_dc[1] * dnlm_dxij[1] +
+                      dnlm_dc[2] * dnlm_dxij[2])
+          );
+          tmpx += C4B[2] * (
+            dnlm_dxij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+          tmpx += 2.0 * C4B[2] * (
+            dnlm_dc[0] * (s[3] * dnlm_dxij[3] + s[4] * dnlm_dxij[4]) +
+            s[0] * (dnlm_dc[3] * dnlm_dxij[3] +
+                      dnlm_dc[4] * dnlm_dxij[4])
+          );
+          tmpx += C4B[3] * (
+            dnlm_dxij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+          tmpx += 2.0 * C4B[3] * (
+            dnlm_dc[3] * (s[2] * dnlm_dxij[2] - s[1] * dnlm_dxij[1]) +
+              s[3] * (dnlm_dc[2] * dnlm_dxij[2] -
+                      dnlm_dc[1] * dnlm_dxij[1])
+          );
+          tmpx += C4B[4] * (
+            dnlm_dxij[1] * dnlm_dc[2] * s[4] + dnlm_dxij[1] * s[2] * dnlm_dc[4] +
+            dnlm_dc[1] * dnlm_dxij[2] * s[4] + s[1] * dnlm_dxij[2] * dnlm_dc[4] +
+            dnlm_dc[1] * s[2] * dnlm_dxij[4] + s[1] * dnlm_dc[2] * dnlm_dxij[4]
+          );
+          sink.add(uj, n, k, Fp * scd_r12[1] * tmpx);
+        }
+        {
+          double tmpy = 0.0;
+          double dnlm_dyij[5] = {0.0};
+          dnlm_dyij[0] = 0.0;
+          dnlm_dyij[1] = 0.0;
+          dnlm_dyij[2] = fn * dblm_y[2];
+          dnlm_dyij[3] = fn * dblm_y[3];
+          dnlm_dyij[4] = fn * dblm_y[4];
+          tmpy += 3.0 * C4B[0] * (
+            2.0 * s[0] * dnlm_dc[0] * dnlm_dyij[0]);
+          tmpy += C4B[1] * (
+            dnlm_dyij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+          );
+          tmpy += 2.0 * C4B[1] * (
+            dnlm_dc[0] * (s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2]) +
+            s[0] * (dnlm_dc[1] * dnlm_dyij[1] +
+                      dnlm_dc[2] * dnlm_dyij[2])
+          );
+          tmpy += C4B[2] * (
+            dnlm_dyij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+          tmpy += 2.0 * C4B[2] * (
+            dnlm_dc[0] * (s[3] * dnlm_dyij[3] + s[4] * dnlm_dyij[4]) +
+            s[0] * (dnlm_dc[3] * dnlm_dyij[3] +
+                      dnlm_dc[4] * dnlm_dyij[4])
+          );
+          tmpy += C4B[3] * (
+            dnlm_dyij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+          tmpy += 2.0 * C4B[3] * (
+            dnlm_dc[3] * (s[2] * dnlm_dyij[2] - s[1] * dnlm_dyij[1]) +
+              s[3] * (dnlm_dc[2] * dnlm_dyij[2] -
+                      dnlm_dc[1] * dnlm_dyij[1])
+          );
+          tmpy += C4B[4] * (
+            dnlm_dyij[1] * dnlm_dc[2] * s[4] + dnlm_dyij[1] * s[2] * dnlm_dc[4] +
+            dnlm_dc[1] * dnlm_dyij[2] * s[4] + s[1] * dnlm_dyij[2] * dnlm_dc[4] +
+            dnlm_dc[1] * s[2] * dnlm_dyij[4] + s[1] * dnlm_dc[2] * dnlm_dyij[4]
+          );
+          sink.add(uj, n, k, Fp * scd_r12[2] * tmpy);
+        }
+        {
+          double tmpz = 0.0;
+          double dnlm_dzij[5] = {0.0};
+          dnlm_dzij[0] = fn * dblm_z[0];
+          dnlm_dzij[1] = fn * dblm_z[1];
+          dnlm_dzij[2] = fn * dblm_z[2];
+          dnlm_dzij[3] = 0.0;
+          dnlm_dzij[4] = 0.0;
+          tmpz += 3.0 * C4B[0] * (
+            2.0 * s[0] * dnlm_dc[0] * dnlm_dzij[0]);
+          tmpz += C4B[1] * (
+            dnlm_dzij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+          );
+          tmpz += 2.0 * C4B[1] * (
+            dnlm_dc[0] * (s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2]) +
+            s[0] * (dnlm_dc[1] * dnlm_dzij[1] +
+                      dnlm_dc[2] * dnlm_dzij[2])
+          );
+          tmpz += C4B[2] * (
+            dnlm_dzij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+          tmpz += 2.0 * C4B[2] * (
+            dnlm_dc[0] * (s[3] * dnlm_dzij[3] + s[4] * dnlm_dzij[4]) +
+            s[0] * (dnlm_dc[3] * dnlm_dzij[3] +
+                      dnlm_dc[4] * dnlm_dzij[4])
+          );
+          tmpz += C4B[3] * (
+            dnlm_dzij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+          tmpz += 2.0 * C4B[3] * (
+            dnlm_dc[3] * (s[2] * dnlm_dzij[2] - s[1] * dnlm_dzij[1]) +
+              s[3] * (dnlm_dc[2] * dnlm_dzij[2] -
+                      dnlm_dc[1] * dnlm_dzij[1])
+          );
+          tmpz += C4B[4] * (
+            dnlm_dzij[1] * dnlm_dc[2] * s[4] + dnlm_dzij[1] * s[2] * dnlm_dc[4] +
+            dnlm_dc[1] * dnlm_dzij[2] * s[4] + s[1] * dnlm_dzij[2] * dnlm_dc[4] +
+            dnlm_dc[1] * s[2] * dnlm_dzij[4] + s[1] * dnlm_dc[2] * dnlm_dzij[4]
+          );
+          sink.add(uj, n, k, Fp * scd_r12[3] * tmpz);
+        }
       }
     }
 
@@ -656,189 +876,201 @@ __device__ __forceinline__ void accumulate_four_body(
     if (type_slot < 0) return;
 
     int dsnlm_idx = 0 + type_slot * NBASIS * NUM_OF_ABC;
-    double dnlm_drij[5] = {0.0};
-    dnlm_drij[0] = fnp * blm[3] + fn * dblm_r[3];
-    dnlm_drij[1] = fnp * blm[4];
-    dnlm_drij[2] = fnp * blm[5];
-    dnlm_drij[3] = fnp * blm[6];
-    dnlm_drij[4] = fnp * blm[7];
-    double dnlm_dxij[5] = {0.0};
-    dnlm_dxij[0] = 0.0;
-    dnlm_dxij[1] = fn * dblm_x[4];
-    dnlm_dxij[2] = 0.0;
-    dnlm_dxij[3] = fn * dblm_x[6];
-    dnlm_dxij[4] = fn * dblm_x[7];
-    double dnlm_dyij[5] = {0.0};
-    dnlm_dyij[0] = 0.0;
-    dnlm_dyij[1] = 0.0;
-    dnlm_dyij[2] = fn * dblm_y[5];
-    dnlm_dyij[3] = fn * dblm_y[6];
-    dnlm_dyij[4] = fn * dblm_y[7];
-    double dnlm_dzij[5] = {0.0};
-    dnlm_dzij[0] = fn * dblm_z[3];
-    dnlm_dzij[1] = fn * dblm_z[4];
-    dnlm_dzij[2] = fn * dblm_z[5];
-    dnlm_dzij[3] = 0.0;
-    dnlm_dzij[4] = 0.0;
     double dnlm_dc[5] = {0.0};
-    double dnlm_drij_dc[5] = {0.0};
-    double dnlm_dxij_dc[5] = {0.0};
-    double dnlm_dyij_dc[5] = {0.0};
-    double dnlm_dzij_dc[5] = {0.0};
     double s2[5] = {0.0};
     s2[0] = s[0] * s[0];
     s2[1] = s[1] * s[1];
     s2[2] = s[2] * s[2];
     s2[3] = s[3] * s[3];
     s2[4] = s[4] * s[4];
+    #pragma unroll
     for(int k=0; k < NBASIS; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       dnlm_dc[0] = dsnlm_dc[dsnlm_i + 3];
       dnlm_dc[1] = dsnlm_dc[dsnlm_i + 4];
       dnlm_dc[2] = dsnlm_dc[dsnlm_i + 5];
       dnlm_dc[3] = dsnlm_dc[dsnlm_i + 6];
       dnlm_dc[4] = dsnlm_dc[dsnlm_i + 7];
-      dnlm_drij_dc[0] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[3] + fn12[k] * rij_Lsq * dblm_r[3];
-      dnlm_drij_dc[1] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[4];
-      dnlm_drij_dc[2] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[5];
-      dnlm_drij_dc[3] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[6];
-      dnlm_drij_dc[4] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[7];
-      dnlm_dxij_dc[0] = 0.0;
-      dnlm_dxij_dc[1] = fn12[k] * rij_Lsq * dblm_x[4];
-      dnlm_dxij_dc[2] = 0.0;
-      dnlm_dxij_dc[3] = fn12[k] * rij_Lsq * dblm_x[6];
-      dnlm_dxij_dc[4] = fn12[k] * rij_Lsq * dblm_x[7];
-      dnlm_dyij_dc[0] = 0.0;
-      dnlm_dyij_dc[1] = 0.0;
-      dnlm_dyij_dc[2] = fn12[k] * rij_Lsq * dblm_y[5];
-      dnlm_dyij_dc[3] = fn12[k] * rij_Lsq * dblm_y[6];
-      dnlm_dyij_dc[4] = fn12[k] * rij_Lsq * dblm_y[7];
-      dnlm_dzij_dc[0] = fn12[k] * rij_Lsq * dblm_z[3];
-      dnlm_dzij_dc[1] = fn12[k] * rij_Lsq * dblm_z[4];
-      dnlm_dzij_dc[2] = fn12[k] * rij_Lsq * dblm_z[5];
-      dnlm_dzij_dc[3] = 0.0;
-      dnlm_dzij_dc[4] = 0.0;
-      tmpr += 3.0 * C4B[0] * (
-        2.0 * s[0] * dnlm_dc[0] * dnlm_drij[0] + s2[0] * dnlm_drij_dc[0]);
-      tmpr += C4B[1] * (
-        dnlm_drij_dc[0] * (s2[1] + s2[2]) + dnlm_drij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-      );
-      tmpr += 2.0 * C4B[1] * (
-        dnlm_dc[0] * (s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2]) +
-        s[0] * (dnlm_dc[1] * dnlm_drij[1] + s[1] * dnlm_drij_dc[1] +
-                  dnlm_dc[2] * dnlm_drij[2] + s[2] * dnlm_drij_dc[2])
-      );
-      tmpr += C4B[2] * (
-        dnlm_drij_dc[0] * (s2[3] + s2[4]) + dnlm_drij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-      tmpr += 2.0 * C4B[2] * (
-        dnlm_dc[0] * (s[3] * dnlm_drij[3] + s[4] * dnlm_drij[4]) +
-        s[0] * (dnlm_dc[3] * dnlm_drij[3] + s[3] * dnlm_drij_dc[3] +
-                  dnlm_dc[4] * dnlm_drij[4] + s[4] * dnlm_drij_dc[4])
-      );
-      tmpr += C4B[3] * (
-        dnlm_drij_dc[3] * (s2[2] - s2[1]) + dnlm_drij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-      tmpr += 2.0 * C4B[3] * (
-        dnlm_dc[3] * (s[2] * dnlm_drij[2] - s[1] * dnlm_drij[1]) +
-          s[3] * (dnlm_dc[2] * dnlm_drij[2] + s[2] * dnlm_drij_dc[2] -
-                  dnlm_dc[1] * dnlm_drij[1] - s[1] * dnlm_drij_dc[1])
-      );
-      tmpr += C4B[4] * (
-        dnlm_drij_dc[1] * s[2] * s[4] + dnlm_drij[1] * dnlm_dc[2] * s[4] + dnlm_drij[1] * s[2] * dnlm_dc[4] +
-        dnlm_dc[1] * dnlm_drij[2] * s[4] + s[1] * dnlm_drij_dc[2] * s[4] + s[1] * dnlm_drij[2] * dnlm_dc[4] +
-        dnlm_dc[1] * s[2] * dnlm_drij[4] + s[1] * dnlm_dc[2] * dnlm_drij[4] + s[1] * s[2] * dnlm_drij_dc[4]
-      );
-      sink.add(type_slot, n, k, Fp * scd_r12[0] * tmpr);
-      tmpx += 3.0 * C4B[0] * (
-        2.0 * s[0] * dnlm_dc[0] * dnlm_dxij[0] + s2[0] * dnlm_dxij_dc[0]);
-      tmpx += C4B[1] * (
-        dnlm_dxij_dc[0] * (s2[1] + s2[2]) + dnlm_dxij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-      );
-      tmpx += 2.0 * C4B[1] * (
-        dnlm_dc[0] * (s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2]) +
-        s[0] * (dnlm_dc[1] * dnlm_dxij[1] + s[1] * dnlm_dxij_dc[1] +
-                  dnlm_dc[2] * dnlm_dxij[2] + s[2] * dnlm_dxij_dc[2])
-      );
-      tmpx += C4B[2] * (
-        dnlm_dxij_dc[0] * (s2[3] + s2[4]) + dnlm_dxij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-      tmpx += 2.0 * C4B[2] * (
-        dnlm_dc[0] * (s[3] * dnlm_dxij[3] + s[4] * dnlm_dxij[4]) +
-        s[0] * (dnlm_dc[3] * dnlm_dxij[3] + s[3] * dnlm_dxij_dc[3] +
-                  dnlm_dc[4] * dnlm_dxij[4] + s[4] * dnlm_dxij_dc[4])
-      );
-      tmpx += C4B[3] * (
-        dnlm_dxij_dc[3] * (s2[2] - s2[1]) + dnlm_dxij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-      tmpx += 2.0 * C4B[3] * (
-        dnlm_dc[3] * (s[2] * dnlm_dxij[2] - s[1] * dnlm_dxij[1]) +
-          s[3] * (dnlm_dc[2] * dnlm_dxij[2] + s[2] * dnlm_dxij_dc[2] -
-                  dnlm_dc[1] * dnlm_dxij[1] - s[1] * dnlm_dxij_dc[1])
-      );
-      tmpx += C4B[4] * (
-        dnlm_dxij_dc[1] * s[2] * s[4] + dnlm_dxij[1] * dnlm_dc[2] * s[4] + dnlm_dxij[1] * s[2] * dnlm_dc[4] +
-        dnlm_dc[1] * dnlm_dxij[2] * s[4] + s[1] * dnlm_dxij_dc[2] * s[4] + s[1] * dnlm_dxij[2] * dnlm_dc[4] +
-        dnlm_dc[1] * s[2] * dnlm_dxij[4] + s[1] * dnlm_dc[2] * dnlm_dxij[4] + s[1] * s[2] * dnlm_dxij_dc[4]
-      );
-      sink.add(type_slot, n, k, Fp * scd_r12[1] * tmpx);
-      tmpy += 3.0 * C4B[0] * (
-        2.0 * s[0] * dnlm_dc[0] * dnlm_dyij[0] + s2[0] * dnlm_dyij_dc[0]);
-      tmpy += C4B[1] * (
-        dnlm_dyij_dc[0] * (s2[1] + s2[2]) + dnlm_dyij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-      );
-      tmpy += 2.0 * C4B[1] * (
-        dnlm_dc[0] * (s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2]) +
-        s[0] * (dnlm_dc[1] * dnlm_dyij[1] + s[1] * dnlm_dyij_dc[1] +
-                  dnlm_dc[2] * dnlm_dyij[2] + s[2] * dnlm_dyij_dc[2])
-      );
-      tmpy += C4B[2] * (
-        dnlm_dyij_dc[0] * (s2[3] + s2[4]) + dnlm_dyij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-      tmpy += 2.0 * C4B[2] * (
-        dnlm_dc[0] * (s[3] * dnlm_dyij[3] + s[4] * dnlm_dyij[4]) +
-        s[0] * (dnlm_dc[3] * dnlm_dyij[3] + s[3] * dnlm_dyij_dc[3] +
-                  dnlm_dc[4] * dnlm_dyij[4] + s[4] * dnlm_dyij_dc[4])
-      );
-      tmpy += C4B[3] * (
-        dnlm_dyij_dc[3] * (s2[2] - s2[1]) + dnlm_dyij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-      tmpy += 2.0 * C4B[3] * (
-        dnlm_dc[3] * (s[2] * dnlm_dyij[2] - s[1] * dnlm_dyij[1]) +
-          s[3] * (dnlm_dc[2] * dnlm_dyij[2] + s[2] * dnlm_dyij_dc[2] -
-                  dnlm_dc[1] * dnlm_dyij[1] - s[1] * dnlm_dyij_dc[1])
-      );
-      tmpy += C4B[4] * (
-        dnlm_dyij_dc[1] * s[2] * s[4] + dnlm_dyij[1] * dnlm_dc[2] * s[4] + dnlm_dyij[1] * s[2] * dnlm_dc[4] +
-        dnlm_dc[1] * dnlm_dyij[2] * s[4] + s[1] * dnlm_dyij_dc[2] * s[4] + s[1] * dnlm_dyij[2] * dnlm_dc[4] +
-        dnlm_dc[1] * s[2] * dnlm_dyij[4] + s[1] * dnlm_dc[2] * dnlm_dyij[4] + s[1] * s[2] * dnlm_dyij_dc[4]
-      );
-      sink.add(type_slot, n, k, Fp * scd_r12[2] * tmpy);
-      tmpz += 3.0 * C4B[0] * (
-        2.0 * s[0] * dnlm_dc[0] * dnlm_dzij[0] + s2[0] * dnlm_dzij_dc[0]);
-      tmpz += C4B[1] * (
-        dnlm_dzij_dc[0] * (s2[1] + s2[2]) + dnlm_dzij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
-      );
-      tmpz += 2.0 * C4B[1] * (
-        dnlm_dc[0] * (s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2]) +
-        s[0] * (dnlm_dc[1] * dnlm_dzij[1] + s[1] * dnlm_dzij_dc[1] +
-                  dnlm_dc[2] * dnlm_dzij[2] + s[2] * dnlm_dzij_dc[2])
-      );
-      tmpz += C4B[2] * (
-        dnlm_dzij_dc[0] * (s2[3] + s2[4]) + dnlm_dzij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
-      tmpz += 2.0 * C4B[2] * (
-        dnlm_dc[0] * (s[3] * dnlm_dzij[3] + s[4] * dnlm_dzij[4]) +
-        s[0] * (dnlm_dc[3] * dnlm_dzij[3] + s[3] * dnlm_dzij_dc[3] +
-                  dnlm_dc[4] * dnlm_dzij[4] + s[4] * dnlm_dzij_dc[4])
-      );
-      tmpz += C4B[3] * (
-        dnlm_dzij_dc[3] * (s2[2] - s2[1]) + dnlm_dzij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
-      tmpz += 2.0 * C4B[3] * (
-        dnlm_dc[3] * (s[2] * dnlm_dzij[2] - s[1] * dnlm_dzij[1]) +
-          s[3] * (dnlm_dc[2] * dnlm_dzij[2] + s[2] * dnlm_dzij_dc[2] -
-                  dnlm_dc[1] * dnlm_dzij[1] - s[1] * dnlm_dzij_dc[1])
-      );
-      tmpz += C4B[4] * (
-        dnlm_dzij_dc[1] * s[2] * s[4] + dnlm_dzij[1] * dnlm_dc[2] * s[4] + dnlm_dzij[1] * s[2] * dnlm_dc[4] +
-        dnlm_dc[1] * dnlm_dzij[2] * s[4] + s[1] * dnlm_dzij_dc[2] * s[4] + s[1] * dnlm_dzij[2] * dnlm_dc[4] +
-        dnlm_dc[1] * s[2] * dnlm_dzij[4] + s[1] * dnlm_dc[2] * dnlm_dzij[4] + s[1] * s[2] * dnlm_dzij_dc[4]
-      );
-      sink.add(type_slot, n, k, Fp * scd_r12[3] * tmpz);
+      {
+        double tmpr = 0.0;
+        double dnlm_drij[5] = {0.0};
+        dnlm_drij[0] = fnp * blm[0] + fn * dblm_r[0];
+        dnlm_drij[1] = fnp * blm[1];
+        dnlm_drij[2] = fnp * blm[2];
+        dnlm_drij[3] = fnp * blm[3];
+        dnlm_drij[4] = fnp * blm[4];
+        double dnlm_drij_dc[5] = {0.0};
+        dnlm_drij_dc[0] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[0] + fn12[k] * rij_Lsq * dblm_r[0];
+        dnlm_drij_dc[1] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[1];
+        dnlm_drij_dc[2] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[2];
+        dnlm_drij_dc[3] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[3];
+        dnlm_drij_dc[4] = (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[4];
+        tmpr += 3.0 * C4B[0] * (
+          2.0 * s[0] * dnlm_dc[0] * dnlm_drij[0] + s2[0] * dnlm_drij_dc[0]);
+        tmpr += C4B[1] * (
+          dnlm_drij_dc[0] * (s2[1] + s2[2]) + dnlm_drij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+        );
+        tmpr += 2.0 * C4B[1] * (
+          dnlm_dc[0] * (s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2]) +
+          s[0] * (dnlm_dc[1] * dnlm_drij[1] + s[1] * dnlm_drij_dc[1] +
+                    dnlm_dc[2] * dnlm_drij[2] + s[2] * dnlm_drij_dc[2])
+        );
+        tmpr += C4B[2] * (
+          dnlm_drij_dc[0] * (s2[3] + s2[4]) + dnlm_drij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+        tmpr += 2.0 * C4B[2] * (
+          dnlm_dc[0] * (s[3] * dnlm_drij[3] + s[4] * dnlm_drij[4]) +
+          s[0] * (dnlm_dc[3] * dnlm_drij[3] + s[3] * dnlm_drij_dc[3] +
+                    dnlm_dc[4] * dnlm_drij[4] + s[4] * dnlm_drij_dc[4])
+        );
+        tmpr += C4B[3] * (
+          dnlm_drij_dc[3] * (s2[2] - s2[1]) + dnlm_drij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+        tmpr += 2.0 * C4B[3] * (
+          dnlm_dc[3] * (s[2] * dnlm_drij[2] - s[1] * dnlm_drij[1]) +
+            s[3] * (dnlm_dc[2] * dnlm_drij[2] + s[2] * dnlm_drij_dc[2] -
+                    dnlm_dc[1] * dnlm_drij[1] - s[1] * dnlm_drij_dc[1])
+        );
+        tmpr += C4B[4] * (
+          dnlm_drij_dc[1] * s[2] * s[4] + dnlm_drij[1] * dnlm_dc[2] * s[4] + dnlm_drij[1] * s[2] * dnlm_dc[4] +
+          dnlm_dc[1] * dnlm_drij[2] * s[4] + s[1] * dnlm_drij_dc[2] * s[4] + s[1] * dnlm_drij[2] * dnlm_dc[4] +
+          dnlm_dc[1] * s[2] * dnlm_drij[4] + s[1] * dnlm_dc[2] * dnlm_drij[4] + s[1] * s[2] * dnlm_drij_dc[4]
+        );
+        sink.add(type_slot, n, k, Fp * scd_r12[0] * tmpr);
+      }
+      {
+        double tmpx = 0.0;
+        double dnlm_dxij[5] = {0.0};
+        dnlm_dxij[0] = 0.0;
+        dnlm_dxij[1] = fn * dblm_x[1];
+        dnlm_dxij[2] = 0.0;
+        dnlm_dxij[3] = fn * dblm_x[3];
+        dnlm_dxij[4] = fn * dblm_x[4];
+        double dnlm_dxij_dc[5] = {0.0};
+        dnlm_dxij_dc[0] = 0.0;
+        dnlm_dxij_dc[1] = fn12[k] * rij_Lsq * dblm_x[1];
+        dnlm_dxij_dc[2] = 0.0;
+        dnlm_dxij_dc[3] = fn12[k] * rij_Lsq * dblm_x[3];
+        dnlm_dxij_dc[4] = fn12[k] * rij_Lsq * dblm_x[4];
+        tmpx += 3.0 * C4B[0] * (
+          2.0 * s[0] * dnlm_dc[0] * dnlm_dxij[0] + s2[0] * dnlm_dxij_dc[0]);
+        tmpx += C4B[1] * (
+          dnlm_dxij_dc[0] * (s2[1] + s2[2]) + dnlm_dxij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+        );
+        tmpx += 2.0 * C4B[1] * (
+          dnlm_dc[0] * (s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2]) +
+          s[0] * (dnlm_dc[1] * dnlm_dxij[1] + s[1] * dnlm_dxij_dc[1] +
+                    dnlm_dc[2] * dnlm_dxij[2] + s[2] * dnlm_dxij_dc[2])
+        );
+        tmpx += C4B[2] * (
+          dnlm_dxij_dc[0] * (s2[3] + s2[4]) + dnlm_dxij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+        tmpx += 2.0 * C4B[2] * (
+          dnlm_dc[0] * (s[3] * dnlm_dxij[3] + s[4] * dnlm_dxij[4]) +
+          s[0] * (dnlm_dc[3] * dnlm_dxij[3] + s[3] * dnlm_dxij_dc[3] +
+                    dnlm_dc[4] * dnlm_dxij[4] + s[4] * dnlm_dxij_dc[4])
+        );
+        tmpx += C4B[3] * (
+          dnlm_dxij_dc[3] * (s2[2] - s2[1]) + dnlm_dxij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+        tmpx += 2.0 * C4B[3] * (
+          dnlm_dc[3] * (s[2] * dnlm_dxij[2] - s[1] * dnlm_dxij[1]) +
+            s[3] * (dnlm_dc[2] * dnlm_dxij[2] + s[2] * dnlm_dxij_dc[2] -
+                    dnlm_dc[1] * dnlm_dxij[1] - s[1] * dnlm_dxij_dc[1])
+        );
+        tmpx += C4B[4] * (
+          dnlm_dxij_dc[1] * s[2] * s[4] + dnlm_dxij[1] * dnlm_dc[2] * s[4] + dnlm_dxij[1] * s[2] * dnlm_dc[4] +
+          dnlm_dc[1] * dnlm_dxij[2] * s[4] + s[1] * dnlm_dxij_dc[2] * s[4] + s[1] * dnlm_dxij[2] * dnlm_dc[4] +
+          dnlm_dc[1] * s[2] * dnlm_dxij[4] + s[1] * dnlm_dc[2] * dnlm_dxij[4] + s[1] * s[2] * dnlm_dxij_dc[4]
+        );
+        sink.add(type_slot, n, k, Fp * scd_r12[1] * tmpx);
+      }
+      {
+        double tmpy = 0.0;
+        double dnlm_dyij[5] = {0.0};
+        dnlm_dyij[0] = 0.0;
+        dnlm_dyij[1] = 0.0;
+        dnlm_dyij[2] = fn * dblm_y[2];
+        dnlm_dyij[3] = fn * dblm_y[3];
+        dnlm_dyij[4] = fn * dblm_y[4];
+        double dnlm_dyij_dc[5] = {0.0};
+        dnlm_dyij_dc[0] = 0.0;
+        dnlm_dyij_dc[1] = 0.0;
+        dnlm_dyij_dc[2] = fn12[k] * rij_Lsq * dblm_y[2];
+        dnlm_dyij_dc[3] = fn12[k] * rij_Lsq * dblm_y[3];
+        dnlm_dyij_dc[4] = fn12[k] * rij_Lsq * dblm_y[4];
+        tmpy += 3.0 * C4B[0] * (
+          2.0 * s[0] * dnlm_dc[0] * dnlm_dyij[0] + s2[0] * dnlm_dyij_dc[0]);
+        tmpy += C4B[1] * (
+          dnlm_dyij_dc[0] * (s2[1] + s2[2]) + dnlm_dyij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+        );
+        tmpy += 2.0 * C4B[1] * (
+          dnlm_dc[0] * (s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2]) +
+          s[0] * (dnlm_dc[1] * dnlm_dyij[1] + s[1] * dnlm_dyij_dc[1] +
+                    dnlm_dc[2] * dnlm_dyij[2] + s[2] * dnlm_dyij_dc[2])
+        );
+        tmpy += C4B[2] * (
+          dnlm_dyij_dc[0] * (s2[3] + s2[4]) + dnlm_dyij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+        tmpy += 2.0 * C4B[2] * (
+          dnlm_dc[0] * (s[3] * dnlm_dyij[3] + s[4] * dnlm_dyij[4]) +
+          s[0] * (dnlm_dc[3] * dnlm_dyij[3] + s[3] * dnlm_dyij_dc[3] +
+                    dnlm_dc[4] * dnlm_dyij[4] + s[4] * dnlm_dyij_dc[4])
+        );
+        tmpy += C4B[3] * (
+          dnlm_dyij_dc[3] * (s2[2] - s2[1]) + dnlm_dyij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+        tmpy += 2.0 * C4B[3] * (
+          dnlm_dc[3] * (s[2] * dnlm_dyij[2] - s[1] * dnlm_dyij[1]) +
+            s[3] * (dnlm_dc[2] * dnlm_dyij[2] + s[2] * dnlm_dyij_dc[2] -
+                    dnlm_dc[1] * dnlm_dyij[1] - s[1] * dnlm_dyij_dc[1])
+        );
+        tmpy += C4B[4] * (
+          dnlm_dyij_dc[1] * s[2] * s[4] + dnlm_dyij[1] * dnlm_dc[2] * s[4] + dnlm_dyij[1] * s[2] * dnlm_dc[4] +
+          dnlm_dc[1] * dnlm_dyij[2] * s[4] + s[1] * dnlm_dyij_dc[2] * s[4] + s[1] * dnlm_dyij[2] * dnlm_dc[4] +
+          dnlm_dc[1] * s[2] * dnlm_dyij[4] + s[1] * dnlm_dc[2] * dnlm_dyij[4] + s[1] * s[2] * dnlm_dyij_dc[4]
+        );
+        sink.add(type_slot, n, k, Fp * scd_r12[2] * tmpy);
+      }
+      {
+        double tmpz = 0.0;
+        double dnlm_dzij[5] = {0.0};
+        dnlm_dzij[0] = fn * dblm_z[0];
+        dnlm_dzij[1] = fn * dblm_z[1];
+        dnlm_dzij[2] = fn * dblm_z[2];
+        dnlm_dzij[3] = 0.0;
+        dnlm_dzij[4] = 0.0;
+        double dnlm_dzij_dc[5] = {0.0};
+        dnlm_dzij_dc[0] = fn12[k] * rij_Lsq * dblm_z[0];
+        dnlm_dzij_dc[1] = fn12[k] * rij_Lsq * dblm_z[1];
+        dnlm_dzij_dc[2] = fn12[k] * rij_Lsq * dblm_z[2];
+        dnlm_dzij_dc[3] = 0.0;
+        dnlm_dzij_dc[4] = 0.0;
+        tmpz += 3.0 * C4B[0] * (
+          2.0 * s[0] * dnlm_dc[0] * dnlm_dzij[0] + s2[0] * dnlm_dzij_dc[0]);
+        tmpz += C4B[1] * (
+          dnlm_dzij_dc[0] * (s2[1] + s2[2]) + dnlm_dzij[0] * 2.0 * (s[1] * dnlm_dc[1] + s[2] * dnlm_dc[2])
+        );
+        tmpz += 2.0 * C4B[1] * (
+          dnlm_dc[0] * (s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2]) +
+          s[0] * (dnlm_dc[1] * dnlm_dzij[1] + s[1] * dnlm_dzij_dc[1] +
+                    dnlm_dc[2] * dnlm_dzij[2] + s[2] * dnlm_dzij_dc[2])
+        );
+        tmpz += C4B[2] * (
+          dnlm_dzij_dc[0] * (s2[3] + s2[4]) + dnlm_dzij[0] * 2.0 * (s[3] * dnlm_dc[3] + s[4] * dnlm_dc[4]));
+        tmpz += 2.0 * C4B[2] * (
+          dnlm_dc[0] * (s[3] * dnlm_dzij[3] + s[4] * dnlm_dzij[4]) +
+          s[0] * (dnlm_dc[3] * dnlm_dzij[3] + s[3] * dnlm_dzij_dc[3] +
+                    dnlm_dc[4] * dnlm_dzij[4] + s[4] * dnlm_dzij_dc[4])
+        );
+        tmpz += C4B[3] * (
+          dnlm_dzij_dc[3] * (s2[2] - s2[1]) + dnlm_dzij[3] * 2.0 * (s[2] * dnlm_dc[2] - s[1] * dnlm_dc[1]));
+        tmpz += 2.0 * C4B[3] * (
+          dnlm_dc[3] * (s[2] * dnlm_dzij[2] - s[1] * dnlm_dzij[1]) +
+            s[3] * (dnlm_dc[2] * dnlm_dzij[2] + s[2] * dnlm_dzij_dc[2] -
+                    dnlm_dc[1] * dnlm_dzij[1] - s[1] * dnlm_dzij_dc[1])
+        );
+        tmpz += C4B[4] * (
+          dnlm_dzij_dc[1] * s[2] * s[4] + dnlm_dzij[1] * dnlm_dc[2] * s[4] + dnlm_dzij[1] * s[2] * dnlm_dc[4] +
+          dnlm_dc[1] * dnlm_dzij[2] * s[4] + s[1] * dnlm_dzij_dc[2] * s[4] + s[1] * dnlm_dzij[2] * dnlm_dc[4] +
+          dnlm_dc[1] * s[2] * dnlm_dzij[4] + s[1] * dnlm_dc[2] * dnlm_dzij[4] + s[1] * s[2] * dnlm_dzij_dc[4]
+        );
+        sink.add(type_slot, n, k, Fp * scd_r12[3] * tmpz);
+      }
     }
 
   }
@@ -854,22 +1086,6 @@ __device__ __forceinline__ void accumulate_five_body(
   int type_slot, int tile_count, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
   if constexpr (CROSS) {
-    double dnlm_drij[3] = {0.0};
-    dnlm_drij[0] = fnp * blm[0];
-    dnlm_drij[1] = fnp * blm[1];
-    dnlm_drij[2] = fnp * blm[2];
-    double dnlm_dxij[3] = {0.0};
-    dnlm_dxij[0] = 0.0;
-    dnlm_dxij[1] = fn;
-    dnlm_dxij[2] = 0.0;
-    double dnlm_dyij[3] = {0.0};
-    dnlm_dyij[0] = 0.0;
-    dnlm_dyij[1] = 0.0;
-    dnlm_dyij[2] = fn;
-    double dnlm_dzij[3] = {0.0};
-    dnlm_dzij[0] = fn;
-    dnlm_dzij[1] = 0.0;
-    dnlm_dzij[2] = 0.0;
     double dnlm_dc[3] = {0.0};
     double s2[3] = {0.0};
     s2[0] = s[0] * s[0];
@@ -884,49 +1100,78 @@ __device__ __forceinline__ void accumulate_five_body(
       if (type_slot == j) continue;
       int dsnlm_idx = 0 + j * NBASIS * NUM_OF_ABC;
 
+      #pragma unroll
+
       for(int k=0; k < NBASIS; k++) {
         int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-        double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
 
         dnlm_dc[0] = dsnlm_dc[dsnlm_i + 0];
         dnlm_dc[1] = dsnlm_dc[dsnlm_i + 1];
         dnlm_dc[2] = dsnlm_dc[dsnlm_i + 2];
-        tmpr += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_drij[0]);
-        ds1s2 = s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2];
-        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-        d_tmp = dnlm_dc[1] * dnlm_drij[1] + dnlm_dc[2] * dnlm_drij[2];
-        tmpr += 2.0 * C5B[1] * (
-          dnlm_dc[0] * dnlm_drij[0] * (s2[1] + s2[2]) +
-          s[0] * dnlm_drij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-        tmpr += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(uj, n, k, Fp * scd_r12[0] * tmpr);
-        tmpx += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dxij[0]);
-        ds1s2 = s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2];
-        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-        d_tmp = dnlm_dc[1] * dnlm_dxij[1] + dnlm_dc[2] * dnlm_dxij[2];
-        tmpx += 2.0 * C5B[1] * (
-          dnlm_dc[0] * dnlm_dxij[0] * (s2[1] + s2[2]) +
-          s[0] * dnlm_dxij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-        tmpx += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(uj, n, k, Fp * scd_r12[1] * tmpx);
-        tmpy += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dyij[0]);
-        ds1s2 = s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2];
-        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-        d_tmp = dnlm_dc[1] * dnlm_dyij[1] + dnlm_dc[2] * dnlm_dyij[2];
-        tmpy += 2.0 * C5B[1] * (
-          dnlm_dc[0] * dnlm_dyij[0] * (s2[1] + s2[2]) +
-          s[0] * dnlm_dyij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-        tmpy += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(uj, n, k, Fp * scd_r12[2] * tmpy);
-        tmpz += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dzij[0]);
-        ds1s2 = s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2];
-        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-        d_tmp = dnlm_dc[1] * dnlm_dzij[1] + dnlm_dc[2] * dnlm_dzij[2];
-        tmpz += 2.0 * C5B[1] * (
-          dnlm_dc[0] * dnlm_dzij[0] * (s2[1] + s2[2]) +
-          s[0] * dnlm_dzij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-        tmpz += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(uj, n, k, Fp * scd_r12[3] * tmpz);
+        {
+          double tmpr = 0.0;
+          double dnlm_drij[3] = {0.0};
+          dnlm_drij[0] = fnp * blm[0];
+          dnlm_drij[1] = fnp * blm[1];
+          dnlm_drij[2] = fnp * blm[2];
+          tmpr += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_drij[0]);
+          ds1s2 = s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2];
+          ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+          d_tmp = dnlm_dc[1] * dnlm_drij[1] + dnlm_dc[2] * dnlm_drij[2];
+          tmpr += 2.0 * C5B[1] * (
+            dnlm_dc[0] * dnlm_drij[0] * (s2[1] + s2[2]) +
+            s[0] * dnlm_drij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+          tmpr += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+          sink.add(uj, n, k, Fp * scd_r12[0] * tmpr);
+        }
+        {
+          double tmpx = 0.0;
+          double dnlm_dxij[3] = {0.0};
+          dnlm_dxij[0] = 0.0;
+          dnlm_dxij[1] = fn;
+          dnlm_dxij[2] = 0.0;
+          tmpx += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dxij[0]);
+          ds1s2 = s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2];
+          ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+          d_tmp = dnlm_dc[1] * dnlm_dxij[1] + dnlm_dc[2] * dnlm_dxij[2];
+          tmpx += 2.0 * C5B[1] * (
+            dnlm_dc[0] * dnlm_dxij[0] * (s2[1] + s2[2]) +
+            s[0] * dnlm_dxij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+          tmpx += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+          sink.add(uj, n, k, Fp * scd_r12[1] * tmpx);
+        }
+        {
+          double tmpy = 0.0;
+          double dnlm_dyij[3] = {0.0};
+          dnlm_dyij[0] = 0.0;
+          dnlm_dyij[1] = 0.0;
+          dnlm_dyij[2] = fn;
+          tmpy += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dyij[0]);
+          ds1s2 = s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2];
+          ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+          d_tmp = dnlm_dc[1] * dnlm_dyij[1] + dnlm_dc[2] * dnlm_dyij[2];
+          tmpy += 2.0 * C5B[1] * (
+            dnlm_dc[0] * dnlm_dyij[0] * (s2[1] + s2[2]) +
+            s[0] * dnlm_dyij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+          tmpy += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+          sink.add(uj, n, k, Fp * scd_r12[2] * tmpy);
+        }
+        {
+          double tmpz = 0.0;
+          double dnlm_dzij[3] = {0.0};
+          dnlm_dzij[0] = fn;
+          dnlm_dzij[1] = 0.0;
+          dnlm_dzij[2] = 0.0;
+          tmpz += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dzij[0]);
+          ds1s2 = s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2];
+          ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+          d_tmp = dnlm_dc[1] * dnlm_dzij[1] + dnlm_dc[2] * dnlm_dzij[2];
+          tmpz += 2.0 * C5B[1] * (
+            dnlm_dc[0] * dnlm_dzij[0] * (s2[1] + s2[2]) +
+            s[0] * dnlm_dzij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+          tmpz += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+          sink.add(uj, n, k, Fp * scd_r12[3] * tmpz);
+        }
       }
     }
 
@@ -934,27 +1179,7 @@ __device__ __forceinline__ void accumulate_five_body(
     if (type_slot < 0) return;
 
     int dsnlm_idx = 0 + type_slot * NBASIS * NUM_OF_ABC;
-    double dnlm_drij[3] = {0.0};
-    dnlm_drij[0] = fnp * blm[0];
-    dnlm_drij[1] = fnp * blm[1];
-    dnlm_drij[2] = fnp * blm[2];
-    double dnlm_dxij[3] = {0.0};
-    dnlm_dxij[0] = 0.0;
-    dnlm_dxij[1] = fn;
-    dnlm_dxij[2] = 0.0;
-    double dnlm_dyij[3] = {0.0};
-    dnlm_dyij[0] = 0.0;
-    dnlm_dyij[1] = 0.0;
-    dnlm_dyij[2] = fn;
-    double dnlm_dzij[3] = {0.0};
-    dnlm_dzij[0] = fn;
-    dnlm_dzij[1] = 0.0;
-    dnlm_dzij[2] = 0.0;
     double dnlm_dc[3] = {0.0};
-    double dnlm_drij_dc[3] = {0.0};
-    double dnlm_dxij_dc[3] = {0.0};
-    double dnlm_dyij_dc[3] = {0.0};
-    double dnlm_dzij_dc[3] = {0.0};
     double s2[3] = {0.0};
     s2[0] = s[0] * s[0];
     s2[1] = s[1] * s[1];
@@ -962,170 +1187,192 @@ __device__ __forceinline__ void accumulate_five_body(
     double ds1s2 = 0.0;
     double ds1s2_c = 0.0;
     double d_tmp = 0.0;
+    #pragma unroll
     for(int k=0; k < NBASIS; k++) {
       int dsnlm_i = dsnlm_idx + k * NUM_OF_ABC;
-      double tmpr = 0.0, tmpx = 0.0, tmpy = 0.0, tmpz = 0.0;
       dnlm_dc[0] = dsnlm_dc[dsnlm_i + 0];
       dnlm_dc[1] = dsnlm_dc[dsnlm_i + 1];
       dnlm_dc[2] = dsnlm_dc[dsnlm_i + 2];
-      dnlm_drij_dc[0] = (fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq) * blm[0];
-      dnlm_drij_dc[1] = (fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq) * blm[1];
-      dnlm_drij_dc[2] = (fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq) * blm[2];
-      dnlm_dxij_dc[1] = fn12[k] * rij_Lsq;
-      dnlm_dyij_dc[2] = fn12[k] * rij_Lsq;
-      dnlm_dzij_dc[0] = fn12[k] * rij_Lsq;
-      tmpr += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_drij[0] + s2[0] * s[0] * dnlm_drij_dc[0]);
-      ds1s2 = s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2];
-      ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-      d_tmp = dnlm_dc[1] * dnlm_drij[1] + s[1] * dnlm_drij_dc[1] + dnlm_dc[2] * dnlm_drij[2] + s[2] * dnlm_drij_dc[2];
-      tmpr += 2.0 * C5B[1] * (
-        dnlm_dc[0] * dnlm_drij[0] * (s2[1] + s2[2]) + s[0] * dnlm_drij_dc[0] * (s2[1] + s2[2]) +
-        s[0] * dnlm_drij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-      tmpr += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-      sink.add(type_slot, n, k, Fp * scd_r12[0] * tmpr);
-      tmpx += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dxij[0] + s2[0] * s[0] * dnlm_dxij_dc[0]);
-      ds1s2 = s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2];
-      ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-      d_tmp = dnlm_dc[1] * dnlm_dxij[1] + s[1] * dnlm_dxij_dc[1] + dnlm_dc[2] * dnlm_dxij[2] + s[2] * dnlm_dxij_dc[2];
-      tmpx += 2.0 * C5B[1] * (
-        dnlm_dc[0] * dnlm_dxij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dxij_dc[0] * (s2[1] + s2[2]) +
-        s[0] * dnlm_dxij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-      tmpx += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-      sink.add(type_slot, n, k, Fp * scd_r12[1] * tmpx);
-      tmpy += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dyij[0] + s2[0] * s[0] * dnlm_dyij_dc[0]);
-      ds1s2 = s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2];
-      ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-      d_tmp = dnlm_dc[1] * dnlm_dyij[1] + s[1] * dnlm_dyij_dc[1] + dnlm_dc[2] * dnlm_dyij[2] + s[2] * dnlm_dyij_dc[2];
-      tmpy += 2.0 * C5B[1] * (
-        dnlm_dc[0] * dnlm_dyij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dyij_dc[0] * (s2[1] + s2[2]) +
-        s[0] * dnlm_dyij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-      tmpy += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-      sink.add(type_slot, n, k, Fp * scd_r12[2] * tmpy);
-      tmpz += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dzij[0] + s2[0] * s[0] * dnlm_dzij_dc[0]);
-      ds1s2 = s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2];
-      ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
-      d_tmp = dnlm_dc[1] * dnlm_dzij[1] + s[1] * dnlm_dzij_dc[1] + dnlm_dc[2] * dnlm_dzij[2] + s[2] * dnlm_dzij_dc[2];
-      tmpz += 2.0 * C5B[1] * (
-        dnlm_dc[0] * dnlm_dzij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dzij_dc[0] * (s2[1] + s2[2]) +
-        s[0] * dnlm_dzij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
-      tmpz += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-      sink.add(type_slot, n, k, Fp * scd_r12[3] * tmpz);
+      {
+        double tmpr = 0.0;
+        double dnlm_drij[3] = {0.0};
+        dnlm_drij[0] = fnp * blm[0];
+        dnlm_drij[1] = fnp * blm[1];
+        dnlm_drij[2] = fnp * blm[2];
+        double dnlm_drij_dc[3] = {0.0};
+        dnlm_drij_dc[0] = (fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq) * blm[0];
+        dnlm_drij_dc[1] = (fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq) * blm[1];
+        dnlm_drij_dc[2] = (fnp12[k] * rij_Lsq - fn12[k] * rij_L2sq) * blm[2];
+        tmpr += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_drij[0] + s2[0] * s[0] * dnlm_drij_dc[0]);
+        ds1s2 = s[1] * dnlm_drij[1] + s[2] * dnlm_drij[2];
+        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+        d_tmp = dnlm_dc[1] * dnlm_drij[1] + s[1] * dnlm_drij_dc[1] + dnlm_dc[2] * dnlm_drij[2] + s[2] * dnlm_drij_dc[2];
+        tmpr += 2.0 * C5B[1] * (
+          dnlm_dc[0] * dnlm_drij[0] * (s2[1] + s2[2]) + s[0] * dnlm_drij_dc[0] * (s2[1] + s2[2]) +
+          s[0] * dnlm_drij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+        tmpr += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+        sink.add(type_slot, n, k, Fp * scd_r12[0] * tmpr);
+      }
+      {
+        double tmpx = 0.0;
+        double dnlm_dxij[3] = {0.0};
+        dnlm_dxij[0] = 0.0;
+        dnlm_dxij[1] = fn;
+        dnlm_dxij[2] = 0.0;
+        double dnlm_dxij_dc[3] = {0.0};
+        dnlm_dxij_dc[1] = fn12[k] * rij_Lsq;
+        tmpx += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dxij[0] + s2[0] * s[0] * dnlm_dxij_dc[0]);
+        ds1s2 = s[1] * dnlm_dxij[1] + s[2] * dnlm_dxij[2];
+        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+        d_tmp = dnlm_dc[1] * dnlm_dxij[1] + s[1] * dnlm_dxij_dc[1] + dnlm_dc[2] * dnlm_dxij[2] + s[2] * dnlm_dxij_dc[2];
+        tmpx += 2.0 * C5B[1] * (
+          dnlm_dc[0] * dnlm_dxij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dxij_dc[0] * (s2[1] + s2[2]) +
+          s[0] * dnlm_dxij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+        tmpx += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+        sink.add(type_slot, n, k, Fp * scd_r12[1] * tmpx);
+      }
+      {
+        double tmpy = 0.0;
+        double dnlm_dyij[3] = {0.0};
+        dnlm_dyij[0] = 0.0;
+        dnlm_dyij[1] = 0.0;
+        dnlm_dyij[2] = fn;
+        double dnlm_dyij_dc[3] = {0.0};
+        dnlm_dyij_dc[2] = fn12[k] * rij_Lsq;
+        tmpy += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dyij[0] + s2[0] * s[0] * dnlm_dyij_dc[0]);
+        ds1s2 = s[1] * dnlm_dyij[1] + s[2] * dnlm_dyij[2];
+        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+        d_tmp = dnlm_dc[1] * dnlm_dyij[1] + s[1] * dnlm_dyij_dc[1] + dnlm_dc[2] * dnlm_dyij[2] + s[2] * dnlm_dyij_dc[2];
+        tmpy += 2.0 * C5B[1] * (
+          dnlm_dc[0] * dnlm_dyij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dyij_dc[0] * (s2[1] + s2[2]) +
+          s[0] * dnlm_dyij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+        tmpy += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+        sink.add(type_slot, n, k, Fp * scd_r12[2] * tmpy);
+      }
+      {
+        double tmpz = 0.0;
+        double dnlm_dzij[3] = {0.0};
+        dnlm_dzij[0] = fn;
+        dnlm_dzij[1] = 0.0;
+        dnlm_dzij[2] = 0.0;
+        double dnlm_dzij_dc[3] = {0.0};
+        dnlm_dzij_dc[0] = fn12[k] * rij_Lsq;
+        tmpz += 4.0 * C5B[0] * (3.0 * s2[0] * dnlm_dc[0] * dnlm_dzij[0] + s2[0] * s[0] * dnlm_dzij_dc[0]);
+        ds1s2 = s[1] * dnlm_dzij[1] + s[2] * dnlm_dzij[2];
+        ds1s2_c = 2.0 * s[1] * dnlm_dc[1] + 2.0 * s[2] * dnlm_dc[2];
+        d_tmp = dnlm_dc[1] * dnlm_dzij[1] + s[1] * dnlm_dzij_dc[1] + dnlm_dc[2] * dnlm_dzij[2] + s[2] * dnlm_dzij_dc[2];
+        tmpz += 2.0 * C5B[1] * (
+          dnlm_dc[0] * dnlm_dzij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dzij_dc[0] * (s2[1] + s2[2]) +
+          s[0] * dnlm_dzij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
+        tmpz += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
+        sink.add(type_slot, n, k, Fp * scd_r12[3] * tmpz);
+      }
     }
 
   }
 }
 
+template<int L, int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE>
+__device__ __forceinline__ void accumulate_angular_order(
+  int n, double d12, const double* r12, double fn, double fnp,
+  double d12inv, double rij_Lsq, double rij_L2sq,
+  const double* Fp, const double* dsnlm_dc, const double* sum_fxyz,
+  const double* scd_r12, const double (&fn12)[NBASIS], const double (&fnp12)[NBASIS],
+  int type_slot, int tile_count, const SharedTileSink<NMAX, NBASIS, TYPE_TILE>& sink)
+{
+  AngularScratch<L> scratch{};
+  build_angular_scratch<L>(d12, r12[0], r12[1], r12[2], scratch);
+  constexpr int offset = L * L - 1;
+  double sums[2 * L + 1];
+  #pragma unroll
+  for (int m = 0; m < 2 * L + 1; ++m) {
+    sums[m] = sum_fxyz[n * NUM_OF_ABC + offset + m];
+  }
+  // Keep the legacy five-body, L=1, four-body, L=2, L=3, L=4 sequence.
+  // The higher-body terms consume the unweighted sums of the same order.
+  if constexpr (L == 1 && HAS5) {
+    accumulate_five_body<false, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
+        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums, r12,
+        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink);
+    accumulate_five_body<true, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
+        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums, r12,
+        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink);
+  }
+  if constexpr (L == 2 && HAS4) {
+    accumulate_four_body<false, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
+        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums, r12,
+        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink);
+    accumulate_four_body<true, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
+        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums, r12,
+        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink);
+  }
+  #pragma unroll
+  for (int m = 0; m < 2 * L + 1; ++m) {
+    sums[m] *= C3B[offset + m];
+  }
+  accumulate_direct<L, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
+        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums, r12,
+        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1], type_slot, tile_count, n, sink);
+  accumulate_cross<L, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
+        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums, r12,
+        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1], type_slot, tile_count, n, sink);
+}
+
 template<int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE>
-__device__ __forceinline__ void accumulate_neighbor(
+// Bound register lifetime to one radial contribution. Inlining this into the
+// unrolled n loop allows angular temporaries to survive across radial indices.
+// Angular helpers remain inline so their order-sized scratch never crosses a
+// device-call boundary.
+__device__ __noinline__ void accumulate_neighbor(
   int n, double d12, const double* r12, double fn, double fnp,
   const double* Fp, const double* dsnlm_dc, const double* sum_fxyz,
-  const double* blm, const double* rij_blm,
-  const double* dblm_x, const double* dblm_y, const double* dblm_z, const double* dblm_r,
-  const double* scd_r12, const double* fn12, const double* fnp12,
+  const double* scd_r12, const double (&fn12)[NBASIS], const double (&fnp12)[NBASIS],
   int type_slot, int tile_count, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
   static_assert(LMAX3 == 4, "This numerical port supports the OMat24 angular orders");
-
   const double d12inv = 1.0 / d12;
   double rij_Lsq = d12inv;
-  double rij_L2sq= d12inv  * d12inv;
+  double rij_L2sq = d12inv * d12inv;
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
-  double s1[3] = {
-    sum_fxyz[n * NUM_OF_ABC + 0], sum_fxyz[n * NUM_OF_ABC + 1], sum_fxyz[n * NUM_OF_ABC + 2]};
-  if constexpr (HAS5) { accumulate_five_body<false, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-              scd_r12, dsnlm_dc, s1, r12,
-              d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink); }
-  if constexpr (HAS5) { accumulate_five_body<true, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-              scd_r12, dsnlm_dc, s1, r12,
-              d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink); }
-  s1[0] *= C3B[0];
-  s1[1] *= C3B[1];
-  s1[2] *= C3B[2];
-  accumulate_direct<1, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-              blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-              scd_r12, dsnlm_dc, s1, r12,
-              d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3], type_slot, tile_count, n, sink);
-  accumulate_cross<1, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s1, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3], type_slot, tile_count, n, sink);
+  {
+    accumulate_angular_order<1, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(
+        n, d12, r12, fn, fnp, d12inv, rij_Lsq, rij_L2sq,
+        Fp, dsnlm_dc, sum_fxyz, scd_r12, fn12, fnp12, type_slot, tile_count, sink);
+  }
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s2[5] = {
-    sum_fxyz[n * NUM_OF_ABC + 3],
-    sum_fxyz[n * NUM_OF_ABC + 4],
-    sum_fxyz[n * NUM_OF_ABC + 5],
-    sum_fxyz[n * NUM_OF_ABC + 6],
-    sum_fxyz[n * NUM_OF_ABC + 7]};
-  if constexpr (HAS4) { accumulate_four_body<false, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s2, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink); }
-  if constexpr (HAS4) { accumulate_four_body<true, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s2, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink); }
-  s2[0] *= C3B[3];
-  s2[1] *= C3B[4];
-  s2[2] *= C3B[5];
-  s2[3] *= C3B[6];
-  s2[4] *= C3B[7];
-  accumulate_direct<2, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s2, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3+1], type_slot, tile_count, n, sink);
-  accumulate_cross<2, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s2, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3+1], type_slot, tile_count, n, sink);
+  {
+    accumulate_angular_order<2, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(
+        n, d12, r12, fn, fnp, d12inv, rij_Lsq, rij_L2sq,
+        Fp, dsnlm_dc, sum_fxyz, scd_r12, fn12, fnp12, type_slot, tile_count, sink);
+  }
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s3[7] = {
-    sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
-    sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
-    sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
-    sum_fxyz[n * NUM_OF_ABC + 11] * C3B[11],
-    sum_fxyz[n * NUM_OF_ABC + 12] * C3B[12],
-    sum_fxyz[n * NUM_OF_ABC + 13] * C3B[13],
-    sum_fxyz[n * NUM_OF_ABC + 14] * C3B[14]};
-  accumulate_direct<3, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s3, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3+2], type_slot, tile_count, n, sink);
-  accumulate_cross<3, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s3, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3+2], type_slot, tile_count, n, sink);
+  {
+    accumulate_angular_order<3, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(
+        n, d12, r12, fn, fnp, d12inv, rij_Lsq, rij_L2sq,
+        Fp, dsnlm_dc, sum_fxyz, scd_r12, fn12, fnp12, type_slot, tile_count, sink);
+  }
   fnp = fnp * d12inv - fn * d12inv * d12inv;
   fn = fn * d12inv;
   rij_Lsq = rij_L2sq;
   rij_L2sq = rij_L2sq * d12inv;
-  double s4[9] = {
-    sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
-    sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
-    sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],
-    sum_fxyz[n * NUM_OF_ABC + 18] * C3B[18],
-    sum_fxyz[n * NUM_OF_ABC + 19] * C3B[19],
-    sum_fxyz[n * NUM_OF_ABC + 20] * C3B[20],
-    sum_fxyz[n * NUM_OF_ABC + 21] * C3B[21],
-    sum_fxyz[n * NUM_OF_ABC + 22] * C3B[22],
-    sum_fxyz[n * NUM_OF_ABC + 23] * C3B[23]};
-  accumulate_direct<4, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s4, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3+3], type_slot, tile_count, n, sink);
-  accumulate_cross<4, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-                blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
-                scd_r12, dsnlm_dc, s4, r12,
-                d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n*LMAX3+3], type_slot, tile_count, n, sink);
-
+  {
+    accumulate_angular_order<4, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(
+        n, d12, r12, fn, fnp, d12inv, rij_Lsq, rij_L2sq,
+        Fp, dsnlm_dc, sum_fxyz, scd_r12, fn12, fnp12, type_slot, tile_count, sink);
+  }
 }
 
 } // namespace nep_mb_secondgrad_opt
@@ -1215,21 +1462,17 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
       find_fn_and_fnp(NBASIS, a.rcut_inv, distance, fc12, fcp12, fn12, fnp12);
 
-      double blm[24] = {0.0}, rij_blm[24] = {0.0};
-      double dblm_x[24] = {0.0}, dblm_y[24] = {0.0};
-      double dblm_z[24] = {0.0}, dblm_r[24] = {0.0};
-      scd_accumulate_blm_rij(distance, r12[0], r12[1], r12[2],
-                             blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r);
       const int coeff_start = (center_type * a.atom_types + neighbor_type) * NMAX * NBASIS;
+      #pragma unroll
       for (int n = 0; n < NMAX; ++n) {
         double gn12 = 0.0, gnp12 = 0.0;
+        #pragma unroll
         for (int k = 0; k < NBASIS; ++k) {
           gn12 += fn12[k] * a.coeff3[coeff_start + n * NBASIS + k];
           gnp12 += fnp12[k] * a.coeff3[coeff_start + n * NBASIS + k];
         }
         accumulate_neighbor<NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(
             n, distance, r12, gn12, gnp12, s.fp, s.dsnlm_tile, s.sum_fxyz,
-            blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
             scd_r12, fn12, fnp12, type_slot, tile_count, sink);
       }
     }
