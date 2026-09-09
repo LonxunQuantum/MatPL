@@ -25,6 +25,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -113,6 +115,64 @@ bool is_regular_file(const std::string& path) {
     return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
 }
 
+class FileLock {
+public:
+    explicit FileLock(const std::string& path) : fd_(::open(path.c_str(), O_CREAT | O_RDWR, 0600)) {
+        TORCH_CHECK(fd_ >= 0, "cannot open NEP fitting JIT cache lock ", path,
+                    ": errno ", errno);
+        if (::flock(fd_, LOCK_EX) != 0) {
+            const int error = errno;
+            ::close(fd_);
+            fd_ = -1;
+            TORCH_CHECK(false, "cannot lock NEP fitting JIT cache ", path,
+                        ": errno ", error);
+        }
+    }
+
+    ~FileLock() {
+        if (fd_ >= 0) {
+            ::flock(fd_, LOCK_UN);
+            ::close(fd_);
+        }
+    }
+
+    FileLock(const FileLock&) = delete;
+    FileLock& operator=(const FileLock&) = delete;
+
+private:
+    int fd_;
+};
+
+void write_binary_atomic(const std::string& path, const std::vector<char>& bytes) {
+    const std::string temporary = path + ".tmp." + std::to_string(::getpid());
+    int fd = ::open(temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+    TORCH_CHECK(fd >= 0, "cannot create NEP fitting JIT cache ", temporary,
+                ": errno ", errno);
+    size_t written = 0;
+    bool published = false;
+    try {
+        while (written < bytes.size()) {
+            const ssize_t count = ::write(fd, bytes.data() + written, bytes.size() - written);
+            TORCH_CHECK(count > 0, "cannot write NEP fitting JIT cache ", temporary,
+                        ": errno ", errno);
+            written += static_cast<size_t>(count);
+        }
+        TORCH_CHECK(::fsync(fd) == 0, "cannot sync NEP fitting JIT cache ",
+                    temporary, ": errno ", errno);
+        TORCH_CHECK(::close(fd) == 0, "cannot close NEP fitting JIT cache ",
+                    temporary, ": errno ", errno);
+        fd = -1;
+        TORCH_CHECK(::rename(temporary.c_str(), path.c_str()) == 0,
+                    "cannot publish NEP fitting JIT cache ", path,
+                    ": errno ", errno);
+        published = true;
+    } catch (...) {
+        if (fd >= 0) ::close(fd);
+        if (!published) ::unlink(temporary.c_str());
+        throw;
+    }
+}
+
 Specialization specialization(const at::Tensor& reference, int d, int h, int q) {
     const c10::cuda::CUDAGuard guard(reference.device());
     cudaDeviceProp properties{};
@@ -183,37 +243,49 @@ std::vector<char> compile_cubin(const Specialization& spec) {
     return cubin;
 }
 
+std::shared_ptr<JitModule> load_module(const std::vector<char>& cubin) {
+    auto result = std::make_shared<JitModule>();
+    try {
+        check_driver(cuModuleLoadData(&result->module, cubin.data()), "cuModuleLoadData");
+        check_driver(cuModuleGetFunction(&result->forward, result->module,
+                                         "fitting_atoms_forward"), "cuModuleGetFunction");
+        check_driver(cuModuleGetFunction(&result->backward, result->module,
+                                         "fitting_atoms_backward"), "cuModuleGetFunction");
+        check_driver(cuModuleGetFunction(&result->parameter_partials, result->module,
+                                         "fitting_parameter_partials"), "cuModuleGetFunction");
+        check_driver(cuModuleGetFunction(&result->parameter_reduce, result->module,
+                                         "fitting_parameter_reduce"), "cuModuleGetFunction");
+    } catch (...) {
+        if (result->module) cuModuleUnload(result->module);
+        throw;
+    }
+    return result;
+}
+
 std::shared_ptr<JitModule> build_module(const at::Tensor& reference, int d, int h, int q) {
     const Specialization spec = specialization(reference, d, h, q);
     const std::string process_key = std::to_string(spec.device) + '|' + spec.key;
     std::lock_guard<std::mutex> lock(module_mutex);
     if (auto found = modules.find(process_key); found != modules.end()) return found->second;
     ensure_directory(spec.cache_dir);
-    std::vector<char> cubin;
-    if (is_regular_file(spec.cache_file)) cubin = read_binary(spec.cache_file);
-    else {
-        cubin = compile_cubin(spec);
-        const auto temporary = spec.cache_file + ".tmp." + std::to_string(::getpid());
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        TORCH_CHECK(output, "cannot write NEP fitting JIT cache ", temporary);
-        output.write(cubin.data(), static_cast<std::streamsize>(cubin.size()));
-        output.close();
-        TORCH_CHECK(std::rename(temporary.c_str(), spec.cache_file.c_str()) == 0,
-                    "cannot publish NEP fitting JIT cache ", spec.cache_file,
-                    ": errno ", errno);
-    }
     const c10::cuda::CUDAGuard guard(reference.device());
     check_driver(cuInit(0), "cuInit");
-    auto result = std::make_shared<JitModule>();
-    check_driver(cuModuleLoadData(&result->module, cubin.data()), "cuModuleLoadData");
-    check_driver(cuModuleGetFunction(&result->forward, result->module,
-                                     "fitting_atoms_forward"), "cuModuleGetFunction");
-    check_driver(cuModuleGetFunction(&result->backward, result->module,
-                                     "fitting_atoms_backward"), "cuModuleGetFunction");
-    check_driver(cuModuleGetFunction(&result->parameter_partials, result->module,
-                                     "fitting_parameter_partials"), "cuModuleGetFunction");
-    check_driver(cuModuleGetFunction(&result->parameter_reduce, result->module,
-                                     "fitting_parameter_reduce"), "cuModuleGetFunction");
+    const FileLock cache_lock(spec.cache_file + ".lock");
+    std::shared_ptr<JitModule> result;
+    if (is_regular_file(spec.cache_file)) {
+        try {
+            result = load_module(read_binary(spec.cache_file));
+        } catch (const std::exception&) {
+            TORCH_CHECK(::unlink(spec.cache_file.c_str()) == 0 || errno == ENOENT,
+                        "cannot remove corrupt NEP fitting JIT cache ",
+                        spec.cache_file, ": errno ", errno);
+        }
+    }
+    if (!result) {
+        const std::vector<char> cubin = compile_cubin(spec);
+        write_binary_atomic(spec.cache_file, cubin);
+        result = load_module(cubin);
+    }
     modules.emplace(process_key, result);
     return result;
 }

@@ -41,6 +41,17 @@ def run_probe(cache_dir: Path, mode: str):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def start_probe(cache_dir: Path, mode: str):
+    env = os.environ.copy()
+    env["MATPL_NEP_FITTING_JIT"] = mode
+    env["MATPL_NEP_JIT_CACHE"] = str(cache_dir)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.Popen(
+        [sys.executable, "-c", PROBE], cwd=REPO, env=env,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
 def test_disabled_mode_does_not_touch_cache(tmp_path):
     result = run_probe(tmp_path, mode="0")
@@ -132,3 +143,35 @@ def test_jit_backward_matches_aot(tmp_path, monkeypatch, d, h, q, seed_mode):
 
     for got, want in zip(actual, expected):
         torch.testing.assert_close(got, want, rtol=3e-11, atol=3e-11)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_persistent_cache_reuses_cubin_without_rewrite(tmp_path):
+    assert run_probe(tmp_path, "1")["prepared"] is True
+    cubin = next(tmp_path.glob("*.cubin"))
+    initial_mtime = cubin.stat().st_mtime_ns
+    assert run_probe(tmp_path, "1")["prepared"] is True
+    assert cubin.stat().st_mtime_ns == initial_mtime
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_concurrent_prepare_uses_one_locked_cache_entry(tmp_path):
+    processes = [start_probe(tmp_path, "1") for _ in range(4)]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=120)
+        assert process.returncode == 0, stderr
+        assert json.loads(stdout.strip().splitlines()[-1])["prepared"] is True
+    assert len(list(tmp_path.glob("*.cubin"))) == 1
+    assert len(list(tmp_path.glob("*.lock"))) == 1
+    assert list(tmp_path.glob("*.tmp.*")) == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_corrupt_cubin_is_recompiled_once(tmp_path):
+    assert run_probe(tmp_path, "1")["prepared"] is True
+    cubin = next(tmp_path.glob("*.cubin"))
+    original_size = cubin.stat().st_size
+    cubin.write_bytes(b"corrupt")
+    assert run_probe(tmp_path, "1")["prepared"] is True
+    assert cubin.stat().st_size == original_size
+    assert cubin.read_bytes() != b"corrupt"
