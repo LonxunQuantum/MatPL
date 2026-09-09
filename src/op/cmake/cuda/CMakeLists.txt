@@ -59,7 +59,6 @@ target_link_libraries(CalcOps_cuda PRIVATE
     CUDA::nvrtc
     CUDA::cuda_driver
 )
-
 # 6. 创建Python绑定库
 add_library(CalcOps_bind SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
 target_compile_definitions(CalcOps_bind PRIVATE MATPL_ENABLE_FUSED_FITTING)

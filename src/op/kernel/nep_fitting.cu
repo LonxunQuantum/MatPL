@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <c10/macros/Macros.h>
+#include "../include/nep_fitting_jit.h"
 
 namespace {
 constexpr int kHiddenTile = 16;
@@ -290,6 +291,8 @@ void launch_nep_fitting_forward(
     const at::Tensor& x, const at::Tensor& w, const at::Tensor& b,
     const at::Tensor& v, const at::Tensor& c, const at::Tensor& atom_ids,
     const at::Tensor& offsets, int64_t max_count, at::Tensor& y, at::Tensor& g) {
+    if (try_launch_nep_fitting_jit_forward(
+            x, w, b, v, c, atom_ids, offsets, max_count, y, g)) return;
     if (v.size(2) == 1) forward_impl<1>(x, w, b, v, c, atom_ids, offsets, max_count, y, g);
     else forward_impl<2>(x, w, b, v, c, atom_ids, offsets, max_count, y, g);
 }

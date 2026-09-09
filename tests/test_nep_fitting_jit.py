@@ -46,3 +46,34 @@ def test_disabled_mode_does_not_touch_cache(tmp_path):
     result = run_probe(tmp_path, mode="0")
     assert result["prepared"] is False
     assert result["files"] == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_jit_forward_and_feature_gradient_match_aot(tmp_path, monkeypatch):
+    from src.utils.op_loader import load_calc_ops
+
+    torch.manual_seed(41)
+    ops = load_calc_ops()
+    counts = [4, 2, 3]
+    n, d, h, q = sum(counts), 35, 60, 1
+    x = torch.randn(n, d, dtype=torch.float64, device="cuda")
+    w = torch.randn(3, d, h, dtype=torch.float64, device="cuda") * 0.1
+    b = torch.randn(3, h, dtype=torch.float64, device="cuda") * 0.1
+    v = torch.randn(3, h, q, dtype=torch.float64, device="cuda") * 0.1
+    c = torch.randn(3, q, dtype=torch.float64, device="cuda") * 0.1
+    atom_ids = torch.tensor([8, 2, 5, 0, 7, 1, 6, 4, 3], device="cuda")
+    offsets = torch.tensor([0, 4, 6, 9], device="cuda")
+
+    monkeypatch.setenv("MATPL_NEP_JIT_CACHE", str(tmp_path))
+    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "0")
+    expected = ops.nep_fitting_forward(x, w, b, v, c, atom_ids, offsets, counts)
+    torch.cuda.synchronize()
+
+    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "1")
+    assert ops.nep_fitting_jit_prepare(x, d, h, q) is True
+    actual = ops.nep_fitting_forward(x, w, b, v, c, atom_ids, offsets, counts)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual[0], expected[0], rtol=2e-12, atol=2e-12)
+    torch.testing.assert_close(actual[1], expected[1], rtol=2e-12, atol=2e-12)
+    assert len(list(tmp_path.glob("*.cubin"))) == 1
