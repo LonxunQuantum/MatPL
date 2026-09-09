@@ -43,6 +43,33 @@ def make_model(case, device):
     return model.to(device), params, cfg
 
 
+def measure_jit_prepare(base, cache_dir, mode):
+    from src.model.nep_fused_fitting import prepare_fitting_jit
+
+    os.environ["MATPL_NEP_FITTING_JIT"] = mode
+    os.environ["MATPL_NEP_JIT_CACHE"] = str(cache_dir)
+    d, h = int(base.feature_nums), int(base.neuron[0])
+    q = 2 if bool(base.charge_mode) else 1
+    pattern = f"*d{d}-h{h}-q{q}-*.cubin"
+    before = sorted(cache_dir.glob(pattern)) if cache_dir.exists() else []
+    model = copy.deepcopy(base).to("cuda")
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    prepared = prepare_fitting_jit(model)
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - start
+    after = sorted(cache_dir.glob(pattern)) if cache_dir.exists() else []
+    del model
+    gc.collect(); torch.cuda.empty_cache()
+    return {
+        "mode": mode,
+        "jit_prepare_ms": elapsed * 1e3,
+        "jit_cache_hit": bool(before),
+        "jit_prepared": bool(prepared),
+        "cache_files": [path.name for path in after],
+    }
+
+
 def cpu_batch(params, indices):
     from src.pre_data.nep_lmdb_dataset import NepLmdbDataset
     from src.pre_data.nep_data_loader import variable_length_collate_fn
@@ -233,6 +260,8 @@ def main():
     p.add_argument('--capacity-worker', choices=('original', 'fused'), help=argparse.SUPPRESS)
     p.add_argument('--capacity-coordinator', action='store_true', help=argparse.SUPPRESS)
     p.add_argument('--pool-size', type=int, help=argparse.SUPPRESS)
+    p.add_argument('--jit-mode', choices=('0', 'auto', '1'), default='0')
+    p.add_argument('--jit-cache', type=Path)
     a=p.parse_args();
     if a.steps < 1 or a.warmup < 0 or a.batch_size < 1 or (a.max_batch is not None and a.max_batch < 1):
         p.error('steps/batch sizes must be positive and warmup non-negative')
@@ -246,6 +275,9 @@ def main():
         return
     if not torch.cuda.is_available(): p.error("a real CUDA GPU allocation is required")
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
+    jit_cache = a.jit_cache or (a.output.parent / ".nep-fitting-jit-cache")
+    os.environ["MATPL_NEP_FITTING_JIT"] = a.jit_mode
+    os.environ["MATPL_NEP_JIT_CACHE"] = str(jit_cache)
     # Keep the checkpoint template on CPU so each measurement has exactly one
     # live GPU model (the correctness comparison temporarily needs two).
     base,params,cfg=make_model(a.case,torch.device("cpu")); _,size=cpu_batch(params,[0])
@@ -265,6 +297,7 @@ def main():
       "gpu":{"name":torch.cuda.get_device_name(),"torch":torch.__version__,"cuda":torch.version.cuda,"platform":platform.platform()},
       "dtype":"float64","model":{"D":int(base.feature_nums),"H":int(base.neuron[0]),"types":len(base.atom_type)},
       "batch":{"structures":len(indices),"atoms":int(atom_types.numel())},"fitting":{},"complete_step":{}}
+    result["jit"] = measure_jit_prepare(base, jit_cache, a.jit_mode)
     result['correctness']=compare_real_batch(base,cpu)
     result['complete_step_scope']='preloaded structures; includes grouping/H2D, neighbors, loss/backward, clip, empty_cache and Adam; excludes LMDB I/O'
     result["fitting_input"]="deterministic synthetic descriptors with empirical real-batch type counts"

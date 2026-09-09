@@ -16,9 +16,19 @@ extern "C" __global__ void fitting_atoms_forward(
   __shared__ double sw[JIT_D * TILE];
   __shared__ double sx[ATOMS * JIT_D];
   __shared__ double seed[JIT_Q * ATOMS * TILE];
+#if JIT_Q == 2 && JIT_D > 64
+  __shared__ double result_shared[JIT_Q * ATOMS * JIT_D];
+#else
+  double result[JIT_Q][(JIT_D + TILE - 1) / TILE] = {};
+#endif
   for (int f = lane; f < JIT_D; f += TILE)
     sx[row * JIT_D + f] = atom >= 0 ? x[atom * JIT_D + f] : 0.0;
-  double result[JIT_Q][(JIT_D + TILE - 1) / TILE] = {};
+#if JIT_Q == 2 && JIT_D > 64
+  #pragma unroll
+  for (int q = 0; q < JIT_Q; ++q)
+    for (int f = lane; f < JIT_D; f += TILE)
+      result_shared[(q * ATOMS + row) * JIT_D + f] = 0.0;
+#endif
   double energy[JIT_Q] = {};
   __syncthreads();
   for (int tile = 0; tile < JIT_H; tile += TILE) {
@@ -50,7 +60,11 @@ extern "C" __global__ void fitting_atoms_forward(
         #pragma unroll
         for (int j1 = 0; j1 < TILE; ++j1)
           value += sw[f * TILE + j1] * seed[(q * ATOMS + row) * TILE + j1];
+#if JIT_Q == 2 && JIT_D > 64
+        result_shared[(q * ATOMS + row) * JIT_D + f] += value;
+#else
         result[q][k] += value;
+#endif
       }
     }
     __syncthreads();
@@ -58,7 +72,13 @@ extern "C" __global__ void fitting_atoms_forward(
   #pragma unroll
   for (int q = 0; q < JIT_Q; ++q)
     for (int f = lane, k = 0; f < JIT_D; f += TILE, ++k)
-      if (atom >= 0) out[(q * n + atom) * JIT_D + f] = result[q][k];
+      if (atom >= 0)
+#if JIT_Q == 2 && JIT_D > 64
+        out[(q * n + atom) * JIT_D + f] =
+            result_shared[(q * ATOMS + row) * JIT_D + f];
+#else
+        out[(q * n + atom) * JIT_D + f] = result[q][k];
+#endif
   #pragma unroll
   for (int q = 0; q < JIT_Q; ++q) {
     #pragma unroll

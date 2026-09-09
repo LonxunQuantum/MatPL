@@ -1,0 +1,122 @@
+{
+  ".validation/jit-arches/nepfit-nvrtc-sm60-d96-h100-q2.cubin": {
+    "fitting_parameter_reduce": {
+      "registers": 29,
+      "stack_bytes": 0,
+      "shared_bytes": 0,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_parameter_partials": {
+      "registers": 168,
+      "stack_bytes": 0,
+      "shared_bytes": 34944,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_backward": {
+      "registers": 76,
+      "stack_bytes": 48,
+      "shared_bytes": 31744,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_forward": {
+      "registers": 86,
+      "stack_bytes": 0,
+      "shared_bytes": 32768,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    }
+  },
+  ".validation/jit-arches/nepfit-nvrtc-sm70-d96-h100-q2.cubin": {
+    "fitting_parameter_reduce": {
+      "registers": 31,
+      "stack_bytes": 0,
+      "shared_bytes": 0,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_parameter_partials": {
+      "registers": 168,
+      "stack_bytes": 0,
+      "shared_bytes": 34944,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_backward": {
+      "registers": 80,
+      "stack_bytes": 48,
+      "shared_bytes": 31744,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_forward": {
+      "registers": 91,
+      "stack_bytes": 0,
+      "shared_bytes": 32768,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    }
+  },
+  ".validation/jit-arches/nepfit-nvrtc-sm86-d96-h100-q2.cubin": {
+    "fitting_parameter_reduce": {
+      "registers": 39,
+      "stack_bytes": 0,
+      "shared_bytes": 0,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_parameter_partials": {
+      "registers": 168,
+      "stack_bytes": 0,
+      "shared_bytes": 34944,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_backward": {
+      "registers": 64,
+      "stack_bytes": 48,
+      "shared_bytes": 31744,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_forward": {
+      "registers": 72,
+      "stack_bytes": 0,
+      "shared_bytes": 32768,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    }
+  },
+  ".validation/jit-arches/nepfit-nvrtc-sm89-d96-h100-q2.cubin": {
+    "fitting_parameter_reduce": {
+      "registers": 39,
+      "stack_bytes": 0,
+      "shared_bytes": 0,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_parameter_partials": {
+      "registers": 168,
+      "stack_bytes": 0,
+      "shared_bytes": 34944,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_backward": {
+      "registers": 64,
+      "stack_bytes": 48,
+      "shared_bytes": 31744,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    },
+    "fitting_atoms_forward": {
+      "registers": 72,
+      "stack_bytes": 0,
+      "shared_bytes": 32768,
+      "local_bytes": 0,
+      "spill_bytes": 0
+    }
+  }
+}

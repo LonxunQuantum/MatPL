@@ -38,3 +38,35 @@ MAX_BATCH=8192 sbatch tests/run_nep_fused_checks.slurm
 ```
 
 原始结果已保存到 `tests/benchmarks/nep-fused-fitting-stage1.json`；设备显存为同目录的 `nep-fused-fitting-memory-{original,fused}.json`。详细日志保留在工作目录 `.validation/`。对应作业：基准 4668714，双卡 4668531，设备显存 4668723，CUDA 检查 4668721。
+
+## NVRTC JIT 专用化结果
+
+在固定 FP64、单隐藏层和 `D≤96/H≤100/Q∈{1,2}` 的边界内增加了 NVRTC
+运行时专用化。JIT 同时生成 forward、`dE/dfeature`、feature 反向梯度和 fitting
+参数梯度 kernel，CUBIN 使用进程内缓存及带 `flock` 的持久缓存；损坏文件会在锁内
+重建。模型加载时可在移入 CUDA 后、DDP 包装前预热。
+
+RTX 3090 上使用相同的 OMat24 `mini_data_test`、256 结构/2045 原子、10 次预热和
+30 次测量进行了 AOT、JIT 冷缓存和 JIT 热缓存对照：
+
+| FP64 指标 | AOT 融合核 | JIT 冷缓存 | JIT 热缓存 |
+|---|---:|---:|---:|
+| JIT prepare | 关闭 | 772.43 ms | 1.56 ms |
+| D=35/H=40 fitting 前向+反向 | 6.18 ms | 7.24 ms | 7.36 ms |
+| D=35/H=60 fitting 前向+反向 | 6.26 ms | 7.39 ms | 7.38 ms |
+| 完整 step p50 | 116.39 ms | 118.09 ms | 118.38 ms |
+| 完整 step p95 | 118.47 ms | 120.12 ms | 120.36 ms |
+| 完整 step peak allocated | 599.34 MiB | 599.34 MiB | 599.34 MiB |
+| 完整 step peak reserved | 626.00 MiB | 626.00 MiB | 626.00 MiB |
+
+JIT 在该实际网络上没有稳态收益：常见 D=35/H=40 fitting 慢约 17%–19%，完整 step
+慢约 1.5%–1.7%，显存峰值相同。因此实现保留为显式实验功能，默认关闭；设置
+`MATPL_NEP_FITTING_JIT=1` 强制启用，设置为 `auto` 时失败会回退 AOT。
+
+CUDA 11.8 NVRTC 已为最大 `D=96/H=100/Q=2` 编译 SM60、SM70、SM86、SM89
+CUBIN。最大双 head forward 的专用共享内存累加方案将寄存器从 255 降至
+SM60/70 的 86/91 和 SM86/89 的 72，stack 为 0；四个 kernel 在四种架构上
+均为 0 字节 LOCAL/spill。3090 上的 memcheck、racecheck、synccheck 均为零错误。
+
+原始对照保存在 `.validation/nep-fitting-{aot,jit-cold,jit-hot}-20260909-201901.json`，
+验证作业为 4671744，sanitizer 作业为 4671746。

@@ -29,9 +29,12 @@ print(json.dumps({
 """
 
 
-def run_probe(cache_dir: Path, mode: str):
+def run_probe(cache_dir: Path, mode):
     env = os.environ.copy()
-    env["MATPL_NEP_FITTING_JIT"] = mode
+    if mode is None:
+        env.pop("MATPL_NEP_FITTING_JIT", None)
+    else:
+        env["MATPL_NEP_FITTING_JIT"] = mode
     env["MATPL_NEP_JIT_CACHE"] = str(cache_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
@@ -58,6 +61,21 @@ def test_disabled_mode_does_not_touch_cache(tmp_path):
     result = run_probe(tmp_path, mode="0")
     assert result["prepared"] is False
     assert result["files"] == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_unset_mode_defaults_to_aot_without_touching_cache(tmp_path):
+    result = run_probe(tmp_path, mode=None)
+    assert result["prepared"] is False
+    assert result["files"] == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_auto_mode_falls_back_when_cache_path_is_not_a_directory(tmp_path):
+    invalid_cache = tmp_path / "cache-file"
+    invalid_cache.write_text("not a directory")
+    result = run_probe(invalid_cache, mode="auto")
+    assert result["prepared"] is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")

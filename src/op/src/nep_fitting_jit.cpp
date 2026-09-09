@@ -48,7 +48,7 @@ std::unordered_map<std::string, std::shared_ptr<JitModule>> modules;
 
 JitMode jit_mode() {
     const char* raw = std::getenv("MATPL_NEP_FITTING_JIT");
-    std::string value = raw ? raw : "auto";
+    std::string value = raw ? raw : "0";
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (value.empty() || value == "auto") return JitMode::Auto;
