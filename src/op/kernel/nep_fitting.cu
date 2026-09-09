@@ -303,6 +303,9 @@ void launch_nep_fitting_backward(
     const at::Tensor& offsets, int64_t max_count,
     const at::Tensor& grad_y, const at::Tensor& grad_g,
     std::vector<at::Tensor>& grads) {
+    if (try_launch_nep_fitting_jit_backward(
+            x, w, b, v, atom_ids, offsets, max_count, grad_y, grad_g,
+            grads)) return;
     if (v.size(2) == 1) backward_impl<1>(x, w, b, v, atom_ids, offsets, max_count, grad_y, grad_g, grads);
     else backward_impl<2>(x, w, b, v, atom_ids, offsets, max_count, grad_y, grad_g, grads);
 }

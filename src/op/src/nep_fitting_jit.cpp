@@ -34,7 +34,12 @@ enum class JitMode { Disabled, Auto, Required };
 struct JitModule {
     CUmodule module = nullptr;
     CUfunction forward = nullptr;
+    CUfunction backward = nullptr;
+    CUfunction parameter_partials = nullptr;
+    CUfunction parameter_reduce = nullptr;
 };
+
+constexpr int64_t kWorkspaceBytes = 16 * 1024 * 1024;
 
 std::mutex module_mutex;
 std::unordered_map<std::string, std::shared_ptr<JitModule>> modules;
@@ -203,6 +208,12 @@ std::shared_ptr<JitModule> build_module(const at::Tensor& reference, int d, int 
     check_driver(cuModuleLoadData(&result->module, cubin.data()), "cuModuleLoadData");
     check_driver(cuModuleGetFunction(&result->forward, result->module,
                                      "fitting_atoms_forward"), "cuModuleGetFunction");
+    check_driver(cuModuleGetFunction(&result->backward, result->module,
+                                     "fitting_atoms_backward"), "cuModuleGetFunction");
+    check_driver(cuModuleGetFunction(&result->parameter_partials, result->module,
+                                     "fitting_parameter_partials"), "cuModuleGetFunction");
+    check_driver(cuModuleGetFunction(&result->parameter_reduce, result->module,
+                                     "fitting_parameter_reduce"), "cuModuleGetFunction");
     modules.emplace(process_key, result);
     return result;
 }
@@ -258,6 +269,78 @@ bool try_launch_nep_fitting_jit_forward(
         reinterpret_cast<CUstream>(stream.stream()), args, nullptr),
         "cuLaunchKernel(fitting_atoms_forward)");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return true;
+}
+
+bool try_launch_nep_fitting_jit_backward(
+    const at::Tensor& x, const at::Tensor& w, const at::Tensor& b,
+    const at::Tensor& v, const at::Tensor& atom_ids,
+    const at::Tensor& offsets, int64_t max_count,
+    const at::Tensor& grad_y, const at::Tensor& grad_g,
+    std::vector<at::Tensor>& grads) {
+    auto module = module_for_mode(x, x.size(1), w.size(2), v.size(2));
+    if (!module) return false;
+    int d = static_cast<int>(x.size(1));
+    int h = static_cast<int>(w.size(2));
+    int q = static_cast<int>(v.size(2));
+    int n = static_cast<int>(x.size(0));
+    int types = static_cast<int>(w.size(0));
+    int tiles = (h + 15) / 16;
+    int stride = (d + 1 + q) * 16 + q;
+    int groups = std::min<int64_t>(
+        types, kWorkspaceBytes / (tiles * stride * sizeof(double)));
+    int slots = std::min<int64_t>(
+        (max_count + 31) / 32,
+        kWorkspaceBytes / (groups * tiles * stride * sizeof(double)));
+    TORCH_CHECK(groups > 0 && slots > 0,
+                "invalid NEP fitting JIT backward workspace dimensions");
+    auto workspace = at::empty({groups, slots, tiles, stride}, x.options());
+
+    const double* x_ptr = x.data_ptr<double>();
+    const double* w_ptr = w.data_ptr<double>();
+    const double* b_ptr = b.data_ptr<double>();
+    const double* v_ptr = v.data_ptr<double>();
+    const int64_t* ids_ptr = atom_ids.data_ptr<int64_t>();
+    const int64_t* offsets_ptr = offsets.data_ptr<int64_t>();
+    const double* a_ptr = grad_y.data_ptr<double>();
+    const double* u_ptr = grad_g.data_ptr<double>();
+    double* dx_ptr = grads[0].data_ptr<double>();
+    void* backward_args[] = {&x_ptr, &w_ptr, &b_ptr, &v_ptr, &ids_ptr,
+        &offsets_ptr, &a_ptr, &u_ptr, &dx_ptr, &n};
+    const auto stream = at::cuda::getCurrentCUDAStream();
+    const auto cu_stream = reinterpret_cast<CUstream>(stream.stream());
+    check_driver(cuLaunchKernel(module->backward,
+        static_cast<unsigned int>((max_count + 7) / 8),
+        static_cast<unsigned int>(types), 1, 128, 1, 1, 0, cu_stream,
+        backward_args, nullptr), "cuLaunchKernel(fitting_atoms_backward)");
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    double* partial_ptr = workspace.data_ptr<double>();
+    double* dw_ptr = grads[1].data_ptr<double>();
+    double* db_ptr = grads[2].data_ptr<double>();
+    double* dv_ptr = grads[3].data_ptr<double>();
+    double* dc_ptr = grads[4].data_ptr<double>();
+    int parameter_size = d * h + h + h * q + q;
+    for (int start = 0; start < types; start += groups) {
+        const int batch = std::min(groups, types - start);
+        void* partial_args[] = {&x_ptr, &w_ptr, &b_ptr, &v_ptr, &ids_ptr,
+            &offsets_ptr, &a_ptr, &u_ptr, &partial_ptr, &n, &start, &slots};
+        check_driver(cuLaunchKernel(module->parameter_partials,
+            static_cast<unsigned int>(slots), static_cast<unsigned int>(tiles),
+            static_cast<unsigned int>(batch), 128, 1, 1, 0, cu_stream,
+            partial_args, nullptr),
+            "cuLaunchKernel(fitting_parameter_partials)");
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+        void* reduce_args[] = {&partial_ptr, &dw_ptr, &db_ptr, &dv_ptr,
+            &dc_ptr, &start, &slots};
+        check_driver(cuLaunchKernel(module->parameter_reduce,
+            static_cast<unsigned int>((parameter_size + 255) / 256),
+            static_cast<unsigned int>(batch), 1, 256, 1, 1, 0, cu_stream,
+            reduce_args, nullptr),
+            "cuLaunchKernel(fitting_parameter_reduce)");
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
     return true;
 }
 

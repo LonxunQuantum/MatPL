@@ -77,3 +77,58 @@ def test_jit_forward_and_feature_gradient_match_aot(tmp_path, monkeypatch):
     torch.testing.assert_close(actual[0], expected[0], rtol=2e-12, atol=2e-12)
     torch.testing.assert_close(actual[1], expected[1], rtol=2e-12, atol=2e-12)
     assert len(list(tmp_path.glob("*.cubin"))) == 1
+
+
+@pytest.mark.parametrize(
+    "d,h,q,seed_mode",
+    [(35, 61, 1, "both"), (31, 33, 2, "y"), (96, 100, 2, "g")],
+)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+def test_jit_backward_matches_aot(tmp_path, monkeypatch, d, h, q, seed_mode):
+    from src.utils.op_loader import load_calc_ops
+
+    torch.manual_seed(d * 1000 + h * 10 + q)
+    ops = load_calc_ops()
+    counts = [5, 2, 4]
+    n = sum(counts)
+    x = torch.randn(n, d, dtype=torch.float64, device="cuda") * 0.1
+    w = torch.randn(3, d, h, dtype=torch.float64, device="cuda") * 0.1
+    b = torch.randn(3, h, dtype=torch.float64, device="cuda") * 0.1
+    v = torch.randn(3, h, q, dtype=torch.float64, device="cuda") * 0.1
+    c = torch.randn(3, q, dtype=torch.float64, device="cuda") * 0.1
+    atom_ids = torch.tensor([9, 2, 7, 0, 5, 10, 1, 8, 3, 6, 4], device="cuda")
+    offsets = torch.tensor([0, 5, 7, 11], device="cuda")
+    grad_y = torch.randn(q, n, dtype=torch.float64, device="cuda")
+    grad_g = torch.randn(q, n, d, dtype=torch.float64, device="cuda")
+    if seed_mode == "y":
+        grad_g.zero_()
+    elif seed_mode == "g":
+        grad_y.zero_()
+
+    monkeypatch.setenv("MATPL_NEP_JIT_CACHE", str(tmp_path))
+    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "0")
+    expected = ops.nep_fitting_backward(
+        x, w, b, v, c, atom_ids, offsets, counts, grad_y, grad_g
+    )
+    torch.cuda.synchronize()
+
+    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "1")
+    assert ops.nep_fitting_jit_prepare(x, d, h, q) is True
+    cubin = next(tmp_path.glob("*.cubin"))
+    symbols = subprocess.run(
+        ["cuobjdump", "--dump-elf-symbols", str(cubin)],
+        check=True, text=True, capture_output=True,
+    ).stdout
+    for name in (
+        "fitting_atoms_backward",
+        "fitting_parameter_partials",
+        "fitting_parameter_reduce",
+    ):
+        assert name in symbols
+    actual = ops.nep_fitting_backward(
+        x, w, b, v, c, atom_ids, offsets, counts, grad_y, grad_g
+    )
+    torch.cuda.synchronize()
+
+    for got, want in zip(actual, expected):
+        torch.testing.assert_close(got, want, rtol=3e-11, atol=3e-11)
