@@ -1,5 +1,6 @@
 # 1. 包含包
 enable_language(CUDA)  # 使用现代CMake方式启用CUDA
+find_package(CUDAToolkit REQUIRED)
 
 # 2. 设置 CUDA 架构支持
 if(NOT CMAKE_CUDA_ARCHITECTURES)
@@ -53,7 +54,11 @@ set_target_properties(CalcOps_cuda PROPERTIES
 #)
 
 # 链接Torch库
-target_link_libraries(CalcOps_cuda PRIVATE ${TORCH_LIBRARIES})
+target_link_libraries(CalcOps_cuda PRIVATE
+    ${TORCH_LIBRARIES}
+    CUDA::nvrtc
+    CUDA::cuda_driver
+)
 
 # 6. 创建Python绑定库
 add_library(CalcOps_bind SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
