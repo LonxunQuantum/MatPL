@@ -170,6 +170,46 @@ def _load_raw_ops():
     return torch.ops.CalcOps_cuda
 
 
+def prepare_fitting_jit(model: torch.nn.Module) -> bool:
+    """Precompile the bounded FP64 CUDA fitting specialization for ``model``."""
+    fitting_net = getattr(model, "fitting_net", None)
+    if not fitting_net:
+        return False
+    net = fitting_net[0]
+    layers = getattr(net, "layers", None)
+    is_charge = hasattr(net, "energy_head") and hasattr(net, "charge_head")
+    expected_layers = 1 if is_charge else 2
+    if layers is None or len(layers) != expected_layers:
+        return False
+
+    hidden_weight = getattr(layers[0], "weight", None)
+    if not isinstance(hidden_weight, torch.Tensor) or hidden_weight.ndim != 2:
+        return False
+    if hidden_weight.device.type != "cuda" or torch.version.hip is not None:
+        return False
+    if hidden_weight.dtype != torch.float64:
+        return False
+
+    d, h = map(int, hidden_weight.shape)
+    if is_charge:
+        heads = (net.energy_head, net.charge_head)
+        if any(getattr(head, "weight", None) is None for head in heads):
+            return False
+        if any(tuple(head.weight.shape) != (h, 1) for head in heads):
+            return False
+        q = 2
+    else:
+        output_weight = getattr(layers[1], "weight", None)
+        if not isinstance(output_weight, torch.Tensor) or output_weight.ndim != 2:
+            return False
+        if output_weight.shape[0] != h:
+            return False
+        q = int(output_weight.shape[1])
+    if not (1 <= d <= 96 and 1 <= h <= 100 and q in (1, 2)):
+        return False
+    return bool(_load_raw_ops().nep_fitting_jit_prepare(hidden_weight, d, h, q))
+
+
 class _FusedFitting(torch.autograd.Function):
     @staticmethod
     def forward(ctx, X, W, b, V, c, atom_ids, offsets, counts):

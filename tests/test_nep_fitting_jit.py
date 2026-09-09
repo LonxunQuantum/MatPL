@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -57,6 +58,59 @@ def test_disabled_mode_does_not_touch_cache(tmp_path):
     result = run_probe(tmp_path, mode="0")
     assert result["prepared"] is False
     assert result["files"] == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+@pytest.mark.parametrize("charge,expected_q", [(False, 1), (True, 2)])
+def test_prepare_model_infers_fitting_dimensions(monkeypatch, charge, expected_q):
+    from src.model import nep_fused_fitting as adapter
+
+    calls = []
+
+    class FakeOps:
+        @staticmethod
+        def nep_fitting_jit_prepare(reference, d, h, q):
+            calls.append((reference, d, h, q))
+            return True
+
+    monkeypatch.setattr(adapter, "_load_raw_ops", lambda: FakeOps())
+    hidden = SimpleNamespace(weight=torch.empty(15, 33, dtype=torch.float64, device="cuda"))
+    if charge:
+        net = SimpleNamespace(
+            layers=[hidden],
+            energy_head=SimpleNamespace(weight=torch.empty(33, 1, device="cuda")),
+            charge_head=SimpleNamespace(weight=torch.empty(33, 1, device="cuda")),
+        )
+    else:
+        output = SimpleNamespace(weight=torch.empty(33, 1, dtype=torch.float64, device="cuda"))
+        net = SimpleNamespace(layers=[hidden, output])
+    model = SimpleNamespace(fitting_net=[net])
+    assert adapter.prepare_fitting_jit(model) is True
+    reference, d, h, q = calls.pop()
+    assert reference.device.type == "cuda"
+    assert reference.dtype == torch.float64
+    assert (d, h, q) == (15, 33, expected_q)
+
+
+def test_prepare_model_is_called_between_cuda_move_and_ddp_wrap():
+    source = (REPO / "src/PWMLFF/nep_network.py").read_text()
+    moved = source.index(").to(self.training_type).to(self.device)")
+    prepared = source.index("prepare_fitting_jit(model)")
+    wrapped = source.index("nn.parallel.DistributedDataParallel(model")
+    assert moved < prepared < wrapped
+
+
+def test_prepare_model_skips_cpu_without_loading_cuda_ops(monkeypatch):
+    from src.model import nep_fused_fitting as adapter
+
+    hidden = SimpleNamespace(weight=torch.empty(15, 33, dtype=torch.float64))
+    output = SimpleNamespace(weight=torch.empty(33, 1, dtype=torch.float64))
+    model = SimpleNamespace(fitting_net=[SimpleNamespace(layers=[hidden, output])])
+    monkeypatch.setattr(
+        adapter, "_load_raw_ops",
+        lambda: pytest.fail("CPU prewarm must not load the CUDA extension"),
+    )
+    assert adapter.prepare_fitting_jit(model) is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")

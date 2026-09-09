@@ -16,6 +16,7 @@ from src.feature.nep_find_neigh.findneigh import FindNeigh
 import numpy as np
 import pandas as pd
 from src.model.nep_net import NEP
+from src.model.nep_fused_fitting import prepare_fitting_jit
 from src.pre_data.nep_data_loader import calculate_neighbor_num_max_min, calculate_neighbor_scaler, UniDataset, variable_length_collate_fn, variable_length_collate_fn_nolimit, calculate_batch, type_map, NepTestData
 from src.pre_data.nep_lmdb_dataset import (
     DistributedAtomBatchSampler,
@@ -926,6 +927,7 @@ class nep_network:
                         dtype = self.training_type, 
                         device = self.device
                         ).to(self.training_type).to(self.device)
+        prepare_fitting_jit(model)
         # 包装模型为 DDP
         if torch.cuda.is_available() and self.input_param.world_size > 1:
             model = nn.parallel.DistributedDataParallel(model, 
