@@ -80,6 +80,64 @@ def test_radial_descriptor_vjp_matches_autograd():
     assert torch.isfinite(grad_coeff).all()
 
 
+def test_radial_secondgrad_coeff_matches_direct_contraction():
+    if not _require_gpu_backend():
+        return
+    torch.manual_seed(20260910)
+    device = torch.device("cuda")
+    dtype = torch.float64
+    natoms = 4
+    max_neigh = 4
+    ntypes = 3
+    n_max = 3
+    n_base = 4
+    coeff = torch.randn(
+        ntypes, ntypes, n_max, n_base,
+        dtype=dtype, device=device, requires_grad=True,
+    )
+    d12 = torch.randn(
+        natoms, max_neigh, 4, dtype=dtype, device=device, requires_grad=True,
+    )
+    with torch.no_grad():
+        d12[:, :, 0].abs_().add_(0.8)
+    nl = torch.tensor([
+        [1, 2, -1, -1],
+        [0, 2, 3, -1],
+        [0, 1, 3, -1],
+        [1, 2, -1, -1],
+    ], dtype=torch.int64, device=device)
+    atom_map = torch.tensor([0, 1, 0, 2], dtype=torch.int64, device=device)
+    feats = torch.zeros(natoms, n_max, dtype=dtype, device=device, requires_grad=True)
+
+    feat, dfeat_c2, dfeat_2b, dfeat_2b_noc = CalcOps.calculateNepFeatWithGradContext(
+        coeff, d12, nl, atom_map, feats, 5.0, 0, 0,
+    )
+    de_feat = torch.randn_like(feat, requires_grad=True)
+    vjp = CalcOps.calculateNepFeatInputGrad(
+        de_feat, coeff, d12, nl, dfeat_c2, dfeat_2b, dfeat_2b_noc,
+        atom_map, 0, 0,
+    )
+    grad_second = torch.randn_like(vjp)
+    grad_coeff = torch.autograd.grad((vjp * grad_second).sum(), coeff)[0]
+
+    expected = torch.zeros_like(grad_coeff)
+    for atom in range(natoms):
+        type_i = int(atom_map[atom])
+        for neighbor_slot in range(max_neigh):
+            neighbor = int(nl[atom, neighbor_slot])
+            if neighbor < 0:
+                continue
+            type_j = int(atom_map[neighbor])
+            for basis in range(n_base):
+                contraction = (
+                    dfeat_2b_noc[atom, neighbor_slot, basis] *
+                    grad_second[atom, neighbor_slot]
+                ).sum()
+                expected[type_i, type_j, :, basis] += de_feat[atom] * contraction
+
+    torch.testing.assert_close(grad_coeff, expected, rtol=1e-10, atol=1e-11)
+
+
 def test_angular_descriptor_vjp_matches_autograd():
     if not _require_gpu_backend():
         return
