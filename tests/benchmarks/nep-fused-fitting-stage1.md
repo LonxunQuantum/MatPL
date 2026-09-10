@@ -2,7 +2,7 @@
 
 融合 CUDA fitting 已接入训练：联合计算输出和 feature 一阶导，反向包含力训练所需的混合二阶导。支持 float64、单隐藏层、D≤96/H≤100 及 energy/charge。原子顺序保持不变，保留原 Parameter、checkpoint、优化器和旧路径兼容性。
 
-代码位于远程分支 `codex/nep-fused-fitting`，工作目录 `/data/home/wuxingxing/xcode/MatPL-dcu-dev/.worktrees/nep-fused-fitting`。原 `nep-dcu/dev` 检出目录及其运行中的训练未改动。
+代码已合入 `nep-dcu/dev`。
 
 **主要结果：fitting 约加速 15 倍；256 结构整步吞吐提升约 7.2%；最大 batch 未增加。**
 
@@ -60,8 +60,9 @@ RTX 3090 上使用相同的 OMat24 `mini_data_test`、256 结构/2045 原子、1
 | 完整 step peak reserved | 626.00 MiB | 626.00 MiB | 626.00 MiB |
 
 JIT 在该实际网络上没有稳态收益：常见 D=35/H=40 fitting 慢约 17%–19%，完整 step
-慢约 1.5%–1.7%，显存峰值相同。因此实现保留为显式实验功能，默认关闭；设置
-`MATPL_NEP_FITTING_JIT=1` 强制启用，设置为 `auto` 时失败会回退 AOT。
+慢约 1.5%–1.7%，显存峰值相同。表中的 AOT 数据作为历史性能基线保留。为统一后续
+优化路径并消除重复 CUDA 实现，当前 CUDA fused fitting 已改为始终使用 JIT；不再
+提供运行模式开关或 AOT 回退。后续性能优化只修改 JIT kernel。
 
 CUDA 11.8 NVRTC 已为最大 `D=96/H=100/Q=2` 编译 SM60、SM70、SM86、SM89
 CUBIN。最大双 head forward 的专用共享内存累加方案将寄存器从 255 降至

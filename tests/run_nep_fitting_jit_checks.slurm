@@ -21,7 +21,8 @@ mkdir -p .validation
 
 python -m pytest tests/test_nep_fitting_jit.py tests/test_nep_fitting_jit_tools.py \
   tests/test_nep_fused_fitting.py tests/test_nep_fused_runtime.py \
-  tests/test_nep_fused_training.py -q
+  tests/test_nep_fused_training.py \
+  src/test/test_nep_electric/test_mb_secondgrad_kernel.py -q
 
 arch_dir=.validation/jit-arches
 rm -rf "$arch_dir"
@@ -33,12 +34,15 @@ python tests/check_nep_fitting_jit_cubin.py "$arch_dir"/*.cubin \
 
 stamp=$(date +%Y%m%d-%H%M%S)
 cache=.validation/omat-jit-cache-$stamp
-common=(--case "$case_dir" --warmup "${WARMUP:-10}" --steps "${STEPS:-30}" \
-        --batch-size "${BATCH_SIZE:-256}" --jit-cache "$cache")
-python -u tests/benchmark_nep_fused_fitting.py "${common[@]}" --jit-mode 0 \
-  --output ".validation/nep-fitting-aot-$stamp.json"
-rm -rf "$cache"
-python -u tests/benchmark_nep_fused_fitting.py "${common[@]}" --jit-mode 1 \
-  --output ".validation/nep-fitting-jit-cold-$stamp.json"
-python -u tests/benchmark_nep_fused_fitting.py "${common[@]}" --jit-mode 1 \
-  --output ".validation/nep-fitting-jit-hot-$stamp.json"
+checkpoint="$case_dir/model_record/nep_model.ckpt"
+if [[ -f "$checkpoint" ]]; then
+  common=(--case "$case_dir" --warmup "${WARMUP:-10}" --steps "${STEPS:-30}" \
+          --batch-size "${BATCH_SIZE:-256}" --jit-cache "$cache")
+  rm -rf "$cache"
+  python -u tests/benchmark_nep_fused_fitting.py "${common[@]}" \
+    --output ".validation/nep-fitting-jit-cold-$stamp.json"
+  python -u tests/benchmark_nep_fused_fitting.py "${common[@]}" \
+    --output ".validation/nep-fitting-jit-hot-$stamp.json"
+else
+  echo "Skipping OMat24 benchmark: checkpoint not found at $checkpoint"
+fi

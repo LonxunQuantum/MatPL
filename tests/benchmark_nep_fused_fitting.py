@@ -43,10 +43,9 @@ def make_model(case, device):
     return model.to(device), params, cfg
 
 
-def measure_jit_prepare(base, cache_dir, mode):
+def measure_jit_prepare(base, cache_dir):
     from src.model.nep_fused_fitting import prepare_fitting_jit
 
-    os.environ["MATPL_NEP_FITTING_JIT"] = mode
     os.environ["MATPL_NEP_JIT_CACHE"] = str(cache_dir)
     d, h = int(base.feature_nums), int(base.neuron[0])
     q = 2 if bool(base.charge_mode) else 1
@@ -62,7 +61,6 @@ def measure_jit_prepare(base, cache_dir, mode):
     del model
     gc.collect(); torch.cuda.empty_cache()
     return {
-        "mode": mode,
         "jit_prepare_ms": elapsed * 1e3,
         "jit_cache_hit": bool(before),
         "jit_prepared": bool(prepared),
@@ -260,7 +258,6 @@ def main():
     p.add_argument('--capacity-worker', choices=('original', 'fused'), help=argparse.SUPPRESS)
     p.add_argument('--capacity-coordinator', action='store_true', help=argparse.SUPPRESS)
     p.add_argument('--pool-size', type=int, help=argparse.SUPPRESS)
-    p.add_argument('--jit-mode', choices=('0', 'auto', '1'), default='0')
     p.add_argument('--jit-cache', type=Path)
     a=p.parse_args();
     if a.steps < 1 or a.warmup < 0 or a.batch_size < 1 or (a.max_batch is not None and a.max_batch < 1):
@@ -276,7 +273,6 @@ def main():
     if not torch.cuda.is_available(): p.error("a real CUDA GPU allocation is required")
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
     jit_cache = a.jit_cache or (a.output.parent / ".nep-fitting-jit-cache")
-    os.environ["MATPL_NEP_FITTING_JIT"] = a.jit_mode
     os.environ["MATPL_NEP_JIT_CACHE"] = str(jit_cache)
     # Keep the checkpoint template on CPU so each measurement has exactly one
     # live GPU model (the correctness comparison temporarily needs two).
@@ -297,7 +293,7 @@ def main():
       "gpu":{"name":torch.cuda.get_device_name(),"torch":torch.__version__,"cuda":torch.version.cuda,"platform":platform.platform()},
       "dtype":"float64","model":{"D":int(base.feature_nums),"H":int(base.neuron[0]),"types":len(base.atom_type)},
       "batch":{"structures":len(indices),"atoms":int(atom_types.numel())},"fitting":{},"complete_step":{}}
-    result["jit"] = measure_jit_prepare(base, jit_cache, a.jit_mode)
+    result["jit"] = measure_jit_prepare(base, jit_cache)
     result['correctness']=compare_real_batch(base,cpu)
     result['complete_step_scope']='preloaded structures; includes grouping/H2D, neighbors, loss/backward, clip, empty_cache and Adam; excludes LMDB I/O'
     result["fitting_input"]="deterministic synthetic descriptors with empirical real-batch type counts"

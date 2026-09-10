@@ -12,7 +12,6 @@
 #include <nvrtc.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -31,8 +30,6 @@
 #include <unistd.h>
 
 namespace {
-enum class JitMode { Disabled, Auto, Required };
-
 struct JitModule {
     CUmodule module = nullptr;
     CUfunction forward = nullptr;
@@ -45,17 +42,6 @@ constexpr int64_t kWorkspaceBytes = 16 * 1024 * 1024;
 
 std::mutex module_mutex;
 std::unordered_map<std::string, std::shared_ptr<JitModule>> modules;
-
-JitMode jit_mode() {
-    const char* raw = std::getenv("MATPL_NEP_FITTING_JIT");
-    std::string value = raw ? raw : "0";
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (value.empty() || value == "auto") return JitMode::Auto;
-    if (value == "0" || value == "off" || value == "false") return JitMode::Disabled;
-    if (value == "1" || value == "on" || value == "true") return JitMode::Required;
-    TORCH_CHECK(false, "MATPL_NEP_FITTING_JIT must be auto, 1, or 0; got ", value);
-}
 
 void check_driver(CUresult result, const char* operation) {
     if (result == CUDA_SUCCESS) return;
@@ -290,18 +276,6 @@ std::shared_ptr<JitModule> build_module(const at::Tensor& reference, int d, int 
     return result;
 }
 
-std::shared_ptr<JitModule> module_for_mode(
-    const at::Tensor& reference, int d, int h, int q) {
-    const JitMode mode = jit_mode();
-    if (mode == JitMode::Disabled) return nullptr;
-    try {
-        return build_module(reference, d, h, q);
-    } catch (const std::exception& error) {
-        if (mode == JitMode::Required) throw;
-        TORCH_WARN_ONCE("NEP fitting JIT unavailable; using AOT kernel: ", error.what());
-        return nullptr;
-    }
-}
 } // namespace
 
 bool prepare_nep_fitting_jit(
@@ -312,16 +286,16 @@ bool prepare_nep_fitting_jit(
     TORCH_CHECK(d >= 1 && d <= 96, "NEP fitting JIT requires 1 <= D <= 96");
     TORCH_CHECK(h >= 1 && h <= 100, "NEP fitting JIT requires 1 <= H <= 100");
     TORCH_CHECK(q == 1 || q == 2, "NEP fitting JIT requires Q=1 or Q=2");
-    return module_for_mode(reference, d, h, q) != nullptr;
+    build_module(reference, d, h, q);
+    return true;
 }
 
-bool try_launch_nep_fitting_jit_forward(
+void launch_nep_fitting_jit_forward(
     const at::Tensor& x, const at::Tensor& w, const at::Tensor& b,
     const at::Tensor& v, const at::Tensor& c, const at::Tensor& atom_ids,
     const at::Tensor& offsets, int64_t max_count, at::Tensor& y,
     at::Tensor& g) {
-    auto module = module_for_mode(x, x.size(1), w.size(2), v.size(2));
-    if (!module) return false;
+    auto module = build_module(x, x.size(1), w.size(2), v.size(2));
     const double* x_ptr = x.data_ptr<double>();
     const double* w_ptr = w.data_ptr<double>();
     const double* b_ptr = b.data_ptr<double>();
@@ -341,17 +315,15 @@ bool try_launch_nep_fitting_jit_forward(
         reinterpret_cast<CUstream>(stream.stream()), args, nullptr),
         "cuLaunchKernel(fitting_atoms_forward)");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return true;
 }
 
-bool try_launch_nep_fitting_jit_backward(
+void launch_nep_fitting_jit_backward(
     const at::Tensor& x, const at::Tensor& w, const at::Tensor& b,
     const at::Tensor& v, const at::Tensor& atom_ids,
     const at::Tensor& offsets, int64_t max_count,
     const at::Tensor& grad_y, const at::Tensor& grad_g,
     std::vector<at::Tensor>& grads) {
-    auto module = module_for_mode(x, x.size(1), w.size(2), v.size(2));
-    if (!module) return false;
+    auto module = build_module(x, x.size(1), w.size(2), v.size(2));
     int d = static_cast<int>(x.size(1));
     int h = static_cast<int>(w.size(2));
     int q = static_cast<int>(v.size(2));
@@ -413,7 +385,6 @@ bool try_launch_nep_fitting_jit_backward(
             "cuLaunchKernel(fitting_parameter_reduce)");
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
-    return true;
 }
 
 #endif

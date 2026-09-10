@@ -1,4 +1,4 @@
-"""Behavior tests for the CUDA NEP fitting JIT runtime."""
+"""Behavior and numerical tests for the required CUDA NEP fitting JIT runtime."""
 
 import json
 import os
@@ -29,25 +29,24 @@ print(json.dumps({
 """
 
 
-def run_probe(cache_dir: Path, mode):
+def probe_process(cache_dir: Path):
     env = os.environ.copy()
-    if mode is None:
-        env.pop("MATPL_NEP_FITTING_JIT", None)
-    else:
-        env["MATPL_NEP_FITTING_JIT"] = mode
     env["MATPL_NEP_JIT_CACHE"] = str(cache_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
-    result = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", PROBE], cwd=REPO, env=env,
         text=True, capture_output=True,
     )
+
+
+def run_probe(cache_dir: Path):
+    result = probe_process(cache_dir)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def start_probe(cache_dir: Path, mode: str):
+def start_probe(cache_dir: Path):
     env = os.environ.copy()
-    env["MATPL_NEP_FITTING_JIT"] = mode
     env["MATPL_NEP_JIT_CACHE"] = str(cache_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.Popen(
@@ -56,26 +55,44 @@ def start_probe(cache_dir: Path, mode: str):
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
-def test_disabled_mode_does_not_touch_cache(tmp_path):
-    result = run_probe(tmp_path, mode="0")
-    assert result["prepared"] is False
-    assert result["files"] == []
+def fitting_reference(x, w, b, v, c, atom_ids, offsets):
+    """Independent PyTorch expression for energy heads and dE/dfeature."""
+    n = x.shape[0]
+    atom_types = torch.empty(n, dtype=torch.long, device=x.device)
+    for type_index in range(offsets.numel() - 1):
+        first, end = int(offsets[type_index]), int(offsets[type_index + 1])
+        positions = atom_ids[first:end]
+        atom_types[positions] = type_index
+    selected_w = w.index_select(0, atom_types)
+    hidden = torch.tanh(
+        torch.einsum("nd,ndh->nh", x, selected_w)
+        + b.index_select(0, atom_types)
+    )
+    selected_v = v.index_select(0, atom_types)
+    energy = torch.einsum("nh,nhq->qn", hidden, selected_v)
+    energy = energy + c.index_select(0, atom_types).transpose(0, 1)
+    feature_gradient = torch.einsum(
+        "nhq,ndh->qnd",
+        (1.0 - hidden.square()).unsqueeze(-1) * selected_v,
+        selected_w,
+    )
+    return energy, feature_gradient
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
-def test_unset_mode_defaults_to_aot_without_touching_cache(tmp_path):
-    result = run_probe(tmp_path, mode=None)
-    assert result["prepared"] is False
-    assert result["files"] == []
+def test_jit_is_required_when_mode_env_is_unset(tmp_path):
+    result = run_probe(tmp_path)
+    assert result["prepared"] is True
+    assert len(list(tmp_path.glob("*.cubin"))) == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
-def test_auto_mode_falls_back_when_cache_path_is_not_a_directory(tmp_path):
+def test_invalid_cache_path_is_an_error(tmp_path):
     invalid_cache = tmp_path / "cache-file"
     invalid_cache.write_text("not a directory")
-    result = run_probe(invalid_cache, mode="auto")
-    assert result["prepared"] is False
+    result = probe_process(invalid_cache)
+    assert result.returncode != 0
+    assert "not a directory" in result.stderr
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
@@ -92,17 +109,26 @@ def test_prepare_model_infers_fitting_dimensions(monkeypatch, charge, expected_q
             return True
 
     monkeypatch.setattr(adapter, "_load_raw_ops", lambda: FakeOps())
-    hidden = SimpleNamespace(weight=torch.empty(15, 33, dtype=torch.float64, device="cuda"))
+    hidden = SimpleNamespace(weight=torch.empty(15, 33, dtype=torch.float64))
     if charge:
         net = SimpleNamespace(
             layers=[hidden],
-            energy_head=SimpleNamespace(weight=torch.empty(33, 1, device="cuda")),
-            charge_head=SimpleNamespace(weight=torch.empty(33, 1, device="cuda")),
+            energy_head=SimpleNamespace(weight=torch.empty(33, 1)),
+            charge_head=SimpleNamespace(weight=torch.empty(33, 1)),
         )
     else:
-        output = SimpleNamespace(weight=torch.empty(33, 1, dtype=torch.float64, device="cuda"))
+        output = SimpleNamespace(weight=torch.empty(33, 1, dtype=torch.float64))
         net = SimpleNamespace(layers=[hidden, output])
     model = SimpleNamespace(fitting_net=[net])
+    assert adapter.prepare_fitting_jit(model) is False
+    assert calls == []
+
+    hidden.weight = hidden.weight.cuda()
+    if charge:
+        net.energy_head.weight = net.energy_head.weight.cuda()
+        net.charge_head.weight = net.charge_head.weight.cuda()
+    else:
+        output.weight = output.weight.cuda()
     assert adapter.prepare_fitting_jit(model) is True
     reference, d, h, q = calls.pop()
     assert reference.device.type == "cuda"
@@ -131,8 +157,18 @@ def test_prepare_model_skips_cpu_without_loading_cuda_ops(monkeypatch):
     assert adapter.prepare_fitting_jit(model) is False
 
 
+def test_aot_fitting_implementation_is_removed():
+    assert not (REPO / "src/op/kernel/nep_fitting.cu").exists()
+    wrapper = (REPO / "src/op/src/nep_fitting_launcher.cpp").read_text()
+    runtime = (REPO / "src/op/src/nep_fitting_jit.cpp").read_text()
+    assert "template<" not in wrapper
+    assert "fitting_atoms<<<" not in wrapper
+    assert "module_for_mode" not in runtime
+    assert "fallback" not in runtime.lower()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
-def test_jit_forward_and_feature_gradient_match_aot(tmp_path, monkeypatch):
+def test_jit_forward_and_feature_gradient_match_reference(tmp_path, monkeypatch):
     from src.utils.op_loader import load_calc_ops
 
     torch.manual_seed(41)
@@ -148,12 +184,7 @@ def test_jit_forward_and_feature_gradient_match_aot(tmp_path, monkeypatch):
     offsets = torch.tensor([0, 4, 6, 9], device="cuda")
 
     monkeypatch.setenv("MATPL_NEP_JIT_CACHE", str(tmp_path))
-    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "0")
-    expected = ops.nep_fitting_forward(x, w, b, v, c, atom_ids, offsets, counts)
-    torch.cuda.synchronize()
-
-    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "1")
-    assert ops.nep_fitting_jit_prepare(x, d, h, q) is True
+    expected = fitting_reference(x, w, b, v, c, atom_ids, offsets)
     actual = ops.nep_fitting_forward(x, w, b, v, c, atom_ids, offsets, counts)
     torch.cuda.synchronize()
 
@@ -167,18 +198,21 @@ def test_jit_forward_and_feature_gradient_match_aot(tmp_path, monkeypatch):
     [(35, 61, 1, "both"), (31, 33, 2, "y"), (96, 100, 2, "g")],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
-def test_jit_backward_matches_aot(tmp_path, monkeypatch, d, h, q, seed_mode):
+def test_jit_backward_matches_reference(tmp_path, monkeypatch, d, h, q, seed_mode):
     from src.utils.op_loader import load_calc_ops
 
     torch.manual_seed(d * 1000 + h * 10 + q)
     ops = load_calc_ops()
     counts = [5, 2, 4]
     n = sum(counts)
-    x = torch.randn(n, d, dtype=torch.float64, device="cuda") * 0.1
-    w = torch.randn(3, d, h, dtype=torch.float64, device="cuda") * 0.1
-    b = torch.randn(3, h, dtype=torch.float64, device="cuda") * 0.1
-    v = torch.randn(3, h, q, dtype=torch.float64, device="cuda") * 0.1
-    c = torch.randn(3, q, dtype=torch.float64, device="cuda") * 0.1
+    values = [
+        torch.randn(n, d, dtype=torch.float64, device="cuda") * 0.1,
+        torch.randn(3, d, h, dtype=torch.float64, device="cuda") * 0.1,
+        torch.randn(3, h, dtype=torch.float64, device="cuda") * 0.1,
+        torch.randn(3, h, q, dtype=torch.float64, device="cuda") * 0.1,
+        torch.randn(3, q, dtype=torch.float64, device="cuda") * 0.1,
+    ]
+    x, w, b, v, c = [value.detach().requires_grad_(True) for value in values]
     atom_ids = torch.tensor([9, 2, 7, 0, 5, 10, 1, 8, 3, 6, 4], device="cuda")
     offsets = torch.tensor([0, 5, 7, 11], device="cuda")
     grad_y = torch.randn(q, n, dtype=torch.float64, device="cuda")
@@ -188,14 +222,13 @@ def test_jit_backward_matches_aot(tmp_path, monkeypatch, d, h, q, seed_mode):
     elif seed_mode == "g":
         grad_y.zero_()
 
-    monkeypatch.setenv("MATPL_NEP_JIT_CACHE", str(tmp_path))
-    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "0")
-    expected = ops.nep_fitting_backward(
-        x, w, b, v, c, atom_ids, offsets, counts, grad_y, grad_g
+    expected_y, expected_g = fitting_reference(x, w, b, v, c, atom_ids, offsets)
+    expected = torch.autograd.grad(
+        (expected_y * grad_y).sum() + (expected_g * grad_g).sum(),
+        (x, w, b, v, c),
     )
-    torch.cuda.synchronize()
 
-    monkeypatch.setenv("MATPL_NEP_FITTING_JIT", "1")
+    monkeypatch.setenv("MATPL_NEP_JIT_CACHE", str(tmp_path))
     assert ops.nep_fitting_jit_prepare(x, d, h, q) is True
     cubin = next(tmp_path.glob("*.cubin"))
     symbols = subprocess.run(
@@ -219,16 +252,16 @@ def test_jit_backward_matches_aot(tmp_path, monkeypatch, d, h, q, seed_mode):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
 def test_persistent_cache_reuses_cubin_without_rewrite(tmp_path):
-    assert run_probe(tmp_path, "1")["prepared"] is True
+    assert run_probe(tmp_path)["prepared"] is True
     cubin = next(tmp_path.glob("*.cubin"))
     initial_mtime = cubin.stat().st_mtime_ns
-    assert run_probe(tmp_path, "1")["prepared"] is True
+    assert run_probe(tmp_path)["prepared"] is True
     assert cubin.stat().st_mtime_ns == initial_mtime
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
 def test_concurrent_prepare_uses_one_locked_cache_entry(tmp_path):
-    processes = [start_probe(tmp_path, "1") for _ in range(4)]
+    processes = [start_probe(tmp_path) for _ in range(4)]
     for process in processes:
         stdout, stderr = process.communicate(timeout=120)
         assert process.returncode == 0, stderr
@@ -240,10 +273,10 @@ def test_concurrent_prepare_uses_one_locked_cache_entry(tmp_path):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
 def test_corrupt_cubin_is_recompiled_once(tmp_path):
-    assert run_probe(tmp_path, "1")["prepared"] is True
+    assert run_probe(tmp_path)["prepared"] is True
     cubin = next(tmp_path.glob("*.cubin"))
     original_size = cubin.stat().st_size
     cubin.write_bytes(b"corrupt")
-    assert run_probe(tmp_path, "1")["prepared"] is True
+    assert run_probe(tmp_path)["prepared"] is True
     assert cubin.stat().st_size == original_size
     assert cubin.read_bytes() != b"corrupt"
