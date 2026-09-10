@@ -1593,8 +1593,15 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
     }
     __syncthreads();
 
-    // Every thread reaches every tile barrier, including padding-only threads.
-    for (int j = tid; j < a.max_neighbors; j += CTA_THREADS) {
+    // Expand each valid neighbor into NMAX independent tasks. OMat24 has only
+    // a few angular neighbors per center, so assigning an entire neighbor to
+    // one lane leaves most of the warp idle during the expensive angular
+    // algebra. Distributing (neighbor, n) pairs fills those lanes while
+    // preserving the arithmetic and accumulation order inside each pair.
+    const int neighbor_n_tasks = a.max_neighbors * NMAX;
+    for (int task = tid; task < neighbor_n_tasks; task += CTA_THREADS) {
+      const int j = task / NMAX;
+      const int n = task - j * NMAX;
       const int row = center * a.max_neighbors + j;
       const int64_t neighbor = a.neighbor_list[row];
       if (neighbor < 0) continue;
@@ -1618,6 +1625,7 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       work.dsnlm_dc = s.dsnlm_tile;
       work.sum_fxyz = s.sum_fxyz;
       work.output = sink.values;
+      work.n = n;
       work.type_slot = type_slot;
       work.tile_count = tile_count;
       double (&fn12)[NBASIS] = work.fn12;
@@ -1626,20 +1634,17 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
       find_fn_and_fnp(NBASIS, a.rcut_inv, distance, fc12, fcp12, fn12, fnp12);
 
-      const int coeff_start = (center_type * a.atom_types + neighbor_type) * NMAX * NBASIS;
+      const int coeff_start =
+          ((center_type * a.atom_types + neighbor_type) * NMAX + n) * NBASIS;
+      double gn12 = 0.0, gnp12 = 0.0;
       #pragma unroll
-      for (int n = 0; n < NMAX; ++n) {
-        double gn12 = 0.0, gnp12 = 0.0;
-        #pragma unroll
-        for (int k = 0; k < NBASIS; ++k) {
-          gn12 += fn12[k] * a.coeff3[coeff_start + n * NBASIS + k];
-          gnp12 += fnp12[k] * a.coeff3[coeff_start + n * NBASIS + k];
-        }
-        work.n = n;
-        work.fn = gn12;
-        work.fnp = gnp12;
-        accumulate_neighbor<NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(work);
+      for (int k = 0; k < NBASIS; ++k) {
+        gn12 += fn12[k] * a.coeff3[coeff_start + k];
+        gnp12 += fnp12[k] * a.coeff3[coeff_start + k];
       }
+      work.fn = gn12;
+      work.fnp = gnp12;
+      accumulate_neighbor<NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(work);
     }
     __syncthreads();
     for (int i = tid; i < tile_count * NMAX * NBASIS; i += CTA_THREADS) {

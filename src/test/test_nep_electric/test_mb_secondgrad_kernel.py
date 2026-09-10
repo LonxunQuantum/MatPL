@@ -219,10 +219,10 @@ def test_optimized_matches_legacy(case):
 
 @pytest.mark.parametrize("case,expected_threads", [
     (dataclasses.replace(_repeated_type_case(), feat_2b_num=6), 32),
-    (_wide_neighbor_case(), 32),
+    (_wide_neighbor_case(), 64),
     (_wide_neighbor_case(valid_neighbors=65, max_neighbors=67), 64),
 ], ids=[
-    "cta32-radial-prefix", "cta32-wide_neighbor-43", "cta64-wide_neighbor-67",
+    "cta32-radial-prefix", "cta64-wide_neighbor-43", "cta64-wide_neighbor-67",
 ])
 def test_optimized_secondgrad_obeys_current_stream(case, expected_threads):
     legacy = _coefficient_second_grad(case, "legacy")
