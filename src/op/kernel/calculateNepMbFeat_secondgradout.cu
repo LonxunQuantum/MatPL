@@ -434,6 +434,39 @@ static NepMbSecondGradMode nep_mb_secondgrad_mode() {
         "MATPL_NEP_MB_SECONDGRAD_MODE must be auto, optimized, or legacy");
 }
 
+bool should_recompute_nep_mb_dsnlm(
+    const int n_max_3b,
+    const int n_base_3b,
+    const int atom_types,
+    const int lmax_3,
+    const int lmax_4,
+    const int lmax_5,
+    const int device) {
+    const auto mode = nep_mb_secondgrad_mode();
+    if (mode == NepMbSecondGradMode::Legacy) return false;
+    cudaDeviceProp prop{};
+    C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+    constexpr size_t shared_bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
+    const bool supported = nep_mb_secondgrad_optimized_supported(
+        n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5, shared_bytes, prop)
+        && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES;
+    if (mode == NepMbSecondGradMode::Optimized && !supported) {
+        throw std::runtime_error(
+            "unsupported optimized NEP many-body second gradient: "
+            "n_max_3b=" + std::to_string(n_max_3b) +
+            ", n_base_3b=" + std::to_string(n_base_3b) +
+            ", lmax_3=" + std::to_string(lmax_3) +
+            ", lmax_4=" + std::to_string(lmax_4) +
+            ", lmax_5=" + std::to_string(lmax_5) +
+            ", atom_types=" + std::to_string(atom_types) +
+            ", compute_capability=" + std::to_string(prop.major) +
+            "." + std::to_string(prop.minor) +
+            ", required_shared_bytes=" + std::to_string(shared_bytes) +
+            ", available_shared_bytes=" + std::to_string(prop.sharedMemPerBlock));
+    }
+    return supported;
+}
+
 void launch_calculate_nepmbfeat_secondgradout_c3(
     const double * grad_second,
     const double * d12,
@@ -455,38 +488,19 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     const int lmax_5,
     const int feat_2b_num,
     const int multi_feat_num,
+    const bool recompute_dsnlm,
     const int device
 ) {
-    const auto mode = nep_mb_secondgrad_mode();
-    if (mode != NepMbSecondGradMode::Legacy) {
-        cudaDeviceProp prop{};
-        C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-        constexpr size_t shared_bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
-        const bool supported = nep_mb_secondgrad_optimized_supported(
-            n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5, shared_bytes, prop)
-            && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES;
-        if (mode == NepMbSecondGradMode::Optimized && !supported) {
-            throw std::runtime_error(
-                "unsupported optimized NEP many-body second gradient: "
-                "n_max_3b=" + std::to_string(n_max_3b) +
-                ", n_base_3b=" + std::to_string(n_base_3b) +
-                ", lmax_3=" + std::to_string(lmax_3) +
-                ", lmax_4=" + std::to_string(lmax_4) +
-                ", lmax_5=" + std::to_string(lmax_5) +
-                ", atom_types=" + std::to_string(atom_types) +
-                ", compute_capability=" + std::to_string(prop.major) +
-                "." + std::to_string(prop.minor) +
-                ", required_shared_bytes=" + std::to_string(shared_bytes) +
-                ", available_shared_bytes=" + std::to_string(prop.sharedMemPerBlock));
-        }
-        if (supported) {
+    if (recompute_dsnlm) {
             const NepMbSecondGradArgs args{
-                grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,
+                grad_second, d12, NL, de_dfeat, sum_fxyz, atom_map,
                 coeff3, gradsecond_c3, rcut_angular, 1.0 / rcut_angular,
                 atom_nums, maxneighs, atom_types, feat_2b_num, multi_feat_num};
             launch_nep_mb_secondgrad_omat24(args, device);
             return;
-        }
+    }
+    if (dsnlm_dc == nullptr) {
+        throw std::runtime_error("legacy NEP many-body second gradient requires dsnlm_dc");
     }
     launch_calculate_nepmbfeat_secondgradout_c3_legacy(
         grad_second, d12, NL, de_dfeat, dsnlm_dc, sum_fxyz, atom_map,

@@ -207,6 +207,16 @@ void torch_launch_calculate_nepmbfeat_grad(
                         torch::Tensor &dfeat_drij
 );
 
+bool torch_should_recompute_nep_mb_dsnlm(
+    const torch::Tensor &reference,
+    const int64_t n_max_3b,
+    const int64_t n_base_3b,
+    const int64_t atom_types,
+    const int64_t lmax_3,
+    const int64_t lmax_4,
+    const int64_t lmax_5
+);
+
 void torch_launch_calculate_nepmbfeat_secondgradout(
                         const torch::Tensor &grad_second,
                         const torch::Tensor &dfeat_b,
@@ -236,6 +246,7 @@ void torch_launch_calculate_nepmbfeat_secondgradout_c3(
                         const int64_t lmax_5,
                         const int64_t feat_2b_num,
                         const int64_t multi_feat_num,
+                        const bool recompute_dsnlm,
                         torch::Tensor &gradsecond_c3
 );
 

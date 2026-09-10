@@ -677,7 +677,7 @@ static __global__ void find_angular_gard(
       atomicAdd(&dfeat_c3[dc_id], dfeat_c3_base[baseid]);
     }
     // 对dsnlm_dc进行累加（只需要在n==0时）
-    if (n == 0) {
+    if (dsnlm_dc != nullptr && n == 0) {
       int dsnlm_dc_idx = n1 * num_types * basis_size_angular * NUM_OF_ABC + 
                         t2 * basis_size_angular * NUM_OF_ABC;
       

@@ -12,7 +12,6 @@ struct NepMbSecondGradArgs {
   const double* d12;
   const int64_t* neighbor_list;
   const double* de_dfeat;
-  const double* dsnlm_dc;
   const double* sum_fxyz;
   const int64_t* atom_type;
   const double* coeff3;
@@ -1586,10 +1585,45 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
     for (int i = tid; i < TYPE_TILE * NMAX * NBASIS; i += CTA_THREADS) {
       s.output_tile[i] = 0.0;
     }
-    for (int i = tid; i < tile_count * NBASIS * 24; i += CTA_THREADS) {
-      const int type = s.local_types[tile + i / (NBASIS * 24)];
-      s.dsnlm_tile[i] = a.dsnlm_dc[(center * a.atom_types + type) * NBASIS * 24
-                                  + i % (NBASIS * 24)];
+    for (int i = tid; i < TYPE_TILE * NBASIS * 24; i += CTA_THREADS) {
+      s.dsnlm_tile[i] = 0.0;
+    }
+    __syncthreads();
+
+    // dsnlm/dc depends only on geometry and the radial basis. Rebuild the
+    // active type tile in shared memory instead of retaining the dense
+    // [atom, all element types, basis, 24] tensor between autograd passes.
+    // Each neighbor belongs to exactly one tile, so the total arithmetic over
+    // all tiles is linear in the number of valid neighbors.
+    for (int j = tid; j < a.max_neighbors; j += CTA_THREADS) {
+      const int row = center * a.max_neighbors + j;
+      const int64_t neighbor = a.neighbor_list[row];
+      if (neighbor < 0) continue;
+      const double distance = a.d12[row * 4];
+      if (distance > a.rcut) continue;
+      const int neighbor_type = static_cast<int>(a.atom_type[neighbor]);
+      int type_slot = -1;
+      for (int slot = 0; slot < tile_count; ++slot) {
+        if (s.local_types[tile + slot] == neighbor_type) type_slot = slot;
+      }
+      if (type_slot < 0) continue;
+
+      double fc12, fcp12;
+      find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
+      double fn12[NBASIS];
+      find_fn(NBASIS, a.rcut_inv, distance, fc12, fn12);
+      double angular[24] = {0.0};
+      accumulate_blm_rij(
+          distance, a.d12[row * 4 + 1], a.d12[row * 4 + 2],
+          a.d12[row * 4 + 3], angular);
+      #pragma unroll
+      for (int k = 0; k < NBASIS; ++k) {
+        #pragma unroll
+        for (int m = 0; m < 24; ++m) {
+          atomicAdd(&s.dsnlm_tile[(type_slot * NBASIS + k) * 24 + m],
+                    angular[m] * fn12[k]);
+        }
+      }
     }
     __syncthreads();
 

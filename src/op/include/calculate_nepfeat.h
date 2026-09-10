@@ -151,6 +151,16 @@ void launch_calculate_nepmbfeat_grad(
             const int device_id
 );
 
+bool should_recompute_nep_mb_dsnlm(
+    const int n_max_3b,
+    const int n_base_3b,
+    const int atom_types,
+    const int lmax_3,
+    const int lmax_4,
+    const int lmax_5,
+    const int device
+);
+
 void launch_calculate_nepmbfeat_secondgradout(
     const double * grad_second,
     const double * dfeat_b,
@@ -182,5 +192,6 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     const int lmax_5,
     const int feat_2b_num,
     const int multi_feat_num,
+    const bool recompute_dsnlm,
     const int device
 );

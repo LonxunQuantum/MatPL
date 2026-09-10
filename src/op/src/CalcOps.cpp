@@ -849,7 +849,12 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::forward(
         const int64_t NUM_OF_ABC = 24;
         auto grad_coeff3= torch::zeros({atom_types, atom_types, n_max, n_base}, d12.options());
         auto grad_d12_angular = torch::zeros({atom_nums, maxneighs, 4}, d12.options());
-        auto dsnlm_dc   = torch::zeros({atom_nums, atom_types, n_base, NUM_OF_ABC}, d12.options());
+        const bool recompute_dsnlm = fix_cij == 0 && torch_should_recompute_nep_mb_dsnlm(
+            d12, n_max, n_base, atom_types, lmax_3, lmax_4, lmax_5);
+        const bool retain_dsnlm = fix_cij == 0 && !recompute_dsnlm;
+        auto dsnlm_dc = retain_dsnlm
+            ? torch::zeros({atom_nums, atom_types, n_base, NUM_OF_ABC}, d12.options())
+            : torch::empty({0}, d12.options());
         auto dfeat_drij = torch::zeros({atom_nums, maxneighs, feat_3b_num, 4}, d12.options());
         torch_launch_calculate_nepmbfeat_grad(
             // grad_input.view({atom_nums, feat_3b_num}), 
@@ -868,6 +873,7 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::forward(
         ctx->saved_data["lmax_4"] = lmax_4;
         ctx->saved_data["lmax_5"] = lmax_5;
         ctx->saved_data["fix_cij"] = fix_cij;
+        ctx->saved_data["recompute_dsnlm"] = recompute_dsnlm;
         // std::cout << "dsnlm_dc shape: " << dsnlm_dc.sizes() << std::endl;
         // auto gradin = dsnlm_dc.to(torch::kCPU);  // 确保它在 CPU 上
         // auto gradin_data = gradin.data<double>();         // 获取数据，假设数据是 float 类型
@@ -962,6 +968,7 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::backward(
         int64_t lmax_4 = ctx->saved_data["lmax_4"].toInt();
         int64_t lmax_5 = ctx->saved_data["lmax_5"].toInt();
         int64_t fix_cij = ctx->saved_data["fix_cij"].toInt();
+        bool recompute_dsnlm = ctx->saved_data["recompute_dsnlm"].toBool();
         auto dims = coeff3.sizes();
         int64_t atom_types = dims[0];
         int64_t n_max = dims[2];
@@ -1020,7 +1027,8 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::backward(
                                                             lmax_4, 
                                                             lmax_5, 
                                                             feat_2b_num,
-                                                            feat_3b_num, 
+                                                            feat_3b_num,
+                                                            recompute_dsnlm,
                                                             gradsecond_c3);
         }
         // std::cout << "CalculateNepMbFeatGrad::backward gradsecond_c3 shape: " << grad_second[1].sizes() << std::endl;

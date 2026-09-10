@@ -183,7 +183,7 @@ void torch_launch_calculate_nepmbfeat_grad(
         sum_fxyz.data_ptr<double>(),
         grad_coeff3.data_ptr<double>(),
         grad_d12_3b.data_ptr<double>(),
-        dsnlm_dc.data_ptr<double>(),
+        dsnlm_dc.numel() == 0 ? nullptr : dsnlm_dc.data_ptr<double>(),
         dfeat_drij.data_ptr<double>(),
         rcut_angular,
         atom_nums, 
@@ -197,6 +197,20 @@ void torch_launch_calculate_nepmbfeat_grad(
         n_types,
         device_id
     );
+}
+
+bool torch_should_recompute_nep_mb_dsnlm(
+                        const torch::Tensor &reference,
+                        const int64_t n_max_3b,
+                        const int64_t n_base_3b,
+                        const int64_t atom_types,
+                        const int64_t lmax_3,
+                        const int64_t lmax_4,
+                        const int64_t lmax_5)
+{
+    return should_recompute_nep_mb_dsnlm(
+        n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5,
+        reference.device().index());
 }
 
 void torch_launch_calculate_nepmbfeat_secondgradout(
@@ -237,6 +251,7 @@ void torch_launch_calculate_nepmbfeat_secondgradout_c3(
                         const int64_t lmax_5,
                         const int64_t feat_2b_num,
                         const int64_t multi_feat_num,
+                        const bool recompute_dsnlm,
                         torch::Tensor &gradsecond_c3
 ){
     TORCH_CHECK(
@@ -253,12 +268,13 @@ void torch_launch_calculate_nepmbfeat_secondgradout_c3(
         (const double *) d12.data_ptr(),
         (const int64_t*) NL.data_ptr(),
         (const double *) de_feat.data_ptr(),
-        (const double *) dsnlm_dc.data_ptr(),
+        dsnlm_dc.numel() == 0 ? nullptr : (const double *) dsnlm_dc.data_ptr(),
         (const double *) sum_fxyz.data_ptr(),
         (const int64_t*) atom_map.data_ptr(),
         (const double *) coeff3.data_ptr(),
         (double *) gradsecond_c3.data_ptr(),
         rcut_angular,
-        atom_nums, maxneighs, n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5, feat_2b_num, multi_feat_num, device_id
+        atom_nums, maxneighs, n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5,
+        feat_2b_num, multi_feat_num, recompute_dsnlm, device_id
     );
 }
