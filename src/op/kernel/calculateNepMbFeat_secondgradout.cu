@@ -403,16 +403,8 @@ bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device
     if (args.atom_count == 0) return true;
     constexpr size_t bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
     const auto stream = c10::cuda::getCurrentCUDAStream(device);
-    // Each worker now owns one (neighbor, n) pair rather than one neighbor.
-    // Select the CTA width from that expanded task count so the common OMat24
-    // launch can use both warps without penalizing very small neighbor lists.
-    if (args.max_neighbors * 5 <= 32) {
-        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 32>
-            <<<args.atom_count, 32, bytes, stream.stream()>>>(args);
-    } else {
-        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 64>
-            <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
-    }
+    nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 64>
+        <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
     CUDA_CHECK_KERNEL
     return true;
 }

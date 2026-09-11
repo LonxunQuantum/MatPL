@@ -208,7 +208,7 @@ def test_auto_matches_optimized_for_omat24_shape():
     dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
 ], ids=[
     "single-type", "repeated-types", "six-local-types",
-    "cta32-wide_neighbor-43", "cta64-wide_neighbor-67",
+    "wide-neighbor-43", "wide-neighbor-67",
     "empty-slots", "radial-prefix",
 ])
 def test_optimized_matches_legacy(case):
@@ -217,14 +217,14 @@ def test_optimized_matches_legacy(case):
     _assert_triplet_close(optimized, legacy)
 
 
-@pytest.mark.parametrize("case,expected_threads", [
-    (dataclasses.replace(_repeated_type_case(), feat_2b_num=6), 32),
-    (_wide_neighbor_case(), 64),
-    (_wide_neighbor_case(valid_neighbors=65, max_neighbors=67), 64),
+@pytest.mark.parametrize("case", [
+    dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
+    _wide_neighbor_case(),
+    _wide_neighbor_case(valid_neighbors=65, max_neighbors=67),
 ], ids=[
-    "cta32-radial-prefix", "cta64-wide_neighbor-43", "cta64-wide_neighbor-67",
+    "radial-prefix", "wide-neighbor-43", "wide-neighbor-67",
 ])
-def test_optimized_secondgrad_obeys_current_stream(case, expected_threads):
+def test_optimized_secondgrad_obeys_current_stream(case):
     legacy = _coefficient_second_grad(case, "legacy")
     stream = torch.cuda.Stream()
     with torch.profiler.profile(activities=[
@@ -234,6 +234,6 @@ def test_optimized_secondgrad_obeys_current_stream(case, expected_threads):
         with torch.cuda.stream(stream):
             optimized = _coefficient_second_grad(case, "optimized", delay_default_stream=True)
     kernel_names = [event.key for event in profiler.key_averages()]
-    cta_pattern = rf"nep_mb_secondgrad_fused.*(?:\(int\){expected_threads}|, {expected_threads}>)"
+    cta_pattern = r"nep_mb_secondgrad_fused.*(?:\(int\)64|, 64>)"
     assert any(re.search(cta_pattern, name) for name in kernel_names), kernel_names
     _assert_triplet_close(optimized, legacy)

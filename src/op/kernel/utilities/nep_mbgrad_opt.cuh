@@ -1536,7 +1536,7 @@ template<int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE, i
 __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
   using namespace nep_mb_secondgrad_opt;
   static_assert(LMAX3 == 4 && HAS4 && HAS5, "Only OMat24 is dispatched");
-  static_assert(CTA_THREADS == 32 || CTA_THREADS == 64, "Supported CTA sizes");
+  static_assert(CTA_THREADS == 64, "OMat24 uses a fixed CTA width");
   extern __shared__ __align__(8) unsigned char shared_raw[];
   SharedLayout<NMAX, NBASIS, TYPE_TILE> s(shared_raw);
   const int center = blockIdx.x;
