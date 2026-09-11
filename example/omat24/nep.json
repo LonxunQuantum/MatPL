@@ -1,0 +1,65 @@
+{
+    "model_type": "NEP",
+    "atom_type": [
+		"H", "He",
+		"Li", "Be", "B", "C", "N", "O", "F", "Ne",
+		"Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
+		"K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr",
+		"Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe",
+		"Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+		"Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn",
+		"Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr",
+		"Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"
+    ],
+    "model": {
+        "descriptor": {
+            "cutoff": [
+                6.0,
+                4.0
+            ],
+            "n_max": [
+                4,
+                4
+            ],
+            "basis_size": [
+                8,
+                8
+            ],
+            "l_max": [
+                4,
+                2,
+                1
+            ],
+            "zbl": 1.4
+        },
+        "fitting_net": {
+            "network_size": [
+                40,
+                1
+            ]
+        }
+    },
+    "optimizer": {
+        "reset_epoch":false,
+        "optimizer": "ADAM",
+        "scaling_method":"sqrt",
+        "scale_lr":true,
+        "epochs": 6,
+        "batch_size": 128,
+        "print_freq": 10,
+        "max_norm": 5.0,
+        "norm_type": 2,
+        "t_0": 2,
+        "t_mult": 2,
+        "train_energy": true,
+        "train_force": true,
+        "train_virial":true,
+        "learning_rate": 0.001,
+        "stop_lr": 3.51e-08
+    },
+    "format": "lmdb",
+    "train_data": ["/data/public/wuxingxing/metadata/decompress/Omat24/train"],
+    "lmdb_stat_frames": 32768,
+    "precision": "float64",
+    "workers": 4
+}

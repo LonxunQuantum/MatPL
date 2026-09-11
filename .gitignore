@@ -3,7 +3,6 @@ matpl_env.sh
 env.sh
 dcu-deploy/quick_test/quick_train
 src/test/
-docs
 src/test/dev_gpu_nep_dp
 train*
 !dcu-deploy/quick_test/AuAg/train.xyz

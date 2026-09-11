@@ -1,0 +1,48 @@
+source=/data/public/wuxingxing/metadata/decompress/Omat24/train
+temporary_work=/tmp/omat-mix-hpuh03p_
+C/OpenMP packer self-test passed
+valid_shards=5216 skipped_shards=0
+metadata: 250/5216 shards, 10,759,355/100,824,585 frames
+metadata: 500/5216 shards, 21,724,728/100,824,585 frames
+metadata: 750/5216 shards, 33,295,537/100,824,585 frames
+metadata: 1000/5216 shards, 42,327,437/100,824,585 frames
+metadata: 1250/5216 shards, 45,496,762/100,824,585 frames
+metadata: 1500/5216 shards, 48,819,029/100,824,585 frames
+metadata: 1750/5216 shards, 52,978,848/100,824,585 frames
+metadata: 2000/5216 shards, 57,772,623/100,824,585 frames
+metadata: 2250/5216 shards, 64,540,962/100,824,585 frames
+metadata: 2500/5216 shards, 68,129,022/100,824,585 frames
+metadata: 2750/5216 shards, 70,293,732/100,824,585 frames
+metadata: 3000/5216 shards, 73,206,949/100,824,585 frames
+metadata: 3250/5216 shards, 76,614,166/100,824,585 frames
+metadata: 3500/5216 shards, 78,578,734/100,824,585 frames
+metadata: 3750/5216 shards, 80,550,749/100,824,585 frames
+metadata: 4000/5216 shards, 83,908,964/100,824,585 frames
+metadata: 4250/5216 shards, 87,467,471/100,824,585 frames
+metadata: 4500/5216 shards, 89,470,106/100,824,585 frames
+metadata: 4750/5216 shards, 91,566,322/100,824,585 frames
+metadata: 5000/5216 shards, 96,614,891/100,824,585 frames
+{
+  "source": "/data/public/wuxingxing/metadata/decompress/Omat24/train",
+  "valid_shards": 5216,
+  "skipped_shards": 0,
+  "skipped_details": [],
+  "frame_count": 100824585,
+  "atom_count": 1883602758,
+  "average_atoms_per_frame": 18.68197878523378,
+  "min_atoms_per_frame": 1,
+  "max_atoms_per_frame": 236,
+  "seed": 2023,
+  "epoch": 0,
+  "block_size": 65536
+}
+shuffle: 250/1539 blocks, 16,384,000/100,824,585 frames
+shuffle: 500/1539 blocks, 32,768,000/100,824,585 frames
+shuffle: 750/1539 blocks, 49,116,681/100,824,585 frames
+shuffle: 1000/1539 blocks, 65,500,681/100,824,585 frames
+shuffle: 1250/1539 blocks, 81,884,681/100,824,585 frames
+shuffle: 1500/1539 blocks, 98,268,681/100,824,585 frames
+shuffle: 1539/1539 blocks, 100,824,585/100,824,585 frames
+packing all mix values with OpenMP
+completed_seconds=391.082
+output=/data/home/wuxingxing/datas/training_test/mgpus/omat24/cout
