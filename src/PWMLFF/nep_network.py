@@ -52,6 +52,10 @@ sys.path.append(codepath + '/../aux')
 sys.path.append(codepath + '/../..')
 
 
+def _open_nep_log(path, mode):
+    return open(path, mode, encoding="utf-8")
+
+
 def _require_lmdb_training_batches(
         batch_sampler, dataset_size, batch_mode, batch_value, world_size):
     """Fail before model setup when ranks cannot receive one complete batch."""
@@ -1240,11 +1244,11 @@ class nep_network:
         valid_log = os.path.join(self.input_param.file_paths.model_store_dir, "epoch_valid.dat")
         if self.is_rank_0:
             write_mode = "a" if os.path.exists(train_log) else "w"
-            with open(train_log, write_mode) as f_train_log:
+            with _open_nep_log(train_log, write_mode) as f_train_log:
                 if write_mode == "w":
                     f_train_log.write("# %s\n" % (train_format % tuple(train_lists)))
             if val_loader and len(val_loader) > 0:
-                with open(valid_log, write_mode) as f_valid_log:
+                with _open_nep_log(valid_log, write_mode) as f_valid_log:
                     if write_mode == "w":
                         f_valid_log.write("# %s\n" % (valid_format % tuple(valid_lists)))
 
@@ -1280,7 +1284,7 @@ class nep_network:
                 )
 
             if self.is_rank_0:
-                with open(train_log, "a") as f_train_log:
+                with _open_nep_log(train_log, "a") as f_train_log:
                     train_log_line = f"{epoch:5d}{loss:20.10e}"
                     if self.input_param.optimizer_param.lambda_1:
                         train_log_line += f"{loss_l1:18.10e}"
@@ -1307,7 +1311,7 @@ class nep_network:
                     f_train_log.write(f"{train_log_line}\n")
 
                 if val_loader and len(val_loader) > 0:
-                    with open(valid_log, "a") as f_valid_log:
+                    with _open_nep_log(valid_log, "a") as f_valid_log:
                         valid_log_line = f"{epoch:5d}{vld_loss:20.10e}"
                         if self.input_param.optimizer_param.train_energy:
                             valid_log_line += f"{vld_loss_Etot_per_atom:21.10e}"
