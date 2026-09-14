@@ -1,0 +1,23 @@
+#!/bin/bash -l
+#SBATCH --job-name=omat24-hip-aot
+#SBATCH --partition=hx1hdnormal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=dcu:8
+
+set -eo pipefail
+module purge
+cd /public/home/pwmat/MatPL/training_test/omat24/codex-hip-aot-latest-20260914
+source /public/home/pwmat/MatPL/MatPL-dcu-merge/dcu-deploy/scnet/setup-dcu-env.sh
+source /public/home/pwmat/MatPL/MatPL-dcu-merge/env.sh
+
+MATPL train nep_dcu.json
+
+# 多节点多卡并行启动：
+# MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+# MASTER_PORT=$(python -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+# export MASTER_ADDR
+# export MASTER_PORT
+
+# srun --kill-on-bad-exit --wait=30 MATPL train nep_dcu.json

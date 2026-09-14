@@ -7,6 +7,14 @@
 #include <iostream>
 #include <hip/hip_runtime.h>
 
+// The CUDA backend may recompute this intermediate through its specialized
+// second-gradient kernel.  HIP keeps the established retained-tensor path.
+bool should_recompute_nep_mb_dsnlm(
+    const int, const int, const int, const int, const int, const int,
+    const int) {
+    return false;
+}
+
 __global__ void compute_gradsecond_mbgradout(
     const double *grad_second, // Shape: [batch_size, atom_nums, maxneighs, 4]
     const double *dfeat_drij,    // Shape: [batch_size, atom_nums, maxneighs, feat_mb_num, 4]
@@ -76,8 +84,10 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     const int lmax_5,
     const int feat_2b_num,
     const int multi_feat_num,
+    const bool recompute_dsnlm,
     const int device
 ){
+    (void)recompute_dsnlm;
     hipSetDevice(device);
     // // 每个线程块的线程数 (这里选择 8 * 16 * 2 = 256，保证不会超过 1024)
     double rcinv_angular = 1.0 / rcut_angular;

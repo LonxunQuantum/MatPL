@@ -1242,7 +1242,7 @@ class NEP(nn.Module):
             fitting_groups=None
             ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
         if (fitting_groups is not None and fitting_groups.type_ids and
-                feats_scaled.is_cuda and not torch.version.hip and
+                feats_scaled.is_cuda and
                 feats_scaled.dtype == torch.float64 and
                 len(self.neuron) == 2 and 1 <= self.neuron[0] <= 100 and
                 1 <= feats_scaled.shape[1] <= 96):

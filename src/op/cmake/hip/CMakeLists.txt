@@ -17,8 +17,13 @@ file(GLOB_RECURSE HIP_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/kernel_hip/utilities/*.hip
 )
 list(REMOVE_ITEM HIP_SOURCES ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
+list(REMOVE_ITEM HIP_SOURCES ${CMAKE_SOURCE_DIR}/src/nep_fitting_jit.cpp)
 
 add_library(CalcOps_cuda SHARED ${HIP_SOURCES})
+target_compile_definitions(CalcOps_cuda PRIVATE
+    MATPL_ENABLE_FUSED_FITTING
+    MATPL_FUSED_FITTING_HIP
+)
 target_include_directories(CalcOps_cuda PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/kernel_hip
@@ -36,6 +41,10 @@ set_target_properties(CalcOps_cuda PROPERTIES
 target_link_libraries(CalcOps_cuda PRIVATE ${TORCH_LIBRARIES})
 
 add_library(CalcOps_bind SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
+target_compile_definitions(CalcOps_bind PRIVATE
+    MATPL_ENABLE_FUSED_FITTING
+    MATPL_FUSED_FITTING_HIP
+)
 target_compile_features(CalcOps_bind PRIVATE cxx_std_17)
 target_include_directories(CalcOps_bind PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(CalcOps_bind PRIVATE CalcOps_cuda ${TORCH_LIBRARIES})

@@ -1,11 +1,21 @@
-// HIP builds share src/*.cpp; this implementation belongs to CUDA only.
+// Shared validation/allocation for the CUDA JIT and HIP AOT fitting backends.
 #ifdef MATPL_ENABLE_FUSED_FITTING
 #include "../include/calculate_nepfitting.h"
+#ifdef MATPL_FUSED_FITTING_HIP
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#else
 #include <c10/cuda/CUDAGuard.h>
+#endif
 #include <algorithm>
 #include <limits>
 
 namespace {
+#ifdef MATPL_FUSED_FITTING_HIP
+using FittingDeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
+#else
+using FittingDeviceGuard = c10::cuda::CUDAGuard;
+#endif
+
 void check_tensor(const at::Tensor& t, const at::Tensor& x,
                   at::ScalarType dtype, const char* name) {
     TORCH_CHECK(t.device() == x.device(), name, " must be on the feature device");
@@ -59,7 +69,7 @@ std::vector<at::Tensor> nep_fitting_forward(
     const at::Tensor& v, const at::Tensor& c, const at::Tensor& atom_ids,
     const at::Tensor& offsets, at::IntArrayRef counts) {
     const auto max_count = check_inputs(x, w, b, v, c, atom_ids, offsets, counts);
-    const c10::cuda::CUDAGuard guard(x.device());
+    const FittingDeviceGuard guard(x.device());
     auto y = at::empty({v.size(2), x.size(0)}, x.options());
     auto g = at::empty({v.size(2), x.size(0), x.size(1)}, x.options());
     if (x.size(0)) launch_nep_fitting_forward(x, w, b, v, c, atom_ids,
@@ -78,7 +88,7 @@ std::vector<at::Tensor> nep_fitting_backward(
     TORCH_CHECK(grad_y.sizes() == at::IntArrayRef({v.size(2), x.size(0)}) &&
                 grad_g.sizes() == at::IntArrayRef({v.size(2), x.size(0), x.size(1)}),
                 "incompatible output adjoint shapes");
-    const c10::cuda::CUDAGuard guard(x.device());
+    const FittingDeviceGuard guard(x.device());
     std::vector<at::Tensor> grads = {at::empty_like(x), at::zeros_like(w),
         at::zeros_like(b), at::zeros_like(v), at::zeros_like(c)};
     if (x.size(0)) launch_nep_fitting_backward(x, w, b, v, atom_ids, offsets,
