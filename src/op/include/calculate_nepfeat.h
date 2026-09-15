@@ -61,6 +61,9 @@ void launch_calculate_nepfeat(
     const int n_base,
     const int num_types,
     const int device
+#ifdef MATPL_CUDA_DESCRIPTOR_OPT
+    , const int noc_components
+#endif
 );
 
 void launch_calculate_nepfeat_grad(
@@ -103,6 +106,9 @@ void launch_calculate_nepfeat_secondgradout_c2(
     const int atom_types, 
     const int multi_feat_num,
     const int device
+#ifdef MATPL_CUDA_DESCRIPTOR_OPT
+    , const int noc_components
+#endif
 );
 
 void launch_calculate_nepmbfeat(

@@ -290,7 +290,9 @@ __device__ __forceinline__ void build_angular_scratch(
 // Borrowed inputs for one basis contribution. Its arrays remain owned by the
 // current angular order; no angular values escape into another L scope.
 // The noinline basis helpers bound algebra temporaries to one k. Their callers
-// keep fixed, unrolled k loops and issue the same r/x/y/z atomics in that order.
+// keep fixed, unrolled k loops. Each helper sums its weighted r/x/y/z terms
+// in FP64 before one atomic to the same (type slot, n, k) output. Component
+// expressions and their order are retained; cross-thread rounding may differ.
 struct AngularContribution {
   const double *fn12, *fnp12, *blm, *rij_blm;
   const double *dblm_x, *dblm_y, *dblm_z, *dblm_r;
@@ -321,6 +323,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
   const int type_slot = c.type_slot;
   const int n = c.n;
   const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  double contribution;
 
   if constexpr (L == 1) {
     if (type_slot < 0) return;
@@ -340,16 +343,17 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
       rrr1 = 2.0 * s[1] * dfk * blm[1 - (L * L - 1)];
       rrr2 = 2.0 * s[2] * dfk * blm[2 - (L * L - 1)];
       tmpr = rr0 + rr1 + rr2 + rrr0 + rrr1 + rrr2;
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+      contribution = 2.0 * Fp * scd_r12[0] * tmpr;
       tmpx += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fn;
       tmpx += 2.0 * s[1] * fn12[k] * rij_Lsq;
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+      contribution += 2.0 * Fp * scd_r12[1] * tmpx;
       tmpy += 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fn;
       tmpy += 2.0 * s[2] * fn12[k] * rij_Lsq;
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+      contribution += 2.0 * Fp * scd_r12[2] * tmpy;
       tmpz += C3B[0] * dsnlm_dc[dsnlm_i] * fn;
       tmpz += s[0] * fn12[k] * rij_Lsq;
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+      contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+      sink.add(type_slot, n, k, contribution);
 
 
   }
@@ -370,7 +374,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[2] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[5 - (L * L - 1)] +
               2.0 * s[3] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[6 - (L * L - 1)] +
               2.0 * s[4] * (fnp12[k] * rij_Lsq - 2.0 * fn12[k] * rij_L2sq) * blm[7 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+      contribution = 2.0 * Fp * scd_r12[0] * tmpr;
       tmpx +=
                     2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_x[4 - (L * L - 1)] +
                     2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_x[6 - (L * L - 1)] +
@@ -379,7 +383,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[1] * fn12[k] * rij_Lsq * dblm_x[4 - (L * L - 1)] +
               2.0 * s[3] * fn12[k] * rij_Lsq * dblm_x[6 - (L * L - 1)] +
               2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[7 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+      contribution += 2.0 * Fp * scd_r12[1] * tmpx;
       tmpy +=
                     2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_y[5 - (L * L - 1)] +
                     2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_y[6 - (L * L - 1)] +
@@ -388,14 +392,15 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[2] * fn12[k] * rij_Lsq * dblm_y[5 - (L * L - 1)] +
               2.0 * s[3] * fn12[k] * rij_Lsq * dblm_y[6 - (L * L - 1)] +
               2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[7 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+      contribution += 2.0 * Fp * scd_r12[2] * tmpy;
       tmpz +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * fn * dblm_z[3 - (L * L - 1)] +
                     2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_z[4 - (L * L - 1)] +
                     2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_z[5 - (L * L - 1)];
       tmpz +=  s[0] * fn12[k] * rij_Lsq * dblm_z[3 - (L * L - 1)] +
                     2.0 * s[1] * fn12[k] * rij_Lsq * dblm_z[4 - (L * L - 1)] +
                     2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[5 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+      contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+      sink.add(type_slot, n, k, contribution);
 
 
   }
@@ -420,7 +425,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[4] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[12 - (L * L - 1)] +
               2.0 * s[5] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[13 - (L * L - 1)] +
               2.0 * s[6] *  (fnp12[k] * rij_Lsq - 3.0 * fn12[k] * rij_L2sq) * blm[14 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+      contribution = 2.0 * Fp * scd_r12[0] * tmpr;
       tmpx +=
                 2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_x[9 - (L * L - 1)] +
                 2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_x[11 - (L * L - 1)] +
@@ -433,7 +438,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
                 2.0 * s[4] * fn12[k] * rij_Lsq * dblm_x[12 - (L * L - 1)] +
                 2.0 * s[5] * fn12[k] * rij_Lsq * dblm_x[13 - (L * L - 1)] +
                 2.0 * s[6] * fn12[k] * rij_Lsq * dblm_x[14 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+      contribution += 2.0 * Fp * scd_r12[1] * tmpx;
       tmpy +=
                 2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_y[10 - (L * L - 1)] +
                 2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_y[11 - (L * L - 1)] +
@@ -446,7 +451,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
                 2.0 * s[4] * fn12[k] * rij_Lsq * dblm_y[12 - (L * L - 1)] +
                 2.0 * s[5] * fn12[k] * rij_Lsq * dblm_y[13 - (L * L - 1)] +
                 2.0 * s[6] * fn12[k] * rij_Lsq * dblm_y[14 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+      contribution += 2.0 * Fp * scd_r12[2] * tmpy;
       tmpz +=         C3B[8]  * dsnlm_dc[dsnlm_i+8]  * fn * dblm_z[8 - (L * L - 1)] +
                 2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_z[9 - (L * L - 1)] +
                 2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_z[10 - (L * L - 1)] +
@@ -457,7 +462,8 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
                 2.0 * s[2] * fn12[k] * rij_Lsq * dblm_z[10 - (L * L - 1)]+
                 2.0 * s[3] * fn12[k] * rij_Lsq * dblm_z[11 - (L * L - 1)]+
                 2.0 * s[4] * fn12[k] * rij_Lsq * dblm_z[12 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+      contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+      sink.add(type_slot, n, k, contribution);
 
 
   }
@@ -486,7 +492,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[6] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[21 - (L * L - 1)]) +
               2.0 * s[7] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[22 - (L * L - 1)]) +
               2.0 * s[8] * ((fnp12[k] * rij_Lsq - 4.0 * fn12[k] * rij_L2sq) * blm[23 - (L * L - 1)]);
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+      contribution = 2.0 * Fp * scd_r12[0] * tmpr;
       tmpx +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_x[15 - (L * L - 1)] +
               2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_x[16 - (L * L - 1)] +
               2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_x[17 - (L * L - 1)] +
@@ -505,7 +511,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[6] * fn12[k] * rij_Lsq * dblm_x[21 - (L * L - 1)] +
               2.0 * s[7] * fn12[k] * rij_Lsq * dblm_x[22 - (L * L - 1)] +
               2.0 * s[8] * fn12[k] * rij_Lsq * dblm_x[23 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+      contribution += 2.0 * Fp * scd_r12[1] * tmpx;
       tmpy +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_y[15 - (L * L - 1)] +
               2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_y[16 - (L * L - 1)] +
               2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_y[17 - (L * L - 1)] +
@@ -524,7 +530,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[6] * fn12[k] * rij_Lsq * dblm_y[21 - (L * L - 1)] +
               2.0 * s[7] * fn12[k] * rij_Lsq * dblm_y[22 - (L * L - 1)] +
               2.0 * s[8] * fn12[k] * rij_Lsq * dblm_y[23 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+      contribution += 2.0 * Fp * scd_r12[2] * tmpy;
       tmpz +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_z[15 - (L * L - 1)] +
               2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_z[16 - (L * L - 1)] +
               2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_z[17 - (L * L - 1)] +
@@ -543,7 +549,8 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
               2.0 * s[6] * fn12[k] * rij_Lsq * dblm_z[21 - (L * L - 1)] +
               2.0 * s[7] * fn12[k] * rij_Lsq * dblm_z[22 - (L * L - 1)] +
               2.0 * s[8] * fn12[k] * rij_Lsq * dblm_z[23 - (L * L - 1)];
-      sink.add(type_slot, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+      contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+      sink.add(type_slot, n, k, contribution);
 
 
   }
@@ -585,6 +592,7 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
   const int type_slot = c.type_slot;
   const int n = c.n;
   const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  double contribution;
 
   if constexpr (L == 1) {
 
@@ -599,13 +607,14 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
         tmpr +=       C3B[0] * dsnlm_dc[dsnlm_i]   * fnp * blm[0 - (L * L - 1)];
         tmpr += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fnp * blm[1 - (L * L - 1)];
         tmpr += 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fnp * blm[2 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+        contribution = 2.0 * Fp * scd_r12[0] * tmpr;
         tmpx += 2.0 * C3B[1] * dsnlm_dc[dsnlm_i+1] * fn;
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+        contribution += 2.0 * Fp * scd_r12[1] * tmpx;
         tmpy += 2.0 * C3B[2] * dsnlm_dc[dsnlm_i+2] * fn;
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+        contribution += 2.0 * Fp * scd_r12[2] * tmpy;
         tmpz += C3B[0] * dsnlm_dc[dsnlm_i] * fn;
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+        contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+        sink.add(uj, n, k, contribution);
 
 
 
@@ -626,21 +635,22 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
                       2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fnp * blm[5 - (L * L - 1)] +
                       2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fnp * blm[6 - (L * L - 1)] +
                       2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fnp * blm[7 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+        contribution = 2.0 * Fp * scd_r12[0] * tmpr;
         tmpx +=
                       2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_x[4 - (L * L - 1)] +
                       2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_x[6 - (L * L - 1)] +
                       2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_x[7 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+        contribution += 2.0 * Fp * scd_r12[1] * tmpx;
         tmpy +=
                       2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_y[5 - (L * L - 1)] +
                       2.0 * C3B[6] * dsnlm_dc[dsnlm_i+6] * fn * dblm_y[6 - (L * L - 1)] +
                       2.0 * C3B[7] * dsnlm_dc[dsnlm_i+7] * fn * dblm_y[7 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+        contribution += 2.0 * Fp * scd_r12[2] * tmpy;
         tmpz +=  C3B[3] * dsnlm_dc[dsnlm_i+3] * fn * dblm_z[3 - (L * L - 1)] +
                       2.0 * C3B[4] * dsnlm_dc[dsnlm_i+4] * fn * dblm_z[4 - (L * L - 1)] +
                       2.0 * C3B[5] * dsnlm_dc[dsnlm_i+5] * fn * dblm_z[5 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+        contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+        sink.add(uj, n, k, contribution);
 
 
 
@@ -662,27 +672,28 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
                   2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] *  fnp * blm[12 - (L * L - 1)] +
                   2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] *  fnp * blm[13 - (L * L - 1)] +
                   2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] *  fnp * blm[14 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+        contribution = 2.0 * Fp * scd_r12[0] * tmpr;
         tmpx +=
                   2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_x[9 - (L * L - 1)] +
                   2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_x[11 - (L * L - 1)] +
                   2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_x[12 - (L * L - 1)] +
                   2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_x[13 - (L * L - 1)] +
                   2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_x[14 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+        contribution += 2.0 * Fp * scd_r12[1] * tmpx;
         tmpy +=
                   2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_y[10 - (L * L - 1)] +
                   2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_y[11 - (L * L - 1)] +
                   2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_y[12 - (L * L - 1)] +
                   2.0 * C3B[13] * dsnlm_dc[dsnlm_i+13] * fn * dblm_y[13 - (L * L - 1)] +
                   2.0 * C3B[14] * dsnlm_dc[dsnlm_i+14] * fn * dblm_y[14 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+        contribution += 2.0 * Fp * scd_r12[2] * tmpy;
         tmpz +=         C3B[8]  * dsnlm_dc[dsnlm_i+8]  * fn * dblm_z[8 - (L * L - 1)] +
                   2.0 * C3B[9]  * dsnlm_dc[dsnlm_i+9]  * fn * dblm_z[9 - (L * L - 1)] +
                   2.0 * C3B[10] * dsnlm_dc[dsnlm_i+10] * fn * dblm_z[10 - (L * L - 1)] +
                   2.0 * C3B[11] * dsnlm_dc[dsnlm_i+11] * fn * dblm_z[11 - (L * L - 1)] +
                   2.0 * C3B[12] * dsnlm_dc[dsnlm_i+12] * fn * dblm_z[12 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+        contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+        sink.add(uj, n, k, contribution);
 
 
 
@@ -706,7 +717,7 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
                 2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] *  fnp * blm[21 - (L * L - 1)] +
                 2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] *  fnp * blm[22 - (L * L - 1)] +
                 2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] *  fnp * blm[23 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[0] * tmpr);
+        contribution = 2.0 * Fp * scd_r12[0] * tmpr;
         tmpx +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_x[15 - (L * L - 1)] +
                 2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_x[16 - (L * L - 1)] +
                 2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_x[17 - (L * L - 1)] +
@@ -716,7 +727,7 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
                 2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_x[21 - (L * L - 1)] +
                 2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_x[22 - (L * L - 1)] +
                 2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_x[23 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[1] * tmpx);
+        contribution += 2.0 * Fp * scd_r12[1] * tmpx;
         tmpy +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_y[15 - (L * L - 1)] +
                 2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_y[16 - (L * L - 1)] +
                 2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_y[17 - (L * L - 1)] +
@@ -726,7 +737,7 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
                 2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_y[21 - (L * L - 1)] +
                 2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_y[22 - (L * L - 1)] +
                 2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_y[23 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[2] * tmpy);
+        contribution += 2.0 * Fp * scd_r12[2] * tmpy;
         tmpz +=       C3B[15] * dsnlm_dc[dsnlm_i+15] * fn * dblm_z[15 - (L * L - 1)] +
                 2.0 * C3B[16] * dsnlm_dc[dsnlm_i+16] * fn * dblm_z[16 - (L * L - 1)] +
                 2.0 * C3B[17] * dsnlm_dc[dsnlm_i+17] * fn * dblm_z[17 - (L * L - 1)] +
@@ -736,7 +747,8 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
                 2.0 * C3B[21] * dsnlm_dc[dsnlm_i+21] * fn * dblm_z[21 - (L * L - 1)] +
                 2.0 * C3B[22] * dsnlm_dc[dsnlm_i+22] * fn * dblm_z[22 - (L * L - 1)] +
                 2.0 * C3B[23] * dsnlm_dc[dsnlm_i+23] * fn * dblm_z[23 - (L * L - 1)];
-        sink.add(uj, n, k, 2.0 * Fp * scd_r12[3] * tmpz);
+        contribution += 2.0 * Fp * scd_r12[3] * tmpz;
+        sink.add(uj, n, k, contribution);
 
 
 
@@ -788,6 +800,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
   const int type_slot = c.type_slot;
   const int n = c.n;
   const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  double contribution;
 
   if constexpr (CROSS) {
     double dnlm_dc[5] = {0.0};
@@ -842,7 +855,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
             dnlm_dc[1] * dnlm_drij[2] * s[4] + s[1] * dnlm_drij[2] * dnlm_dc[4] +
             dnlm_dc[1] * s[2] * dnlm_drij[4] + s[1] * dnlm_dc[2] * dnlm_drij[4]
           );
-          sink.add(uj, n, k, Fp * scd_r12[0] * tmpr);
+          contribution = Fp * scd_r12[0] * tmpr;
         }
         {
           double tmpx = 0.0;
@@ -881,7 +894,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
             dnlm_dc[1] * dnlm_dxij[2] * s[4] + s[1] * dnlm_dxij[2] * dnlm_dc[4] +
             dnlm_dc[1] * s[2] * dnlm_dxij[4] + s[1] * dnlm_dc[2] * dnlm_dxij[4]
           );
-          sink.add(uj, n, k, Fp * scd_r12[1] * tmpx);
+          contribution += Fp * scd_r12[1] * tmpx;
         }
         {
           double tmpy = 0.0;
@@ -920,7 +933,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
             dnlm_dc[1] * dnlm_dyij[2] * s[4] + s[1] * dnlm_dyij[2] * dnlm_dc[4] +
             dnlm_dc[1] * s[2] * dnlm_dyij[4] + s[1] * dnlm_dc[2] * dnlm_dyij[4]
           );
-          sink.add(uj, n, k, Fp * scd_r12[2] * tmpy);
+          contribution += Fp * scd_r12[2] * tmpy;
         }
         {
           double tmpz = 0.0;
@@ -959,7 +972,8 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
             dnlm_dc[1] * dnlm_dzij[2] * s[4] + s[1] * dnlm_dzij[2] * dnlm_dc[4] +
             dnlm_dc[1] * s[2] * dnlm_dzij[4] + s[1] * dnlm_dc[2] * dnlm_dzij[4]
           );
-          sink.add(uj, n, k, Fp * scd_r12[3] * tmpz);
+          contribution += Fp * scd_r12[3] * tmpz;
+          sink.add(uj, n, k, contribution);
         }
 
 
@@ -1025,7 +1039,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
           dnlm_dc[1] * dnlm_drij[2] * s[4] + s[1] * dnlm_drij_dc[2] * s[4] + s[1] * dnlm_drij[2] * dnlm_dc[4] +
           dnlm_dc[1] * s[2] * dnlm_drij[4] + s[1] * dnlm_dc[2] * dnlm_drij[4] + s[1] * s[2] * dnlm_drij_dc[4]
         );
-        sink.add(type_slot, n, k, Fp * scd_r12[0] * tmpr);
+        contribution = Fp * scd_r12[0] * tmpr;
       }
       {
         double tmpx = 0.0;
@@ -1070,7 +1084,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
           dnlm_dc[1] * dnlm_dxij[2] * s[4] + s[1] * dnlm_dxij_dc[2] * s[4] + s[1] * dnlm_dxij[2] * dnlm_dc[4] +
           dnlm_dc[1] * s[2] * dnlm_dxij[4] + s[1] * dnlm_dc[2] * dnlm_dxij[4] + s[1] * s[2] * dnlm_dxij_dc[4]
         );
-        sink.add(type_slot, n, k, Fp * scd_r12[1] * tmpx);
+        contribution += Fp * scd_r12[1] * tmpx;
       }
       {
         double tmpy = 0.0;
@@ -1115,7 +1129,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
           dnlm_dc[1] * dnlm_dyij[2] * s[4] + s[1] * dnlm_dyij_dc[2] * s[4] + s[1] * dnlm_dyij[2] * dnlm_dc[4] +
           dnlm_dc[1] * s[2] * dnlm_dyij[4] + s[1] * dnlm_dc[2] * dnlm_dyij[4] + s[1] * s[2] * dnlm_dyij_dc[4]
         );
-        sink.add(type_slot, n, k, Fp * scd_r12[2] * tmpy);
+        contribution += Fp * scd_r12[2] * tmpy;
       }
       {
         double tmpz = 0.0;
@@ -1160,7 +1174,8 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
           dnlm_dc[1] * dnlm_dzij[2] * s[4] + s[1] * dnlm_dzij_dc[2] * s[4] + s[1] * dnlm_dzij[2] * dnlm_dc[4] +
           dnlm_dc[1] * s[2] * dnlm_dzij[4] + s[1] * dnlm_dc[2] * dnlm_dzij[4] + s[1] * s[2] * dnlm_dzij_dc[4]
         );
-        sink.add(type_slot, n, k, Fp * scd_r12[3] * tmpz);
+        contribution += Fp * scd_r12[3] * tmpz;
+        sink.add(type_slot, n, k, contribution);
       }
 
 
@@ -1214,6 +1229,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
   const int type_slot = c.type_slot;
   const int n = c.n;
   const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  double contribution;
 
   if constexpr (CROSS) {
     double dnlm_dc[3] = {0.0};
@@ -1250,7 +1266,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
             dnlm_dc[0] * dnlm_drij[0] * (s2[1] + s2[2]) +
             s[0] * dnlm_drij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
           tmpr += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-          sink.add(uj, n, k, Fp * scd_r12[0] * tmpr);
+          contribution = Fp * scd_r12[0] * tmpr;
         }
         {
           double tmpx = 0.0;
@@ -1266,7 +1282,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
             dnlm_dc[0] * dnlm_dxij[0] * (s2[1] + s2[2]) +
             s[0] * dnlm_dxij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
           tmpx += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-          sink.add(uj, n, k, Fp * scd_r12[1] * tmpx);
+          contribution += Fp * scd_r12[1] * tmpx;
         }
         {
           double tmpy = 0.0;
@@ -1282,7 +1298,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
             dnlm_dc[0] * dnlm_dyij[0] * (s2[1] + s2[2]) +
             s[0] * dnlm_dyij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
           tmpy += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-          sink.add(uj, n, k, Fp * scd_r12[2] * tmpy);
+          contribution += Fp * scd_r12[2] * tmpy;
         }
         {
           double tmpz = 0.0;
@@ -1298,7 +1314,8 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
             dnlm_dc[0] * dnlm_dzij[0] * (s2[1] + s2[2]) +
             s[0] * dnlm_dzij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
           tmpz += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-          sink.add(uj, n, k, Fp * scd_r12[3] * tmpz);
+          contribution += Fp * scd_r12[3] * tmpz;
+          sink.add(uj, n, k, contribution);
         }
 
 
@@ -1338,7 +1355,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
           dnlm_dc[0] * dnlm_drij[0] * (s2[1] + s2[2]) + s[0] * dnlm_drij_dc[0] * (s2[1] + s2[2]) +
           s[0] * dnlm_drij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
         tmpr += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(type_slot, n, k, Fp * scd_r12[0] * tmpr);
+        contribution = Fp * scd_r12[0] * tmpr;
       }
       {
         double tmpx = 0.0;
@@ -1356,7 +1373,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
           dnlm_dc[0] * dnlm_dxij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dxij_dc[0] * (s2[1] + s2[2]) +
           s[0] * dnlm_dxij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
         tmpx += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(type_slot, n, k, Fp * scd_r12[1] * tmpx);
+        contribution += Fp * scd_r12[1] * tmpx;
       }
       {
         double tmpy = 0.0;
@@ -1374,7 +1391,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
           dnlm_dc[0] * dnlm_dyij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dyij_dc[0] * (s2[1] + s2[2]) +
           s[0] * dnlm_dyij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
         tmpy += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(type_slot, n, k, Fp * scd_r12[2] * tmpy);
+        contribution += Fp * scd_r12[2] * tmpy;
       }
       {
         double tmpz = 0.0;
@@ -1392,7 +1409,8 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
           dnlm_dc[0] * dnlm_dzij[0] * (s2[1] + s2[2]) + s[0] * dnlm_dzij_dc[0] * (s2[1] + s2[2]) +
           s[0] * dnlm_dzij[0] * ds1s2_c + 2.0 * s[0] * dnlm_dc[0] * ds1s2 + s2[0] * d_tmp);
         tmpz += 4.0 * C5B[2] * (ds1s2_c * ds1s2 + (s2[1] + s2[2]) * d_tmp);
-        sink.add(type_slot, n, k, Fp * scd_r12[3] * tmpz);
+        contribution += Fp * scd_r12[3] * tmpz;
+        sink.add(type_slot, n, k, contribution);
       }
 
 

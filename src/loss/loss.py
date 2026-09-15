@@ -164,6 +164,25 @@ def print_l1_l2(model):
     return L1, L2
 
 
+def nep_l1_l2(model):
+    """Compute fresh NEP regularization metrics with batched reductions.
+
+    Preserve print_l1_l2's historical exclusion of the first two parameters
+    (consumed there to obtain dtype/device). Autograd remains enabled because
+    these metrics can also contribute to the training loss. Concatenation
+    changes reduction order, so floating-point roundoff may differ slightly.
+    """
+    params = list(model.parameters())
+    if len(params) <= 2:
+        return print_l1_l2(model)
+    dtype, device = params[0].dtype, params[1].device
+    counted = params[2:]
+    if any(p.dtype != dtype or p.device != device for p in counted):
+        return print_l1_l2(model)
+    flat = torch.cat([p.reshape(-1) for p in counted])
+    return flat.abs().sum() / flat.numel(), flat.square().sum() / flat.numel()
+
+
 def calc_loss(input_param:InputParam, start_lr, real_lr, stat, *args):
 
     if stat == 1:   

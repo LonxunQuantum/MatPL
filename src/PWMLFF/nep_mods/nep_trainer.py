@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from src.loss.loss import adjust_lr, get_loss, print_l1_l2
+from src.loss.loss import adjust_lr, get_loss, nep_l1_l2
 from src.utils.learning_rate import (
     calculate_loss_weight_progress,
     calculate_warmup_lr,
@@ -497,7 +497,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         learning_rate.update(optimizer_lr)
 
         loss_val = loss
-        L1, L2 = print_l1_l2(model)
+        L1, L2 = nep_l1_l2(model)
         if args.optimizer_param.lambda_2:
             loss_val += L2
 
@@ -691,7 +691,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
         # Force_predict = Force_label
         # Ei_predict = Ei_label
         loss_F_val = criterion(Force_predict, Force_label)
-        L1, L2 = print_l1_l2(model)
+        L1, L2 = nep_l1_l2(model)
 
         # divide by natoms
         loss_Etot_val = criterion(Etot_predict, Etot_label)
@@ -769,7 +769,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
 def valid(val_loader, model, criterion, device, args:InputParam):
     def run_validate(loader, base_progress=0):
         end = time.time()
-        L1, L2 = print_l1_l2(model)
+        L1, L2 = nep_l1_l2(model)
         for i, sample in enumerate(val_loader):
             sample = {key: value.to(device) for key, value in sample.items()}
             FFAtomType = torch.from_numpy(np.array(module.atom_type)).to(device=device, dtype=sample["atom_type_map"].dtype)

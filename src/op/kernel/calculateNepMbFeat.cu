@@ -2,6 +2,7 @@
 #include "./utilities/nep_utilities.cuh"
 #include "./utilities/nep_feature.cuh"
 #include <iostream>
+#include <c10/cuda/CUDAStream.h>
 
 void launch_calculate_nepmbfeat(
     const double * coeff3,
@@ -25,6 +26,8 @@ void launch_calculate_nepmbfeat(
     const int device_id
 ){
     cudaSetDevice(device_id);
+    if (natoms == 0) return;
+    const auto stream = c10::cuda::getCurrentCUDAStream(device_id);
     const int BLOCK_SIZE = 64;
     const int N = natoms;// N = natoms * batch_size
     const int grid_size = (N - 1) / BLOCK_SIZE + 1;
@@ -34,7 +37,7 @@ void launch_calculate_nepmbfeat(
     if (lmax_3 > 0) feat_3b_num += n_max_3b * lmax_3;
     if (lmax_4 > 0) feat_3b_num += n_max_3b;
     if (lmax_5 > 0) feat_3b_num += n_max_3b;
-    find_mb_descriptor<<<grid_size, BLOCK_SIZE>>>(
+    find_mb_descriptor<<<grid_size, BLOCK_SIZE, 0, stream.stream()>>>(
         N,
         n_types,
         num_types_sq,

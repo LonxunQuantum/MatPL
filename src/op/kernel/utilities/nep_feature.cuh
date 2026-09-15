@@ -495,7 +495,7 @@ static __global__ void find_angular_gard(
   const double * grad_output,
   const double* g_sum_fxyz,
   double* dsnlm_dc,
-  double* dfeat_c3,
+  double* grad_coeff3,
   double* dfeat_drij,
   double* grad_d12_angular
   )
@@ -518,7 +518,7 @@ static __global__ void find_angular_gard(
   if (tid == 0) {
     int de_start = n1 * (feat_3b_nums + feat_2b_nums);
     int dd = 0;
-    
+
     // 加载Fp到共享内存
     for (int nn = 0; nn < n_max_angular; ++nn) {
       for (int ll = 0; ll < L_max3; ++ll) {
@@ -526,198 +526,162 @@ static __global__ void find_angular_gard(
         dd++;
       }
     }
-    
+
     if (L_max4 > 0) {
       for (int ll = 0; ll < n_max_angular; ++ll) {
         s_Fp[b3_nums + ll] = grad_output[de_start + feat_2b_nums + b3_nums + ll];
       }
     }
-    
+
     if (L_max5 > 0) {
       for (int ll = 0; ll < n_max_angular; ++ll) {
         s_Fp[b3_nums + n_max_angular + ll] = grad_output[de_start + feat_2b_nums + b3_nums + n_max_angular + ll];
       }
     }
   }
-    
+
   // 所有线程协作加载sum_fxyz
   for (int d = tid; d < sum_fxyz_size; d += blockDim.x) {
     s_sum_fxyz[d] = g_sum_fxyz[g_sum_start + d];
   }
-  
+
   __syncthreads(); // 确保共享内存加载完成
-  
-  // 每个线程处理一个近邻
-  if (tid >= neigh_num) return;
-  
-  int i1 = tid;  // 近邻索引
-  int neigh_start_idx = n1 * neigh_num;
-  int n2 = g_NL_radial[neigh_start_idx + i1];
-  if (n2 < 0) return;
-  // if (n1 == 0 or n1 == 10) {
-  //   for (int ll = 0; ll < b3_nums + 2*n_max_angular; ++ll) {
-  //       printf("Fp n1 %d j %d [%d]= %f\n", n1, i1, ll, s_Fp[ll]);
-  //     }
-  //   for (int d = 0; d < sum_fxyz_size; ++d) {
-  //     printf("sum_fxyz n1 %d j %d [%d]= %f\n",n1, i1, d, s_sum_fxyz[d]);
-  //   }
-  // }
 
-  int t1 = g_type[n1];
-  int t2 = g_type[n2];
-  
-  // 计算各个起始索引
-  int r12_start_idx = n1 * neigh_num * 4;
-  int rij_idx = r12_start_idx + i1 * 4;
-  double d12 = g_d12_radial[rij_idx];
-  int dc_start_idx = n1 * num_types * n_max_angular * basis_size_angular;
-  if (d12 > rc_angular) return;
-  
-  double r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
-  double f12[4] = {0.0};
-  
-  // 计算径向函数
-  double fc12, fcp12;
-  find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
-  
-  double fn12[MAX_NUM_N];
-  double fnp12[MAX_NUM_N];
-  find_fn_and_fnp(basis_size_angular, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
-  
-  // 计算球谐函数相关项
-  double s[NUM_OF_ABC] = {0.0};
-  accumulate_blm_rij(d12, r12[0], r12[1], r12[2], s);
-  
-  int c3_start_idx = t1 * num_types * n_max_angular * basis_size_angular;
-  int c_I_J_idx = c3_start_idx + t2 * n_max_angular * basis_size_angular;
-  int drij_idx = n1 * neigh_num * feat_3b_nums * 4 + i1 * feat_3b_nums * 4;
-  
-  // 遍历所有n
-  for (int n = 0; n < n_max_angular; ++n) {
-    double gn12 = 0.0;
-    double gnp12 = 0.0;
-    
-    // 计算gn12和gnp12
-    for (int k = 0; k < basis_size_angular; ++k) {
-      int c_index = c_I_J_idx + n * basis_size_angular + k;
-      gn12 += fn12[k] * coeff3[c_index];
-      gnp12 += fnp12[k] * coeff3[c_index];
-    }
-    
-    double f12d[MAX_LMAX * 4] = {0.0};
-    double dfeat_c3_base[MAX_NUM_N] = {0.0}; //临时存储cfeat_c3 对应nbase下的梯度
-    // 根据L_max选择不同的计算函数
-    if (L_max5 > 0) {
-      accumulate_f12_with_5body(
-        n, d12, r12, gn12, gnp12, s_Fp, s_sum_fxyz,
-        s, f12, f12d, dfeat_c3_base, fn12, fnp12, 
-        t2, num_types, L_max3, 
-        n_max_angular, basis_size_angular, dc_start_idx, n1, i1);
+  // A fixed-size block also handles neighbor lists larger than one CTA.
+  for (int i1 = tid; i1 < neigh_num; i1 += blockDim.x) {
+    int neigh_start_idx = n1 * neigh_num;
+    int n2 = g_NL_radial[neigh_start_idx + i1];
+    if (n2 < 0) continue;
 
-      // 将f12d复制到dfeat_drij
-      // 3-body部分
-      for (int l_idx = 0; l_idx < L_max3; ++l_idx) {
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 0] = f12d[l_idx * 4 + 3];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 1] = f12d[l_idx * 4 + 0];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 2] = f12d[l_idx * 4 + 1];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 3] = f12d[l_idx * 4 + 2];
+    int t1 = g_type[n1];
+    int t2 = g_type[n2];
+
+    // 计算各个起始索引
+    int r12_start_idx = n1 * neigh_num * 4;
+    int rij_idx = r12_start_idx + i1 * 4;
+    double d12 = g_d12_radial[rij_idx];
+    int dc_start_idx = n1 * num_types * n_max_angular * basis_size_angular;
+    if (d12 > rc_angular) continue;
+
+    double r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
+    double f12[4] = {0.0};
+
+    // 计算径向函数
+    double fc12, fcp12;
+    find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
+
+    double fn12[MAX_NUM_N];
+    double fnp12[MAX_NUM_N];
+    find_fn_and_fnp(basis_size_angular, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
+
+    // 计算球谐函数相关项
+    double s[NUM_OF_ABC] = {0.0};
+    if (grad_coeff3 != nullptr || dsnlm_dc != nullptr) {
+      accumulate_blm_rij(d12, r12[0], r12[1], r12[2], s);
+    }
+    // The helpers use this bound only for the coefficient-gradient contraction.
+    const int grad_basis_size = grad_coeff3 != nullptr ? basis_size_angular : 0;
+
+    int c3_start_idx = t1 * num_types * n_max_angular * basis_size_angular;
+    int c_I_J_idx = c3_start_idx + t2 * n_max_angular * basis_size_angular;
+    int drij_idx = n1 * neigh_num * feat_3b_nums * 4 + i1 * feat_3b_nums * 4;
+
+    // 遍历所有n
+    for (int n = 0; n < n_max_angular; ++n) {
+      double gn12 = 0.0;
+      double gnp12 = 0.0;
+
+      // 计算gn12和gnp12
+      for (int k = 0; k < basis_size_angular; ++k) {
+        int c_index = c_I_J_idx + n * basis_size_angular + k;
+        gn12 += fn12[k] * coeff3[c_index];
+        gnp12 += fnp12[k] * coeff3[c_index];
       }
-      
-      // 4-body部分
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 0] = f12d[L_max3 * 4 + 3];
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 1] = f12d[L_max3 * 4 + 0];
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 2] = f12d[L_max3 * 4 + 1];
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 3] = f12d[L_max3 * 4 + 2];
-      
-      // 5-body部分
-      dfeat_drij[drij_idx + (L_max3+1) * n_max_angular * 4 + n * 4 + 0] = f12d[(L_max3+1) * 4 + 3];
-      dfeat_drij[drij_idx + (L_max3+1) * n_max_angular * 4 + n * 4 + 1] = f12d[(L_max3+1) * 4 + 0];
-      dfeat_drij[drij_idx + (L_max3+1) * n_max_angular * 4 + n * 4 + 2] = f12d[(L_max3+1) * 4 + 1];
-      dfeat_drij[drij_idx + (L_max3+1) * n_max_angular * 4 + n * 4 + 3] = f12d[(L_max3+1) * 4 + 2];
-    } 
-    else if (L_max4 > 0) {
-      accumulate_f12_with_4body(
-        n, d12, r12, gn12, gnp12, s_Fp, s_sum_fxyz,
-        s, f12, f12d, dfeat_c3_base, fn12, fnp12, 
-        t2, num_types, L_max3, 
-        n_max_angular, basis_size_angular, dc_start_idx, n1, i1);
-      
-      // 3-body部分
-      for (int l_idx = 0; l_idx < L_max3; ++l_idx) {
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 0] = f12d[l_idx * 4 + 3];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 1] = f12d[l_idx * 4 + 0];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 2] = f12d[l_idx * 4 + 1];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 3] = f12d[l_idx * 4 + 2];
+
+      double f12d[MAX_LMAX * 4] = {0.0};
+      double dfeat_c3_base[MAX_NUM_N] = {0.0}; //临时存储cfeat_c3 对应nbase下的梯度
+      if (L_max5 > 0) {
+        accumulate_f12_with_5body(
+          n, d12, r12, gn12, gnp12, s_Fp, s_sum_fxyz,
+          s, f12, f12d, dfeat_c3_base, fn12, fnp12,
+          t2, num_types, L_max3,
+          n_max_angular, grad_basis_size, dc_start_idx, n1, i1);
+      } else if (L_max4 > 0) {
+        accumulate_f12_with_4body(
+          n, d12, r12, gn12, gnp12, s_Fp, s_sum_fxyz,
+          s, f12, f12d, dfeat_c3_base, fn12, fnp12,
+          t2, num_types, L_max3,
+          n_max_angular, grad_basis_size, dc_start_idx, n1, i1);
+      } else {
+        accumulate_f12(
+          n, d12, r12, gn12, gnp12, s_Fp, s_sum_fxyz,
+          s, f12, f12d, dfeat_c3_base, fn12, fnp12,
+          t2, num_types, L_max3,
+          n_max_angular, grad_basis_size, dc_start_idx, n1, i1);
       }
-      
-      // 4-body部分
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 0] = f12d[L_max3 * 4 + 3];
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 1] = f12d[L_max3 * 4 + 0];
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 2] = f12d[L_max3 * 4 + 1];
-      dfeat_drij[drij_idx + L_max3 * n_max_angular * 4 + n * 4 + 3] = f12d[L_max3 * 4 + 2];
-    } 
-    else {
-      accumulate_f12(
-        n, d12, r12, gn12, gnp12, s_Fp, s_sum_fxyz,
-        s, f12, f12d, dfeat_c3_base, fn12, fnp12, 
-        t2, num_types, L_max3, 
-        n_max_angular, basis_size_angular, dc_start_idx, n1, i1);
-      
-      // 3-body部分
-      for (int l_idx = 0; l_idx < L_max3; ++l_idx) {
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 0] = f12d[l_idx * 4 + 3];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 1] = f12d[l_idx * 4 + 0];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 2] = f12d[l_idx * 4 + 1];
-        dfeat_drij[drij_idx + l_idx * n_max_angular * 4 + n * 4 + 3] = f12d[l_idx * 4 + 2];
+
+      if (dfeat_drij != nullptr) {
+        const int angular_channels = L_max3 + (L_max5 > 0 ? 2 : (L_max4 > 0 ? 1 : 0));
+        for (int l_idx = 0; l_idx < angular_channels; ++l_idx) {
+          const int out = drij_idx + l_idx * n_max_angular * 4 + n * 4;
+          dfeat_drij[out + 0] = f12d[l_idx * 4 + 3];
+          dfeat_drij[out + 1] = f12d[l_idx * 4 + 0];
+          dfeat_drij[out + 2] = f12d[l_idx * 4 + 1];
+          dfeat_drij[out + 3] = f12d[l_idx * 4 + 2];
+        }
+      }
+
+      // Accumulate directly into [center_type, neighbor_type, n, basis].
+      // The caller zero-initializes this output on the current CUDA stream.
+      for (int baseid = 0; baseid < grad_basis_size; ++baseid) {
+        const int dc_id = c_I_J_idx + n * basis_size_angular + baseid;
+        atomicAdd(&grad_coeff3[dc_id], dfeat_c3_base[baseid]);
+      }
+      // 对dsnlm_dc进行累加（只需要在n==0时）
+      if (dsnlm_dc != nullptr && n == 0) {
+        int dsnlm_dc_idx = n1 * num_types * basis_size_angular * NUM_OF_ABC +
+                          t2 * basis_size_angular * NUM_OF_ABC;
+
+        // 使用原子操作确保线程安全（多个相同类型的近邻会更新同一位置）
+        for (int kk = 0; kk < basis_size_angular; kk++) {
+          int dsnlm_id = dsnlm_dc_idx + kk * NUM_OF_ABC;
+          double fn_val = fn12[kk];
+
+          // 使用原子加法
+          atomicAdd(&dsnlm_dc[dsnlm_id + 0], s[0] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 1], s[1] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 2], s[2] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 3], s[3] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 4], s[4] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 5], s[5] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 6], s[6] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 7], s[7] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 8], s[8] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 9], s[9] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 10], s[10] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 11], s[11] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 12], s[12] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 13], s[13] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 14], s[14] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 15], s[15] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 16], s[16] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 17], s[17] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 18], s[18] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 19], s[19] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 20], s[20] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 21], s[21] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 22], s[22] * fn_val);
+          atomicAdd(&dsnlm_dc[dsnlm_id + 23], s[23] * fn_val);
+        }
       }
     }
-    // copy dfeat_c3_base to dfeat_c3 with atomicadd
-    for (int baseid = 0; baseid < basis_size_angular; baseid++){
-      int dc_id = dc_start_idx + t2 * n_max_angular * basis_size_angular + n*basis_size_angular + baseid;
-      atomicAdd(&dfeat_c3[dc_id], dfeat_c3_base[baseid]);
-    }
-    // 对dsnlm_dc进行累加（只需要在n==0时）
-    if (dsnlm_dc != nullptr && n == 0) {
-      int dsnlm_dc_idx = n1 * num_types * basis_size_angular * NUM_OF_ABC + 
-                        t2 * basis_size_angular * NUM_OF_ABC;
-      
-      // 使用原子操作确保线程安全（多个相同类型的近邻会更新同一位置）
-      for (int kk = 0; kk < basis_size_angular; kk++) {
-        int dsnlm_id = dsnlm_dc_idx + kk * NUM_OF_ABC;
-        double fn_val = fn12[kk];
-        
-        // 使用原子加法
-        atomicAdd(&dsnlm_dc[dsnlm_id + 0], s[0] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 1], s[1] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 2], s[2] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 3], s[3] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 4], s[4] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 5], s[5] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 6], s[6] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 7], s[7] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 8], s[8] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 9], s[9] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 10], s[10] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 11], s[11] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 12], s[12] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 13], s[13] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 14], s[14] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 15], s[15] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 16], s[16] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 17], s[17] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 18], s[18] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 19], s[19] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 20], s[20] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 21], s[21] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 22], s[22] * fn_val);
-        atomicAdd(&dsnlm_dc[dsnlm_id + 23], s[23] * fn_val);
-      }
+
+    // Each neighbor slot has a unique writer, including across stride iterations.
+    if (grad_d12_angular != nullptr) {
+      grad_d12_angular[rij_idx]   = f12[3];
+      grad_d12_angular[rij_idx+1] = f12[0];
+      grad_d12_angular[rij_idx+2] = f12[1];
+      grad_d12_angular[rij_idx+3] = f12[2];
     }
   }
-  
-  // 将f12写入grad_d12_angular（不需要原子操作，每个近邻位置唯一）
-  grad_d12_angular[rij_idx]   = f12[3];
-  grad_d12_angular[rij_idx+1] = f12[0];
-  grad_d12_angular[rij_idx+2] = f12[1];
-  grad_d12_angular[rij_idx+3] = f12[2];
 }

@@ -1,5 +1,7 @@
 #include "./utilities/nep_utilities.cuh"
 #include <iostream>
+#include <c10/cuda/CUDAStream.h>
+#include "./utilities/error.cuh"
 
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
 #else
@@ -17,63 +19,25 @@ __device__ double atomicAdd(double* address, double val) {
 }
 #endif
 
-__global__ void dfeat_2c_calc(
-            const double * grad_output,
-            const double * dfeat_c2,
-            const int64_t* atom_map,
-            double * grad_coeff2,
-            int64_t atoms,
-            int64_t n_max,
-            int64_t n_base,
-            int64_t n_types,
-            int64_t n_types_sq,
-            int64_t multi_feat_num)
-{  
-    const uint atom_idx = blockIdx.x;
-    const uint n_type_idx = threadIdx.x;
-    const uint n_max_idx = threadIdx.y;
-    const uint n_base_idx = threadIdx.z;
-    if (atom_idx >= atoms || n_max_idx >= n_max ||
-    n_type_idx >= n_types || n_base_idx >= n_base) return;
-    const uint atom_type = atom_map[atom_idx];  // 获取原子类型
-    // if (n_type_idx != atom_type) return; // 只累加对应的类型
-    const uint A_idx = atom_idx * (n_max + multi_feat_num) + n_max_idx;
-    const uint B_idx = atom_idx * n_types * n_base + n_type_idx * n_base + n_base_idx;
-    const uint C_idx = atom_type * n_types * n_max * n_base + n_type_idx * n_max * n_base + n_max_idx * n_base + n_base_idx;
-    
-    // 将 A 和 B 的元素相乘并累加到 C 中
-    atomicAdd(grad_coeff2+C_idx, grad_output[A_idx] * dfeat_c2[B_idx]);
-}
-
-__global__ void dfeat_2c_calc_large(
-            const double * grad_output,
-            const double * dfeat_c2,
-            const int64_t* atom_map,
-            double * grad_coeff2,
-            int64_t natoms,
-            int64_t n_max,
-            int64_t n_base,
-            int64_t n_types,
-            int64_t n_types_sq,
-            int64_t multi_feat_num)
+// Adjacent lanes consume adjacent basis/type values for one center atom.
+__global__ void dfeat_2c_calc_flat(
+    const double* grad_output, const double* dfeat_c2,
+    const int64_t* atom_map, double* grad_coeff2,
+    int64_t natoms, int64_t n_max, int64_t n_base,
+    int64_t n_types, int64_t multi_feat_num)
 {
-    int global_atom_index = blockIdx.x * blockDim.x + threadIdx.x;
-    // 计算批次和原子索引
-    int atom_idx = global_atom_index;
-    if (atom_idx >= natoms) return;
-    const uint type_i = atom_map[atom_idx];
-    uint A_idx = 0;
-    uint B_idx_start = atom_idx * n_types * n_base;
-    uint C_idx_start = type_i * n_types * n_max * n_base;
-    uint C_idx = 0;
-    for (int n = 0; n < n_max; n++) {
-        A_idx = atom_idx * (n_max + multi_feat_num) + n;
-        for (int j = 0; j < n_types; j++) {
-            for (int k = 0; k < n_base; k++) {
-                C_idx = C_idx_start + j * n_max * n_base + n * n_base + k;
-                atomicAdd(grad_coeff2 + C_idx, grad_output[A_idx] * dfeat_c2[B_idx_start + j * n_base + k]);
-            }
-        }
+    const int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= natoms * n_types * n_base) return;
+    const double basis_sum = dfeat_c2[index];
+    // Most element types are absent from a center's neighbor list.
+    if (basis_sum == 0.0) return;
+    const int64_t atom = index / (n_types * n_base);
+    const int64_t type_j = (index / n_base) % n_types;
+    const int64_t basis = index % n_base;
+    const int64_t output = (atom_map[atom] * n_types + type_j) * n_max * n_base + basis;
+    for (int n = 0; n < n_max; ++n) {
+        atomicAdd(grad_coeff2 + output + n * n_base,
+                  grad_output[atom * (n_max + multi_feat_num) + n] * basis_sum);
     }
 }
 
@@ -131,23 +95,23 @@ void launch_calculate_nepfeat_grad(
             const int device
 ) {
     cudaSetDevice(device);
-    int n_types_sq = n_types * n_types;
-    int BLOCK_SIZE = 64; //common value
-    int grid_size = (natoms - 1) / BLOCK_SIZE + 1;//common value
-    
-    if (n_max_2b * n_types * n_base_2b > 1000) {
-        dfeat_2c_calc_large<<<grid_size, BLOCK_SIZE>>>(
-            grad_output, dfeat_c2, atom_map, grad_coeff2, 
-                        natoms, n_max_2b, n_base_2b, n_types, n_types_sq, multi_feat_num);
-    } else {
-        dim3 threads(n_types, n_max_2b, n_base_2b);
-        dim3 blocks(natoms);
-        dfeat_2c_calc<<<blocks, threads>>>(
-                    grad_output, dfeat_c2, atom_map, grad_coeff2, 
-                                natoms, n_max_2b, n_base_2b, n_types, n_types_sq, multi_feat_num);
+    if (natoms == 0) return;
+    constexpr int block_size = 256;
+    const auto stream = c10::cuda::getCurrentCUDAStream(device);
+    if (grad_coeff2 != nullptr) {
+        const int64_t tasks = int64_t(natoms) * n_types * n_base_2b;
+        dfeat_2c_calc_flat<<<(tasks + block_size - 1) / block_size,
+                            block_size, 0, stream.stream()>>>(
+            grad_output, dfeat_c2, atom_map, grad_coeff2,
+            natoms, n_max_2b, n_base_2b, n_types, multi_feat_num);
+        CUDA_CHECK_KERNEL
     }
-    grid_size = (natoms * neigh_num - 1) / BLOCK_SIZE + 1;
-    dfeat_2b_calc<<<grid_size, BLOCK_SIZE>>>(
-            grad_output, dfeat_2b, grad_d12_radial, 
-                        natoms, neigh_num, n_max_2b, multi_feat_num);
+    if (neigh_num > 0) {
+        const int64_t tasks = int64_t(natoms) * neigh_num;
+        dfeat_2b_calc<<<(tasks + block_size - 1) / block_size,
+                        block_size, 0, stream.stream()>>>(
+            grad_output, dfeat_2b, grad_d12_radial,
+            natoms, neigh_num, n_max_2b, multi_feat_num);
+        CUDA_CHECK_KERNEL
+    }
 }

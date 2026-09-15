@@ -131,7 +131,7 @@ def test_radial_secondgrad_coeff_matches_direct_contraction():
             for basis in range(n_base):
                 contraction = (
                     dfeat_2b_noc[atom, neighbor_slot, basis] *
-                    grad_second[atom, neighbor_slot]
+                    grad_second[atom, neighbor_slot, :dfeat_2b_noc.shape[-1]]
                 ).sum()
                 expected[type_i, type_j, :, basis] += de_feat[atom] * contraction
 

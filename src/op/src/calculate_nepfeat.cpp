@@ -35,6 +35,9 @@ void torch_launch_calculate_nepfeat(
         (double *) dfeat_2b_noc.data_ptr(),
         natoms, neigh_num, n_max, n_base, n_types, 
         device_id
+#ifdef MATPL_CUDA_DESCRIPTOR_OPT
+        , dfeat_2b_noc.size(-1)
+#endif
     );
 }
 
@@ -58,7 +61,7 @@ void torch_launch_calculate_nepfeat_grad(const torch::Tensor &grad_output,
         (const double *) dfeat_c2.data_ptr(),
         (const double *) dfeat_2b.data_ptr(),
         (const int64_t *) atom_map.data_ptr(),
-        (double *) grad_coeff2.data_ptr(),
+        grad_coeff2.numel() == 0 ? nullptr : grad_coeff2.data_ptr<double>(),
         (double *) grad_d12_radial.data_ptr(),
         atom_nums, maxneighs, n_max_2b, n_base_2b, n_types, multi_feat_num,
         device_id
@@ -110,6 +113,9 @@ void torch_launch_calculate_nepfeat_secondgradout_c2(
         (const int64_t *) NL_radial.data_ptr(),
         (double *) gradsecond_c2.data_ptr(),
         atom_nums, maxneighs, n_max_2b, n_base_2b, atom_types, multi_feat_num, device_id
+#ifdef MATPL_CUDA_DESCRIPTOR_OPT
+        , dfeat_2b_noc.size(-1)
+#endif
     );
 }
 
@@ -181,10 +187,10 @@ void torch_launch_calculate_nepmbfeat_grad(
         NL.data_ptr<int64_t>(),
         atom_map.data_ptr<int64_t>(),
         sum_fxyz.data_ptr<double>(),
-        grad_coeff3.data_ptr<double>(),
+        grad_coeff3.numel() == 0 ? nullptr : grad_coeff3.data_ptr<double>(),
         grad_d12_3b.data_ptr<double>(),
         dsnlm_dc.numel() == 0 ? nullptr : dsnlm_dc.data_ptr<double>(),
-        dfeat_drij.data_ptr<double>(),
+        dfeat_drij.numel() == 0 ? nullptr : dfeat_drij.data_ptr<double>(),
         rcut_angular,
         atom_nums, 
         maxneighs, 

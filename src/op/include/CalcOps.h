@@ -160,7 +160,7 @@ class CalculateNepFeatGrad : public torch::autograd::Function<CalculateNepFeatGr
             at::Tensor dfeat_2b_noc,
             at::Tensor atom_map,
             int64_t multi_feat_num,
-            int64_t fix_cij);
+            int64_t fix_cij, bool input_grad_only, bool need_context);
 
         static torch::autograd::variable_list backward(
             torch::autograd::AutogradContext *ctx,
@@ -240,7 +240,7 @@ class CalculateNepMbFeatGrad : public torch::autograd::Function<CalculateNepMbFe
             int64_t lmax_4,
             int64_t lmax_5,
             double rcut_angluar,
-            int64_t fix_cij
+            int64_t fix_cij, bool input_grad_only, bool need_context
             );
 
         static torch::autograd::variable_list backward(
