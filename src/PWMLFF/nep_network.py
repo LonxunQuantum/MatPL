@@ -1,5 +1,6 @@
 import os
 import sys
+import importlib
 import pathlib
 import random
 import glob
@@ -335,7 +336,10 @@ def _get_fragment_charge_rmse_and_label(image, charge_predict):
 def _init_nep_txt_calculator(nep_txt_path, device_type="cpu", gpu_id=0, print_info=0):
     if device_type == "cuda":
         torch.cuda.set_device(gpu_id)
-        from src.feature.NEP_GPU.build.nep_gpu import NEP as NEP_GPU
+        build_backend = "hip" if getattr(torch.version, "hip", None) else "cuda"
+        NEP_GPU = importlib.import_module(
+            "src.feature.NEP_GPU.build.{}.nep_gpu".format(build_backend)
+        ).NEP
         calc_obj = NEP_GPU()
         calc_obj.init_from_file(nep_txt_path, print_info, gpu_id)
     else:
