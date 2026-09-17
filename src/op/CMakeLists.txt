@@ -52,7 +52,17 @@ endif()
 
 list(APPEND CMAKE_PREFIX_PATH "${MATPL_TORCH_CMAKE_PREFIX_PATH}")
 set(CMAKE_DISABLE_FIND_PACKAGE_MKL TRUE)
-find_package(Torch REQUIRED)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveBackend.cmake")
+matpl_resolve_backend(
+    "${MATPL_GPU_BACKEND}"
+    "${MATPL_TORCH_CUDA_VERSION}"
+    "${MATPL_TORCH_HIP_VERSION}"
+    MATPL_RESOLVED_BACKEND
+)
+# CPU builds need headers and CPU libraries, not CUDA/HIP toolkit discovery.
+if(NOT MATPL_RESOLVED_BACKEND STREQUAL "CPU")
+    find_package(Torch REQUIRED)
+endif()
 
 include_directories("${Python3_INCLUDE_DIRS}")
 include_directories("${MATPL_TORCH_PATH}/include")
@@ -65,14 +75,6 @@ file(MAKE_DIRECTORY
     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
     "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
     "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}"
-)
-
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveBackend.cmake")
-matpl_resolve_backend(
-    "${MATPL_GPU_BACKEND}"
-    "${MATPL_TORCH_CUDA_VERSION}"
-    "${MATPL_TORCH_HIP_VERSION}"
-    MATPL_RESOLVED_BACKEND
 )
 
 if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")

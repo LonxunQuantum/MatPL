@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# The documented entry point is `sh build.sh`, also on systems where sh is dash.
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 # Default make command (single core) and NEP types
 MAKE_CMD="make"
 JOBS=1
@@ -22,6 +27,10 @@ show_help() {
     echo "  -jN             Use N parallel jobs for compilation (e.g., -j4)"
     echo "  -m nn           Compile Fortran codes (required for NN and Linear models)"
     echo "  --dry-run       Print the selected operator build commands and exit"
+    echo ""
+    echo "Backend selection:"
+    echo "  CUDA/HIP PyTorch with working nvcc/hipcc on PATH: accelerator + CPU"
+    echo "  Otherwise: CPU only. No visible GPU/DCU is required for compilation."
     echo ""
     echo "Environment variables:"
     echo "  MATPL_CUDA_ARCHITECTURES"
@@ -91,6 +100,23 @@ case "$RESOLVED_BACKEND" in
         exit 1
         ;;
 esac
+
+# PyTorch wheels include runtime libraries, but not necessarily a compiler.
+# Test the matching compiler, never device visibility (login/build nodes may
+# have the complete toolkit without a GPU). Operator build failures remain errors.
+TORCH_BACKEND="$RESOLVED_BACKEND"
+case "$TORCH_BACKEND" in
+    cuda) ACCELERATOR_COMPILER=nvcc ;;
+    hip)  ACCELERATOR_COMPILER=hipcc ;;
+    cpu)  ACCELERATOR_COMPILER="" ;;
+esac
+if [ -n "$ACCELERATOR_COMPILER" ]; then
+    if ! command -v "$ACCELERATOR_COMPILER" >/dev/null 2>&1 || \
+        ! "$ACCELERATOR_COMPILER" --version >/dev/null 2>&1; then
+        echo "No usable $ACCELERATOR_COMPILER on PATH for PyTorch backend $TORCH_BACKEND; building CPU only."
+        RESOLVED_BACKEND=cpu
+    fi
+fi
 
 OP_BACKENDS=("$RESOLVED_BACKEND")
 if [ "$RESOLVED_BACKEND" != "cpu" ]; then

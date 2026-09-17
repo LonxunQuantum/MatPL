@@ -188,7 +188,8 @@ class InputParam(object):
         self.workers = get_parameter("workers", json_input, 1)
         # dist training by horovod, when multi GPU train, need True,
         self.hvd = get_parameter("hvd", json_input, False) # 本身不支持hvd，所以不需要设置
-        self.dist_backend = get_parameter("dist_backend", json_input, "nccl")
+        self.device = get_parameter("device", json_input, "auto")
+        self.dist_backend = get_parameter("dist_backend", json_input, "auto" if self.model_type == "NEP" else "nccl")
         # self.dist_socket_ifname = get_parameter("dist_backend_ifname", json_input, "eth0")
         self.distributed = get_parameter("distributed", json_input, False)
         self.master_addr = get_parameter("master_addr", json_input, None)
@@ -299,6 +300,11 @@ class InputParam(object):
         params_dict = {}
         params_dict["model_type"] = self.model_type
         params_dict["atom_type"] = self.atom_type
+        if self.model_type == "NEP":
+            if self.device != "auto":
+                params_dict["device"] = self.device
+            if self.dist_backend != "auto":
+                params_dict["dist_backend"] = self.dist_backend
         if self.model_type !="NEP":
             params_dict["max_neigh_num"] = self.max_neigh_num
         if self.seed is not None:

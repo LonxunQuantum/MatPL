@@ -12,7 +12,6 @@ import time
 from typing import Union, Optional
 from tqdm import tqdm
 from src.model.nep_fused_fitting import build_fitting_groups
-CalcOps = load_calc_ops()
 
 # 无 BEC 标签时，可为指定离子生成价态对角张量；其他原子保持 -1e6 掩码。
 BEC_MONOVALENT_ION_TYPES = (3, 11, 19)  # Li, Na, K
@@ -360,6 +359,7 @@ def calculate_neighbor_num_max_min(
                 dataset: UniDataset, 
                 device: torch.device,
                 num_workers:int=0) -> None:
+    CalcOps = load_calc_ops(device=device)
     max_radial = -1e10
     min_radial = 1e10
     max_angular = -1e10
@@ -409,6 +409,7 @@ def calculate_neighbor_scaler(
                 lmax_5,
                 device: torch.device,
                 num_workers:int=0):
+    CalcOps = load_calc_ops(device=device)
     max_radial = -1e10
     min_radial = 1e10
     max_angular = -1e10

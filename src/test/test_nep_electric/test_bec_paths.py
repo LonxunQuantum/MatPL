@@ -1,7 +1,8 @@
 import torch
 
 from src.model.nep_fitting import QNEPFittingNet
-from src.model.nep_net import CalcOps, NEP
+from src.model.nep_net import NEP
+from src.utils.op_loader import load_calc_ops
 
 
 def _make_charge_nep():
@@ -23,6 +24,7 @@ def test_radial_analytical_bec_matches_autograd_on_cuda():
         return
     torch.manual_seed(20260728)
     device = torch.device("cuda")
+    CalcOps = load_calc_ops(device=device)
     dtype = torch.float64
     model = _make_charge_nep().to(device=device, dtype=dtype)
     model.q_scaler = torch.tensor([0.8, -1.1], dtype=dtype, device=device)
@@ -133,6 +135,7 @@ def test_angular_analytical_bec_parameter_grad_matches_autograd_on_cuda():
         return
     torch.manual_seed(20260728)
     device = torch.device("cuda")
+    CalcOps = load_calc_ops(device=device)
     dtype = torch.float64
     model = NEP.__new__(NEP)
     torch.nn.Module.__init__(model)

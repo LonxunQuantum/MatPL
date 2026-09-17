@@ -43,13 +43,16 @@ class AverageMeter(object):
                 self.root = self.avg**0.5
 
     def all_reduce(self):
-        if torch.distributed.is_initialized():
-            total = torch.tensor([self.root, self.val, self.avg], 
-                               dtype=torch.float32, 
-                               device = self.device)
+        if not torch.distributed.is_initialized():
+            return
+        total = torch.tensor([self.root, self.val, self.avg],
+                             dtype=torch.float32, device=self.device)
+        if torch.distributed.get_backend() == "gloo":
+            torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+            total /= torch.distributed.get_world_size()
+        else:
             torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.AVG)
         self.root, self.val, self.avg = total.tolist()
-        # print(f" after reduce: name: {self.name} root: {self.root} val: {self.val} avg: {self.avg} ")
 
     def __str__(self):
         if self.summary_type is Summary.AVERAGE:

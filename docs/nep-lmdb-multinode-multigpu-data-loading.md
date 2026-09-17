@@ -2,6 +2,8 @@
 
 本文说明 MatPL NEP 在顶层配置为 `"format": "lmdb"` 时，多节点、多 GPU 训练的数据加载和结果汇总逻辑。内容对应源码提交 `0fcfca9`。
 
+> 启动方式版本提示（2026-09-17）：本文第 2 节记录的是该历史提交的行为。当前代码已支持 CPU/GPU 的单节点、多节点 `srun` 和 `torchrun`，CPU 使用 Gloo，GPU 默认使用 NCCL；资源设置与启动命令请以 [训练资源与启动说明](nep-training-resources.md) 为准。CPU DataLoader 不启用 pinned memory。
+
 ## 1. 结论先行
 
 1. 数据集不会把 OMat24 的全部 frame 解码到内存。内存中主要保存 shard 路径、`nextid`、`deleted_ids`、累计长度和 sampler 索引；真正的 frame 在 DataLoader worker 收到索引后，才从 LMDB 读取、解压、解析并转成 tensor。

@@ -17,6 +17,7 @@ from src.feature.nep_find_neigh.findneigh import FindNeigh
 import numpy as np
 import pandas as pd
 from src.model.nep_net import NEP
+from src.utils.nep_distributed import training_device_type, training_backend
 from src.model.nep_fused_fitting import prepare_fitting_jit
 from src.pre_data.nep_data_loader import calculate_neighbor_num_max_min, calculate_neighbor_scaler, UniDataset, variable_length_collate_fn, variable_length_collate_fn_nolimit, calculate_batch, type_map, NepTestData
 from src.pre_data.nep_lmdb_dataset import (
@@ -38,9 +39,11 @@ import multiprocessing
 from src.utils.debug_operation import check_cuda_memory, check_cpu_memory
 from src.utils.learning_rate import (
     calculate_lr_scale,
+    calculate_warmup_lr,
     is_epoch_before_restart,
     resolve_optimizer_peak_lr,
 )
+from src.loss.loss import adjust_lr
 from src.optimizer.GKF import GKFOptimizer
 from src.optimizer.LKF import LKFOptimizer
 
@@ -176,92 +179,70 @@ def load_nep_checkpoint_with_fallback(
         ) from primary_error
 
 
-def restore_nep_training_state(
-        checkpoint, optimizer, scheduler, reset_epoch,
-        allow_optimizer_param_group_mismatch=False,
-        optimizer_peak_lr=None):
-    """Restore optional NEP optimizer/scheduler state for a true resume."""
+def restore_nep_optimizer_state(
+        checkpoint, optimizer, reset_epoch,
+        allow_optimizer_param_group_mismatch=False):
+    """Restore moments/history while keeping the current optimizer configuration."""
     if checkpoint is None or reset_epoch:
-        return False, False
+        return False
 
-    optimizer_restored = False
     optimizer_state = checkpoint.get("optimizer")
-    if optimizer_state is not None:
-        checkpoint_group_sizes = [
-            len(group.get("params", []))
-            for group in optimizer_state.get("param_groups", [])
-        ]
-        current_group_sizes = [
-            len(group.get("params", []))
-            for group in optimizer.state_dict().get("param_groups", [])
-        ]
-        optimizer_layout_mismatch = \
-            checkpoint_group_sizes != current_group_sizes
-        if not (allow_optimizer_param_group_mismatch and
-                optimizer_layout_mismatch):
-            try:
-                optimizer.load_state_dict(optimizer_state)
-            except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-                raise RuntimeError(
-                    "Failed to restore the NEP optimizer state from checkpoint"
-                ) from exc
-            optimizer_restored = True
+    if optimizer_state is None:
+        return False
+    current_groups = optimizer.state_dict()["param_groups"]
+    saved_groups = optimizer_state.get("param_groups", [])
+    layout_mismatch = (
+        [len(group.get("params", [])) for group in saved_groups]
+        != [len(group["params"]) for group in current_groups]
+    )
+    if layout_mismatch and allow_optimizer_param_group_mismatch:
+        return False
+    try:
+        if layout_mismatch:
+            raise ValueError("checkpoint optimizer parameter groups do not match")
+        # Keep saved parameter IDs for mapping moments to the new model, but use
+        # current group options BEFORE load_state_dict so PyTorch also casts
+        # state tensors according to the current optimizer configuration.
+        state = dict(optimizer_state, param_groups=[
+            dict(current, params=saved["params"])
+            for current, saved in zip(current_groups, saved_groups)
+        ])
+        optimizer.load_state_dict(state)
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        raise RuntimeError(
+            "Failed to restore the NEP optimizer state from checkpoint"
+        ) from exc
+    return True
 
-    scheduler_restored = False
-    scheduler_state = checkpoint.get("scheduler")
-    if scheduler is not None and scheduler_state is not None:
-        try:
-            scheduler.load_state_dict(scheduler_state)
-        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-            raise RuntimeError(
-                "Failed to restore the NEP scheduler state from checkpoint"
-            ) from exc
-        if optimizer_peak_lr is not None:
-            old_base_lrs = scheduler.base_lrs
-            old_current_lrs = scheduler.get_last_lr()
-            scheduler.base_lrs = [
-                optimizer_peak_lr for _ in optimizer.param_groups]
-            current_lrs = []
-            for old_base_lr, old_current_lr in zip(
-                    old_base_lrs, old_current_lrs):
-                if old_base_lr == scheduler.eta_min:
-                    current_lrs.append(optimizer_peak_lr)
-                else:
-                    phase = (
-                        (old_current_lr - scheduler.eta_min)
-                        / (old_base_lr - scheduler.eta_min)
-                    )
-                    current_lrs.append(
-                        scheduler.eta_min
-                        + phase * (optimizer_peak_lr - scheduler.eta_min)
-                    )
-            scheduler._last_lr = current_lrs
-            for param_group, current_lr in zip(
-                    optimizer.param_groups, current_lrs):
-                param_group["initial_lr"] = optimizer_peak_lr
-                param_group["lr"] = current_lr
-        scheduler_restored = True
-    elif (
-            scheduler is not None
-            and optimizer_restored
-            and optimizer_peak_lr is not None):
-        # A legacy/incomplete checkpoint has no scheduler position to resume.
-        # Restart the scheduler explicitly from its peak and keep optimizer LR
-        # consistent with that fresh scheduler state.
-        current_lrs = [optimizer_peak_lr for _ in optimizer.param_groups]
-        scheduler.base_lrs = current_lrs.copy()
-        scheduler._last_lr = current_lrs.copy()
-        for param_group in optimizer.param_groups:
-            param_group["initial_lr"] = optimizer_peak_lr
-            param_group["lr"] = optimizer_peak_lr
 
-    return optimizer_restored, scheduler_restored
+def initialize_nep_learning_rate(
+        optimizer, scheduler, optimizer_param, optimizer_peak_lr,
+        completed_updates, warmup_updates):
+    """Set the next update's LR from current settings and completed work."""
+    if scheduler is not None:
+        # The fresh scheduler already holds the JSON period and minimum LR.
+        # Warmup does not advance its clock; never load checkpoint configuration.
+        scheduler.step(max(0, completed_updates - warmup_updates))
+    if completed_updates < warmup_updates:
+        current_lr = calculate_warmup_lr(
+            completed_updates, warmup_updates,
+            optimizer_param.stop_lr, optimizer_peak_lr)
+    elif scheduler is not None:
+        current_lr = scheduler.get_last_lr()[0]
+    else:
+        current_lr = adjust_lr(
+            completed_updates, optimizer_peak_lr,
+            optimizer_param.stop_step, optimizer_param.decay_step,
+            optimizer_param.stop_lr)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = current_lr
+    return current_lr
 
 
 def build_nep_checkpoint(
         json_file, epoch, model, optimizer, scheduler,
         optimizer_updates=None, warmup_updates=None):
-    """Build a NEP checkpoint with the state required for true resume."""
+    """Save training state; scheduler metadata is not configuration on resume."""
     return {
         "json_file": json_file,
         "epoch": epoch,
@@ -513,19 +494,24 @@ class nep_network:
             torch.manual_seed(self.input_param.seed)
 
         self.is_rank_0 = True if self.input_param.rank == 0 else False
-        # 初始化 DDP 环境
-        if self.input_param.multi_gpus:
+        device_type = training_device_type(self.input_param)
+        self.device = torch.device(device_type)
+        if device_type == "cuda":
+            # srun may expose only one GPU to a task whose local rank is nonzero.
+            device_index = self.input_param.local_rank if torch.cuda.device_count() > 1 else 0
+            torch.cuda.set_device(device_index)
+            self.device = torch.device("cuda", device_index)
+        if self.input_param.world_size > 1:
+            backend = training_backend(self.input_param, device_type)
             dist.init_process_group(
-                backend="nccl",
+                backend=backend,
                 init_method=f"tcp://{self.input_param.master_addr}:{self.input_param.master_port}",
                 rank=self.input_param.rank,
-                world_size=self.input_param.world_size
+                world_size=self.input_param.world_size,
             )
-            torch.cuda.set_device(self.input_param.local_rank)
-            self.device = torch.device(f"cuda:{self.input_param.local_rank}")
-            print(f'Rank {self.input_param.rank}: LocalRank: {self.input_param.local_rank}, device {self.device} for training, Master IP: {self.input_param.master_addr} Free Port {self.input_param.master_port}')
-        else: # single gpu
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Rank {self.input_param.rank}: LocalRank {self.input_param.local_rank}, "
+                  f"device {self.device}, backend {backend}")
+        else:
             print(f"Using device: {self.device}")
 
         if self.input_param.precision == "float32":
@@ -541,7 +527,7 @@ class nep_network:
             "batch_sampler": batch_sampler,
             "collate_fn": collate_fn,
             "num_workers": self.input_param.workers,
-            "pin_memory": True,
+            "pin_memory": self.device.type == "cuda",
         }
         if self.input_param.workers > 0:
             loader_options["prefetch_factor"] = 2
@@ -799,7 +785,7 @@ class nep_network:
                 collate_fn=variable_length_collate_fn, 
                 num_workers=self.input_param.workers,
                 drop_last=True,
-                pin_memory=True,
+                pin_memory=self.device.type == "cuda",
                 prefetch_factor=2,
                 persistent_workers=True
             )
@@ -813,7 +799,7 @@ class nep_network:
                 collate_fn=variable_length_collate_fn_nolimit, 
                 num_workers=self.input_param.workers,
                 drop_last=False,
-                pin_memory=True,
+                pin_memory=self.device.type == "cuda",
                 prefetch_factor=2,
                 persistent_workers=True
             )
@@ -852,7 +838,7 @@ class nep_network:
                 collate_fn=variable_length_collate_fn, 
                 num_workers=self.input_param.workers,
                 drop_last=True,
-                pin_memory=True,
+                pin_memory=self.device.type == "cuda",
                 prefetch_factor=2,
                 persistent_workers=True
             )
@@ -865,7 +851,7 @@ class nep_network:
                 collate_fn=variable_length_collate_fn_nolimit, 
                 num_workers=self.input_param.workers,
                 drop_last=False,
-                pin_memory=True,
+                pin_memory=self.device.type == "cuda",
                 prefetch_factor=2,
                 persistent_workers=True
             )
@@ -882,7 +868,7 @@ class nep_network:
                 sampler=valid_sampler,
                 collate_fn=variable_length_collate_fn,
                 num_workers=self.input_param.workers,
-                pin_memory=True,
+                pin_memory=self.device.type == "cuda",
                 drop_last=True,
                 prefetch_factor=2,
                 persistent_workers=True
@@ -937,11 +923,11 @@ class nep_network:
                         ).to(self.training_type).to(self.device)
         prepare_fitting_jit(model)
         # 包装模型为 DDP
-        if torch.cuda.is_available() and self.input_param.world_size > 1:
-            model = nn.parallel.DistributedDataParallel(model, 
-                                            device_ids=[self.input_param.local_rank], 
-                                            output_device=self.input_param.local_rank,
-                                            find_unused_parameters=True)
+        if self.input_param.world_size > 1:
+            ddp_options = {"find_unused_parameters": True}
+            if self.device.type == "cuda":
+                ddp_options.update(device_ids=[self.device.index], output_device=self.device.index)
+            model = nn.parallel.DistributedDataParallel(model, **ddp_options)
         checkpoint = None
         model_path = None
         allow_periodic_checkpoint_fallback = False
@@ -987,6 +973,7 @@ class nep_network:
 
         # optimizer, and learning rate scheduler
         scheduler = None
+        self.optimizer_peak_lr = None
         if self.input_param.optimizer_param.opt_name in ["ADAM", "ADAMW", "SGD"]:
             self.lr_scale = calculate_lr_scale(
                 self.input_param.optimizer_param.scale_lr,
@@ -1058,26 +1045,21 @@ class nep_network:
             raise Exception("Error: Unsupported optimizer!")
 
         if checkpoint is not None and not self.input_param.inference:
-            optimizer_restored, scheduler_restored = restore_nep_training_state(
+            optimizer_restored = restore_nep_optimizer_state(
                 checkpoint,
                 optimizer,
-                scheduler,
                 self.input_param.optimizer_param.reset_epoch,
                 allow_optimizer_param_group_mismatch=getattr(
                     self.input_param.nep_param,
                     "fixed_sqrt_epsilon_inf",
                     None) is not None,
-                optimizer_peak_lr=self.optimizer_peak_lr,
             )
             if self.is_rank_0:
                 if self.input_param.optimizer_param.reset_epoch:
                     print("reset_epoch=true: using a fresh optimizer and scheduler")
                 else:
                     optimizer_message = "restored" if optimizer_restored else "not found; using a fresh optimizer"
-                    scheduler_message = "restored" if scheduler_restored else "not found; using a fresh scheduler"
                     print(f"NEP optimizer state: {optimizer_message}")
-                    if scheduler is not None:
-                        print(f"NEP scheduler state: {scheduler_message}")
 
         if (
                 checkpoint is not None
@@ -1090,17 +1072,24 @@ class nep_network:
                 self.completed_optimizer_updates = (
                     self.input_param.optimizer_param.start_epoch - 1
                 ) * iterations
-            self.warmup_optimizer_updates = checkpoint.get(
-                "warmup_updates")
-            if self.warmup_optimizer_updates is None:
-                self.warmup_optimizer_updates = (
-                    (self.input_param.optimizer_param.warmup or 0)
-                    * iterations
-                )
         else:
             self.completed_optimizer_updates = 0
-            self.warmup_optimizer_updates = (
-                (self.input_param.optimizer_param.warmup or 0) * iterations)
+        # warm_epochs is configuration, not saved progress. Recompute it for
+        # the current loader, including when batch/mix or world size changes.
+        self.warmup_optimizer_updates = (
+            (self.input_param.optimizer_param.warmup or 0) * iterations)
+        if self.optimizer_peak_lr is not None:
+            current_lr = initialize_nep_learning_rate(
+                optimizer, scheduler, self.input_param.optimizer_param,
+                self.optimizer_peak_lr, self.completed_optimizer_updates,
+                self.warmup_optimizer_updates)
+            if self.is_rank_0:
+                print(
+                    "NEP learning rate: computed from current configuration; "
+                    f"completed_updates={self.completed_optimizer_updates}, "
+                    f"warmup_updates={self.warmup_optimizer_updates}, "
+                    f"peak_lr={self.optimizer_peak_lr:.8e}, "
+                    f"next_lr={current_lr:.8e}")
 
         return model, optimizer, scheduler
 

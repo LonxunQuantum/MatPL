@@ -23,7 +23,6 @@ from collections import defaultdict
 from src.utils.train_log import AverageMeter, Summary, ProgressMeter
 from src.utils.op_loader import load_calc_ops
 
-CalcOps = load_calc_ops()
 
 def get_model_module(model, args:InputParam):
     return model.module if getattr(args, "world_size", 1) > 1 else model
@@ -305,6 +304,7 @@ def _get_model_output_requests(sample, args: InputParam, train_virial: bool):
 def train(train_loader, model, criterion, optimizer, scheduler, epoch,
           optimizer_peak_lr, completed_updates, warmup_updates,
           device, args:InputParam):
+    CalcOps = load_calc_ops(device=device)
     batch_time = AverageMeter("Time", ":6.3f", device=device, world_size=args.world_size)
     data_time = AverageMeter("Data", ":6.3f", device=device, world_size=args.world_size)
     learning_rate = AverageMeter("LR", ":.8e", Summary.AVERAGE, device=device, world_size=args.world_size)
@@ -483,7 +483,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         )
         # check_cuda_memory(epoch, -1, "before backward", False, args.rank)
         loss.backward()
-        torch.cuda.empty_cache() # 释放pytoch 缓存管理器持有的缓冲块，因为它对cuda算子不可见，导致算子内存不够用，这部分缓冲块 64batch下约10个G
+        if device.type == "cuda":
+            torch.cuda.empty_cache() # 释放pytoch 缓存管理器持有的缓冲块，因为它对cuda算子不可见，导致算子内存不够用，这部分缓冲块 64batch下约10个G
         # check_cuda_memory(epoch, -1, "end backward", False, args.rank)
 
         if args.optimizer_param.norm_type is not None:
@@ -572,6 +573,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
     )
 
 def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:InputParam):
+    CalcOps = load_calc_ops(device=device)
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4e", Summary.AVERAGE)
@@ -767,6 +769,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
     return losses.avg, loss_Etot.root, loss_Etot_per_atom.root, loss_Force.root, loss_Ei.root, loss_Egroup.root, loss_Virial.root, loss_Virial_per_atom.root, loss_Charge.root, loss_BEC.root, loss_L1.root, loss_L2.root
 
 def valid(val_loader, model, criterion, device, args:InputParam):
+    CalcOps = load_calc_ops(device=device)
     def run_validate(loader, base_progress=0):
         end = time.time()
         L1, L2 = nep_l1_l2(model)
@@ -980,6 +983,7 @@ return {*}
 author: wuxingxing
 '''
 def predict(val_loader, model, criterion, device, args:InputParam, isprofile=False):
+    CalcOps = load_calc_ops(device=device)
     train_lists = ["img_idx"] #"Etot_lab", "Etot_pre", "Ei_lab", "Ei_pre", "Force_lab", "Force_pre"
     train_lists.extend(["RMSE_Etot", "RMSE_Etot_per_atom", "RMSE_Ei", "RMSE_F"])
     if args.optimizer_param.train_charge:
