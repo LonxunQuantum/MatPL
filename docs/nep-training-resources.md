@@ -1,6 +1,6 @@
 # NEP CPU/GPU 训练资源与启动说明
 
-适用范围：`nep-dcu/dev` 当前的 NEP 训练入口，更新于 2026-09-17。支持 CPU/GPU 单节点、多节点、多进程训练；本文以 Adam/AdamW 为例，LKF/GKF 仅支持单进程。
+适用范围：`nep-dcu/dev` 当前的 NEP 训练入口，更新于 2026-09-18。支持 CPU/GPU 单节点、多节点、多进程训练；本文以 Adam/AdamW 为例，LKF/GKF 仅支持单进程。
 
 **训练和编译必须在计算节点执行，禁止在登录节点进行大规模测试。** 登录节点可以编辑配置和提交 `sbatch`。直接登录计算节点运行的示例，要求该节点资源已分配给你，或集群明确允许直接使用。
 
@@ -8,7 +8,7 @@
 
 | 设置 | 控制什么 | 不控制什么 |
 | --- | --- | --- |
-| Slurm `--ntasks-per-node` / torchrun `--nproc-per-node` | 每节点的训练进程数，每个进程称为一个 rank | 数据加载进程数、计算线程数 |
+| Slurm `--ntasks-per-node`（配合 `srun`）/ torchrun `--nproc-per-node` | 每节点的训练进程数，每个进程称为一个 rank | 数据加载进程数、计算线程数 |
 | Slurm `--cpus-per-task` | 分配给一个 rank 及其子进程共享的 CPU 资源 | 不会自动启动这么多个训练进程或设置 `workers` |
 | `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` | 对应计算库的线程数量上限 | 不负责申请 CPU，也不保证所有算子都使用这么多线程 |
 | `nep.json` 顶层 `workers` | 每个 rank 的 DataLoader 数据加载子进程数，默认 **1** | 不控制训练 rank 数，不自动读取 `cpus-per-task` |
@@ -145,6 +145,18 @@ srun --cpu-bind=cores --gpu-bind=single:1 --kill-on-bad-exit=1 --wait=30 \
 GPU 可见性和卡绑定由 Slurm 管理，不要在脚本内把 `CUDA_VISIBLE_DEVICES` 固定成物理卡号。当前代码兼容每个 task 只看见其绑定卡，也兼容各 rank 看见节点全部已分配卡的方式。
 
 两个脚本都只在 batch 主进程选一次端口，再传给全部 rank；不能让每个 rank 单独生成端口。多节点必须能互相访问 `MASTER_ADDR:MASTER_PORT`。
+
+### 3.3 单节点 GPU：也可由 MatPL 自动创建训练进程
+
+单节点的 `sbatch` 脚本中可以直接执行 `MatPL train nep.json`。此时 MatPL 按可见
+GPU 数创建训练进程，并自动选择本机通信地址和空闲端口，无需设置
+`MASTER_ADDR`、`MASTER_PORT`。例如四卡训练必须申请 `--gres=gpu:4`；
+仅设置 `--ntasks-per-node=4` 不会申请四张卡，也不会直接启动四个训练进程。
+
+`sbatch` 主脚本可能携带 `SLURM_PROCID=0` 和 `SLURM_NTASKS`，这些变量本身
+不能说明多个 rank 已启动。MatPL 使用 `srun` 的实际 step 标识区分两种启动方式：
+直接启动时自行创建 GPU 进程；`srun`/`torchrun` 启动时使用已有 rank，不再创建
+子 rank。纯 CPU 直接启动仍是单进程，多节点需使用 `srun` 或 `torchrun`。
 
 ## 4. 在计算节点直接运行
 

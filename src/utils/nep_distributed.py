@@ -35,6 +35,9 @@ def configure_nep_runtime(params, environ=None):
     remains single-process on CPU and uses the visible GPUs on CUDA/HIP.
     """
     env = os.environ if environ is None else environ
+    # sbatch also exports SLURM_PROCID/NTASKS, although it starts only the batch
+    # script. Only an actual srun step means the training ranks already exist.
+    slurm_step = env.get("SLURM_STEP_ID") or env.get("SLURM_STEPID")
     device_type = training_device_type(params)
     training_backend(params, device_type)  # Reject incompatible settings before starting ranks.
     if "RANK" in env or "WORLD_SIZE" in env:
@@ -44,7 +47,8 @@ def configure_nep_runtime(params, environ=None):
         local_world_size = int(env.get("LOCAL_WORLD_SIZE", world_size))
         multi_nodes = world_size > local_world_size
         external = True
-    elif "SLURM_PROCID" in env:
+    elif ("SLURM_PROCID" in env and
+          slurm_step not in (None, "", "batch", "extern", "interactive")):
         if not all(key in env for key in ("SLURM_NTASKS", "SLURM_LOCALID")):
             raise ValueError("srun requires SLURM_NTASKS and SLURM_LOCALID")
         world_size, rank, local_rank = (int(env[key]) for key in ("SLURM_NTASKS", "SLURM_PROCID", "SLURM_LOCALID"))

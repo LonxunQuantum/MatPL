@@ -16,6 +16,7 @@ def test_slurm_cpu_uses_global_rank_and_all_tasks():
     p = params("cpu")
     spawn = configure_nep_runtime(p, {
         "SLURM_NNODES": "2", "SLURM_NTASKS": "8", "SLURM_PROCID": "5",
+        "SLURM_STEP_ID": "0",
         "SLURM_LOCALID": "1", "MASTER_ADDR": "node-a", "MASTER_PORT": "29500",
     })
     assert not spawn
@@ -40,6 +41,7 @@ def test_single_node_srun_cpu_is_distributed():
     p = params("cpu")
     assert not configure_nep_runtime(p, {
         "SLURM_NNODES": "1", "SLURM_NTASKS": "4", "SLURM_PROCID": "3",
+        "SLURM_STEP_ID": "0",
         "SLURM_LOCALID": "3", "MASTER_ADDR": "localhost", "MASTER_PORT": "29502",
     })
     assert (p.world_size, p.rank, p.multi_nodes) == (4, 3, False)
@@ -60,6 +62,68 @@ def test_bare_gpu_preserves_automatic_spawn(monkeypatch):
     assert configure_nep_runtime(p, {})
     assert p.world_size == 4
     assert p.master_addr == "127.0.0.1" and 0 < int(p.master_port) < 65536
+
+
+@pytest.mark.parametrize("step_key,step", [
+    ("SLURM_STEP_ID", None), ("SLURM_STEP_ID", ""), ("SLURM_STEP_ID", "batch"),
+    ("SLURM_STEP_ID", "extern"), ("SLURM_STEP_ID", "interactive"),
+    ("SLURM_STEPID", "batch"),
+])
+@pytest.mark.parametrize("device,gpu_count", [("cpu", 0), ("cuda", 1), ("cuda", 4)])
+def test_sbatch_direct_launch_uses_devices_not_allocated_task_count(
+        monkeypatch, step_key, step, device, gpu_count):
+    from src.utils.nep_distributed import configure_nep_runtime
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: gpu_count > 0)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: gpu_count)
+    env = {"SLURM_NNODES": "1", "SLURM_NTASKS": "4",
+           "SLURM_PROCID": "0", "SLURM_LOCALID": "0"}
+    if step is not None:
+        env[step_key] = step
+    p = params(device)
+    spawn = configure_nep_runtime(p, env)
+    assert spawn == (gpu_count > 1)
+    assert (p.world_size, p.rank, p.local_rank) == (max(gpu_count, 1), 0, 0)
+    if gpu_count > 1:
+        assert p.master_addr == "127.0.0.1" and 0 < int(p.master_port) < 65536
+    else:
+        assert p.master_addr is None and p.master_port is None
+
+
+@pytest.mark.parametrize("step_key", ["SLURM_STEP_ID", "SLURM_STEPID"])
+def test_srun_gpu_keeps_external_ranks(monkeypatch, step_key):
+    from src.utils.nep_distributed import configure_nep_runtime
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    p = params()
+    assert not configure_nep_runtime(p, {
+        step_key: "0", "SLURM_NNODES": "1", "SLURM_NTASKS": "4",
+        "SLURM_PROCID": "2", "SLURM_LOCALID": "2",
+        "MASTER_ADDR": "localhost", "MASTER_PORT": "29500",
+    })
+    assert (p.world_size, p.rank, p.local_rank) == (4, 2, 2)
+
+
+def test_sbatch_gpu_still_spawns_when_master_was_exported(monkeypatch):
+    from src.utils.nep_distributed import configure_nep_runtime
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    p = params()
+    assert configure_nep_runtime(p, {
+        "SLURM_NNODES": "1", "SLURM_NTASKS": "4", "SLURM_PROCID": "0",
+        "SLURM_LOCALID": "0", "MASTER_ADDR": "localhost", "MASTER_PORT": "29500",
+    })
+    assert p.world_size == 4
+    assert (p.master_addr, p.master_port) == ("localhost", "29500")
+
+
+def test_sbatch_multi_node_without_launcher_fails_immediately():
+    from src.utils.nep_distributed import configure_nep_runtime
+    with pytest.raises(ValueError, match="srun or torchrun"):
+        configure_nep_runtime(params("cpu"), {
+            "SLURM_STEP_ID": "batch", "SLURM_NNODES": "2", "SLURM_NTASKS": "8",
+            "SLURM_PROCID": "0", "SLURM_LOCALID": "0",
+            "MASTER_ADDR": "node-a", "MASTER_PORT": "29500",
+        })
 
 
 def test_one_torchrun_rank_does_not_spawn_visible_gpus(monkeypatch):
