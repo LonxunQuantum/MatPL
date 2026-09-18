@@ -61,8 +61,22 @@ matpl_resolve_backend(
     MATPL_RESOLVED_BACKEND
 )
 # CPU builds need headers and CPU libraries, not CUDA/HIP toolkit discovery.
+if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveCudaArchitectures.cmake")
+    matpl_resolve_cuda_architectures(
+        MATPL_RESOLVED_CUDA_ARCHITECTURES TORCH_CUDA_ARCH_LIST
+    )
+    set(CMAKE_CUDA_ARCHITECTURES "${MATPL_RESOLVED_CUDA_ARCHITECTURES}")
+endif()
 if(NOT MATPL_RESOLVED_BACKEND STREQUAL "CPU")
     find_package(Torch REQUIRED)
+endif()
+if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")
+    # Torch 2.2 sets CMAKE_CUDA_ARCHITECTURES=OFF. Restore our targets after
+    # discovery, and keep the cache consistent with the actual target flags.
+    set(CMAKE_CUDA_ARCHITECTURES "${MATPL_RESOLVED_CUDA_ARCHITECTURES}")
+    set(CMAKE_CUDA_ARCHITECTURES "${MATPL_RESOLVED_CUDA_ARCHITECTURES}"
+        CACHE STRING "MatPL CUDA target architectures" FORCE)
 endif()
 
 include_directories("${Python3_INCLUDE_DIRS}")

@@ -38,7 +38,7 @@ run_dry() {
     ROCM_PATH="$TEMP_DIR/rocm" \
     MATPL_DTK_NVCC="$FAKE_BIN/nvcc" \
     MATPL_DTK_CUDA_ROOT="$TEMP_DIR/cuda" \
-    MATPL_CUDA_ARCHITECTURES="60;70;75;80;86;89;90" \
+    MATPL_CUDA_ARCHITECTURES="${TEST_CUDA_ARCHITECTURES:-60;70;75;80;86;89;90}" \
     CUDAToolkit_ROOT="$TEMP_DIR/cuda" \
         "${BUILD_SHELL:-bash}" "$BUILD_SCRIPT" --dry-run -j4
 }
@@ -78,6 +78,22 @@ assert_contains "$cuda_output" "Operator build backends: cuda cpu"
 assert_contains "$cuda_output" "-DCMAKE_CUDA_ARCHITECTURES=60;70;75;80;86;89;90"
 assert_contains "$cuda_output" "$PROJECT_ROOT/src/op/build/cuda -DMATPL_GPU_BACKEND=CUDA"
 assert_contains "$cuda_output" "$PROJECT_ROOT/src/op/build/cpu -DMATPL_GPU_BACKEND=CPU"
+
+# Both CUDA consumers must receive the selected architecture, even on a
+# GPU-less host and when unrelated architecture environment variables conflict.
+single_arch_output=$(TEST_CUDA_ARCHITECTURES=70 CUDA_VISIBLE_DEVICES= \
+    CMAKE_CUDA_ARCHITECTURES=86 TORCH_CUDA_ARCH_LIST=8.6 run_dry cuda)
+assert_contains "$single_arch_output" "$PROJECT_ROOT/src/feature/NEP_GPU/build/cuda"
+assert_contains "$single_arch_output" "$PROJECT_ROOT/src/op/build/cuda -DMATPL_GPU_BACKEND=CUDA -DCMAKE_CUDA_ARCHITECTURES=70"
+if [ "$(grep -c -- '-DCMAKE_CUDA_ARCHITECTURES=70' <<<"$single_arch_output")" -ne 2 ]; then
+    echo "Expected architecture 70 in both CUDA configure commands" >&2
+    exit 1
+fi
+assert_not_contains "$single_arch_output" "-DCMAKE_CUDA_ARCHITECTURES=86"
+
+multi_arch_output=$(TEST_CUDA_ARCHITECTURES='70;86' run_dry cuda)
+assert_contains "$multi_arch_output" "$PROJECT_ROOT/src/op/build/cuda -DMATPL_GPU_BACKEND=CUDA -DCMAKE_CUDA_ARCHITECTURES=70;86"
+assert_not_contains "$(grep -- '-DMATPL_GPU_BACKEND=CPU' <<<"$multi_arch_output")" '-DCMAKE_CUDA_ARCHITECTURES='
 
 hip_output=$(run_dry hip)
 assert_contains "$hip_output" "Resolved accelerator backend: hip"

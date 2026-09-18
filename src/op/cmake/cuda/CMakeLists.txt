@@ -2,10 +2,7 @@
 enable_language(CUDA)  # 使用现代CMake方式启用CUDA
 find_package(CUDAToolkit REQUIRED)
 
-# 2. 设置 CUDA 架构支持
-if(NOT CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90")
-endif()
+# 2. 架构已在加载 Torch 前统一解析，避免 GPU 探测及重复默认值。
 message(STATUS "Enabled CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # 3. 全局 CUDA 编译选项

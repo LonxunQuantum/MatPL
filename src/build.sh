@@ -34,7 +34,7 @@ show_help() {
     echo ""
     echo "Environment variables:"
     echo "  MATPL_CUDA_ARCHITECTURES"
-    echo "                  NVIDIA CUDA architecture list for NEP-GPU only"
+    echo "                  NVIDIA CUDA architecture list for NEP-GPU and operators"
     echo "                  Default: 60;70;75;80;86;89;90"
     echo "                  Common: V100=70, A100=80, RTX 3090=86"
     echo "                          RTX 4090=89, H20/H100=90"
@@ -125,7 +125,7 @@ fi
 NEP_GPU_BUILD_DIR="$NEP_GPU_DIR/build/$RESOLVED_BACKEND"
 NEP_GPU_CUDACXX=""
 NEP_GPU_TOOLKIT_ROOT=""
-NEP_GPU_CMAKE_ARGS=()
+CUDA_ARCH_CMAKE_ARGS=()
 
 find_dtk_nvcc() {
     local dtk_root candidate
@@ -153,8 +153,8 @@ find_dtk_nvcc() {
 if [ "$RESOLVED_BACKEND" = "cuda" ]; then
     NEP_GPU_CUDACXX=$(command -v nvcc 2>/dev/null || true)
     NEP_GPU_TOOLKIT_ROOT="${CUDAToolkit_ROOT:-${CUDA_HOME:-${CUDA_PATH:-}}}"
-    NEP_GPU_CUDA_ARCHITECTURES="${MATPL_CUDA_ARCHITECTURES:-${CMAKE_CUDA_ARCHITECTURES:-60;70;75;80;86;89;90}}"
-    NEP_GPU_CMAKE_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=$NEP_GPU_CUDA_ARCHITECTURES")
+    MATPL_BUILD_CUDA_ARCHITECTURES="${MATPL_CUDA_ARCHITECTURES:-${CMAKE_CUDA_ARCHITECTURES:-60;70;75;80;86;89;90}}"
+    CUDA_ARCH_CMAKE_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=$MATPL_BUILD_CUDA_ARCHITECTURES")
     if [ -z "$NEP_GPU_TOOLKIT_ROOT" ] && [ -n "$NEP_GPU_CUDACXX" ]; then
         NEP_GPU_TOOLKIT_ROOT=$(cd "$(dirname "$NEP_GPU_CUDACXX")/.." && pwd)
     fi
@@ -187,7 +187,7 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     if [ -n "$NEP_GPU_CUDACXX" ]; then
-        echo "PATH=$(dirname "$NEP_GPU_CUDACXX"):\$PATH CUDACXX=$NEP_GPU_CUDACXX cmake -S $NEP_GPU_DIR -B $NEP_GPU_BUILD_DIR -DCUDAToolkit_ROOT=$NEP_GPU_TOOLKIT_ROOT ${NEP_GPU_CMAKE_ARGS[*]}"
+        echo "PATH=$(dirname "$NEP_GPU_CUDACXX"):\$PATH CUDACXX=$NEP_GPU_CUDACXX cmake -S $NEP_GPU_DIR -B $NEP_GPU_BUILD_DIR -DCUDAToolkit_ROOT=$NEP_GPU_TOOLKIT_ROOT ${CUDA_ARCH_CMAKE_ARGS[*]}"
         echo "cmake --build $NEP_GPU_BUILD_DIR --parallel $JOBS"
     else
         echo "Skipping NEP-GPU interface for backend $RESOLVED_BACKEND"
@@ -195,7 +195,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
     for OP_BACKEND in "${OP_BACKENDS[@]}"; do
         OP_BUILD_DIR="$OP_DIR/build/$OP_BACKEND"
         OP_BACKEND_UPPER="${OP_BACKEND^^}"
-        echo "cmake -S $OP_DIR -B $OP_BUILD_DIR -DMATPL_GPU_BACKEND=$OP_BACKEND_UPPER"
+        OP_CMAKE_ARGS=("-DMATPL_GPU_BACKEND=$OP_BACKEND_UPPER")
+        if [ "$OP_BACKEND" = "cuda" ]; then
+            OP_CMAKE_ARGS+=("${CUDA_ARCH_CMAKE_ARGS[@]}")
+        fi
+        echo "cmake -S $OP_DIR -B $OP_BUILD_DIR ${OP_CMAKE_ARGS[*]}"
         echo "cmake --build $OP_BUILD_DIR --parallel $JOBS"
     done
     exit 0
@@ -273,7 +277,7 @@ if [ -n "$NEP_GPU_CUDACXX" ]; then
             cmake -S "$NEP_GPU_DIR" -B "$NEP_GPU_BUILD_DIR" \
                 -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
                 -DCUDAToolkit_ROOT="$NEP_GPU_TOOLKIT_ROOT" \
-                "${NEP_GPU_CMAKE_ARGS[@]}" && \
+                "${CUDA_ARCH_CMAKE_ARGS[@]}" && \
             PATH="$(dirname "$NEP_GPU_CUDACXX"):$PATH" \
             cmake --build "$NEP_GPU_BUILD_DIR" --parallel "$JOBS"; then
             echo "compile nep_gpu interface success"
@@ -294,6 +298,10 @@ if [ -d "$OP_DIR" ]; then
     for OP_BACKEND in "${OP_BACKENDS[@]}"; do
         OP_BUILD_DIR="$OP_DIR/build/$OP_BACKEND"
         OP_BACKEND_UPPER="${OP_BACKEND^^}"
+        OP_CMAKE_ARGS=("-DMATPL_GPU_BACKEND=$OP_BACKEND_UPPER")
+        if [ "$OP_BACKEND" = "cuda" ]; then
+            OP_CMAKE_ARGS+=("${CUDA_ARCH_CMAKE_ARGS[@]}")
+        fi
         case "$OP_BUILD_DIR" in
             "$OP_DIR"/build/cuda|"$OP_DIR"/build/hip|"$OP_DIR"/build/cpu)
                 ;;
@@ -305,7 +313,7 @@ if [ -d "$OP_DIR" ]; then
         rm -rf "$OP_BUILD_DIR"
         mkdir -p "$OP_BUILD_DIR"
         if cmake -S "$OP_DIR" -B "$OP_BUILD_DIR" \
-            -DMATPL_GPU_BACKEND="$OP_BACKEND_UPPER" && \
+            "${OP_CMAKE_ARGS[@]}" && \
             cmake --build "$OP_BUILD_DIR" --parallel "$JOBS"; then
             echo "Operators built successfully for backend $OP_BACKEND"
         else
