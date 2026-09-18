@@ -18,6 +18,7 @@ PYBIND11_MODULE(nep_gpu, m) {
                                   py::array_t<double> position_cpu,
                                   const std::string& kspace_method,
                                   double total_charge) {
+            nep_inference::validate_sizes(itype_cpu.size(), box_cpu.size(), position_cpu.size());
             // 获取 NumPy 数组的指针
             auto itype_ptr = itype_cpu.mutable_data();
             auto box_ptr = box_cpu.mutable_data();
