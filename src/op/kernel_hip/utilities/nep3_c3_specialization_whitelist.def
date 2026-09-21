@@ -1,0 +1,13 @@
+// C3 descriptor signatures with an ahead-of-time compiler specialization.
+//
+// Arguments: n_base_3b, n_max_3b, atom_types, lmax_3, lmax_4, lmax_5.
+// Keep this list as the single source of truth for both dispatch and the
+// instantiated HIP kernels.  Add a new signature only after checking the
+// static LDS requirement on the target architecture.
+MATPL_NEP_C3_SPECIALIZATION(9, 13, 2, 4, 2, 0)   // FeC
+MATPL_NEP_C3_SPECIALIZATION(9, 13, 2, 4, 2, 1)   // AuAg
+MATPL_NEP_C3_SPECIALIZATION(9, 13, 3, 4, 2, 1)   // LiSiC_NEP
+MATPL_NEP_C3_SPECIALIZATION(9, 13, 8, 4, 2, 1)   // Si-SiO2-La2O3-HfO2-TiN
+MATPL_NEP_C3_SPECIALIZATION(13, 5, 2, 4, 2, 1)  // HfO2
+MATPL_NEP_C3_SPECIALIZATION(13, 5, 5, 4, 2, 1)  // NiRuRhPdIr-Alloy
+MATPL_NEP_C3_SPECIALIZATION(9, 5, 16, 4, 2, 0)  // 16_metal

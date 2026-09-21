@@ -17,7 +17,23 @@ sys.path.append(os.getcwd())
 from src.model.nep_fitting import FittingNet, QNEPFittingNet
 from src.model.nep_fused_fitting import fused_fitting, fused_charge_fitting, pack_fitting_parameters
 CalcOps = load_calc_ops()
-   
+
+
+class _SegmentSum(torch.autograd.Function):
+    """Batch contiguous per-structure sums while preserving double backward."""
+
+    @staticmethod
+    def forward(ctx, values: torch.Tensor, lengths: torch.Tensor):
+        ctx.save_for_backward(lengths)
+        return torch.segment_reduce(values, "sum", lengths=lengths)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        (lengths,) = ctx.saved_tensors
+        grad_values = torch.repeat_interleave(grad_output, lengths, dim=0)
+        return grad_values, None
+
+
 class NEP(nn.Module):
     _SQRT_EPSILON_INF_MIN = 1.0
 
@@ -699,9 +715,8 @@ class NEP(nn.Module):
         # t2 = time.time()
         # check_cuda_memory(-1, -1, "FORWAR E_zbl")
 
-        split_sizes = num_atom.reshape(-1).tolist()
-        energy_per_image = Ei.split(split_sizes)
-        nep_Etot = torch.stack([x.sum() for x in energy_per_image]).unsqueeze(-1)
+        segment_lengths = num_atom.reshape(-1).to(dtype=torch.int64)
+        nep_Etot = _SegmentSum.apply(Ei, segment_lengths).unsqueeze(-1)
         Etot_for_energy = nep_Etot
         if charge_energy is not None:
             Etot_for_energy = Etot_for_energy + charge_energy.reshape(-1, 1)

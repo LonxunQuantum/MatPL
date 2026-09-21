@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 import lmdb
 import numpy as np
@@ -215,6 +216,23 @@ class DistributedAtomBatchSamplerTest(unittest.TestCase):
             set(_flatten(rank_batches[0] + rank_batches[1] + rank_batches[2] + rank_batches[3])),
             {0, 1, 2, 3},
         )
+
+    def test_benchmark_length_hint_limits_yielded_batches_without_reordering(self):
+        natoms = [1 + index % 5 for index in range(80)]
+        expected = list(
+            DistributedAtomBatchSampler(
+                natoms, atom_budget=10, rank=0, world_size=2, seed=21
+            )
+        )
+
+        with mock.patch.dict(
+            os.environ, {"MATPL_LMDB_BATCH_LENGTH_HINT": "3"}
+        ):
+            sampler = DistributedAtomBatchSampler(
+                natoms, atom_budget=10, rank=0, world_size=2, seed=21
+            )
+            self.assertEqual(len(sampler), 3)
+            self.assertEqual(list(sampler), expected[:3])
 
 
 if __name__ == "__main__":

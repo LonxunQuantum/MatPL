@@ -1,18 +1,69 @@
 #include "hip/hip_runtime.h"
 #include "./utilities/common.cuh"
+#include "../kernel/utilities/nep_mbgrad_opt.cuh"
 #include "./utilities/nep3_small_box.cuh"
 #include "./utilities/nep3_small_box_mbgrad.cuh"
+#include "./utilities/nep3_c3_wave_opt_legacy.cuh"
 #include "./utilities/error.cuh"
 #include "./utilities/gpu_vector.cuh"
+#include <algorithm>
+#include <c10/hip/HIPStream.h>
+#include <c10/hip/HIPCachingAllocator.h>
+#include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <hip/hip_runtime.h>
 
-// The CUDA backend may recompute this intermediate through its specialized
-// second-gradient kernel.  HIP keeps the established retained-tensor path.
+static bool nep_mb_secondgrad_omat24_supported(
+    int n_max_3b, int n_base_3b, int atom_types, int lmax_3,
+    int lmax_4, int lmax_5) {
+    return n_max_3b == 6 && n_base_3b == 9 && atom_types >= 1 &&
+           atom_types <= NEP_MAX_ELEMENT_TYPES && lmax_3 == 4 &&
+           lmax_4 > 0 && lmax_5 > 0;
+}
+
 bool should_recompute_nep_mb_dsnlm(
-    const int, const int, const int, const int, const int, const int,
-    const int) {
-    return false;
+    const int n_max_3b, const int n_base_3b, const int atom_types,
+    const int lmax_3, const int lmax_4, const int lmax_5, const int) {
+    return nep_mb_secondgrad_omat24_supported(
+        n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5);
+}
+
+static void launch_nep_mb_secondgrad_omat24(
+    const NepMbSecondGradArgs& args, int device) {
+    hipSetDevice(device);
+    if (args.atom_count == 0) return;
+    constexpr size_t shared_bytes = nep_mb_secondgrad_shared_bytes<6, 9, 4>();
+    const auto stream = c10::hip::getCurrentHIPStream(device);
+    constexpr int angular_values_per_neighbor = 138;
+    constexpr int weighted_values_per_center = 6 * 24;
+    const size_t angular_values =
+        static_cast<size_t>(args.atom_count) * args.max_neighbors *
+        angular_values_per_neighbor;
+    const size_t workspace_bytes =
+        (angular_values + static_cast<size_t>(args.atom_count) *
+         weighted_values_per_center) * sizeof(double);
+    auto workspace_deleter = [](void* ptr) {
+        c10::hip::HIPCachingAllocator::raw_delete(ptr);
+    };
+    std::unique_ptr<void, decltype(workspace_deleter)> angular_workspace(
+        c10::hip::HIPCachingAllocator::raw_alloc_with_stream(
+            workspace_bytes, stream.stream()),
+        workspace_deleter);
+    double* workspace = static_cast<double*>(angular_workspace.get());
+    NepMbSecondGradArgs kernel_args = args;
+    kernel_args.angular_workspace = workspace;
+    kernel_args.weighted_sums = workspace + angular_values;
+    const int rows = std::max(
+        args.atom_count * args.max_neighbors, args.atom_count * 6);
+    constexpr int precompute_threads = 256;
+    nep_mb_secondgrad_precompute_angular<precompute_threads><<<
+        (rows + precompute_threads - 1) / precompute_threads,
+        precompute_threads, 0, stream.stream()>>>(kernel_args);
+    CUDA_CHECK_KERNEL
+    nep_mb_secondgrad_fused<6, 9, 4, true, true, 4, 128><<<
+        args.atom_count, 128, shared_bytes, stream.stream()>>>(kernel_args);
+    CUDA_CHECK_KERNEL
 }
 
 __global__ void compute_gradsecond_mbgradout(
@@ -87,7 +138,15 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     const bool recompute_dsnlm,
     const int device
 ){
-    (void)recompute_dsnlm;
+    if (recompute_dsnlm) {
+        const NepMbSecondGradArgs args{
+            grad_second, d12, NL, de_dfeat, sum_fxyz, atom_map, coeff3,
+            nullptr, nullptr, gradsecond_c3, rcut_angular,
+            1.0 / rcut_angular, atom_nums,
+            maxneighs, atom_types, feat_2b_num, multi_feat_num};
+        launch_nep_mb_secondgrad_omat24(args, device);
+        return;
+    }
     hipSetDevice(device);
     // // 每个线程块的线程数 (这里选择 8 * 16 * 2 = 256，保证不会超过 1024)
     double rcinv_angular = 1.0 / rcut_angular;
@@ -142,56 +201,92 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
     // }
 
     int total_elements = atom_nums * maxneighs;
-    int threads_per_block = 256;
+    int threads_per_block = 128;
     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     const int N = atom_nums;
-    GPU_Vector<double> dfeat_c3(N * maxneighs * atom_types * n_max_3b * n_base_3b, 0.0);
+    GPU_Vector<double> tmp_dfeat_c3(
+        N * atom_types * n_max_3b * n_base_3b, 0.0);
     // find_angular_gardc_neigh_optimized<<<num_blocks, threads_per_block>>>(
     //     total_elements,
-    find_angular_gardc_neigh_optimized_2<<<N, threads_per_block>>>(
-        N,
-        grad_second,
-        d12,
-        NL,
-        de_dfeat-feat_2b_num,
-        dsnlm_dc,
-        sum_fxyz,
-        atom_map,
-        coeff3,
-        dfeat_c3.data(),
-        rcut_angular,
-        rcinv_angular,
-        atom_nums,
-        maxneighs,
-        n_max_3b,
-        n_base_3b,
-        atom_types,
-        atom_types_sq,
-        lmax_3,
-        lmax_4,
-        lmax_5,
-        feat_2b_num,
-        multi_feat_num
-        );
-    CUDA_CHECK_KERNEL
-    hipDeviceSynchronize();
+    // The LDS kernel is runtime-generic: only the reduction strategy is a
+    // compile-time choice. Descriptor dimensions remain runtime parameters.
+    // Keep the total below 48 KiB even when the device reports a larger limit:
+    // this preserves sufficient occupancy on the supported DCU targets.
+    int device_shared_limit = 0;
+    hipDeviceGetAttribute(
+        &device_shared_limit, hipDeviceAttributeMaxSharedMemoryPerBlock, device);
+    const size_t static_shared_bytes =
+        (NUM_OF_ABC * MAX_NUM_N + MAX_DIM_ANGULAR) * sizeof(double);
+    const size_t c3_elements = static_cast<size_t>(atom_types) * n_max_3b * n_base_3b;
+    const size_t dynamic_shared_bytes = c3_elements * sizeof(double);
+    const size_t shared_limit = std::min(
+        static_cast<size_t>(std::max(device_shared_limit, 0)),
+        static_cast<size_t>(48 * 1024));
+    const int fp_elements = n_max_3b *
+        (lmax_3 + (lmax_4 > 0 ? 1 : 0) + (lmax_5 > 0 ? 1 : 0));
+    const bool use_lds_opt =
+        atom_types > 0 &&
+        n_max_3b > 0 && n_max_3b <= MAX_NUM_N &&
+        n_base_3b > 0 && n_base_3b <= MAX_NUM_N &&
+        fp_elements >= 0 && fp_elements <= MAX_DIM_ANGULAR &&
+        static_shared_bytes + dynamic_shared_bytes <= shared_limit;
+    size_t selected_shared_bytes = static_shared_bytes + dynamic_shared_bytes;
 
-    GPU_Vector<double> tmp_dfeat_c3(N * atom_types * n_max_3b * n_base_3b, 0.0);
+    bool use_aot_specialization = false;
+#define MATPL_NEP_C3_SPECIALIZATION(BASE, MAX, TYPES, L3, L4, L5) \
+    { \
+      constexpr size_t specialization_shared_bytes = \
+          (NUM_OF_ABC * MAX + MAX * ((L3) + ((L5) > 0 ? 2 : 1)) + \
+              14 * (5 * NUM_OF_ABC - 1) + 14 * BASE) * sizeof(double) + \
+          sizeof(int); \
+      if (!use_aot_specialization && n_base_3b == BASE && n_max_3b == MAX && \
+        atom_types == TYPES && lmax_3 == L3 && lmax_4 == L4 && lmax_5 == L5) { \
+        nep3_opt_legacy::find_angular_gardc_neigh_opt<BASE, MAX, TYPES, L3, L5><<< \
+            N, threads_per_block>>>( \
+            N, grad_second, d12, NL, de_dfeat - feat_2b_num, dsnlm_dc, \
+            sum_fxyz, atom_map, coeff3, tmp_dfeat_c3.data(), rcut_angular, \
+            rcinv_angular, atom_nums, maxneighs, n_max_3b, n_base_3b, \
+            atom_types, atom_types_sq, lmax_3, lmax_4, lmax_5, feat_2b_num, \
+            multi_feat_num); \
+        selected_shared_bytes = specialization_shared_bytes; \
+        use_aot_specialization = true; \
+      } \
+    }
+#include "./utilities/nep3_c3_specialization_whitelist.def"
+#undef MATPL_NEP_C3_SPECIALIZATION
 
-    const int BLOCK_SIZE = 256;
-    const int grid_size = (N * maxneighs + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    aggregate_dfeat_c3_optimized<<<grid_size, BLOCK_SIZE>>>(
-        NL,
-        atom_map,
-        dfeat_c3.data(),
-        tmp_dfeat_c3.data(),
-        N,
-        atom_nums,
-        maxneighs,
-        atom_types,
-        n_max_3b,
-        n_base_3b
-    );
+    static bool c3_path_logged = false;
+    if (!c3_path_logged && std::getenv("MATPL_NEP_DEBUG_OPT_PATH") != nullptr) {
+        const char* c3_path = use_aot_specialization ? "aot-wave-specialized-opt" :
+            (use_lds_opt ? "runtime-lds-opt" : "base-global-atomic");
+        std::cerr << "NEP C3 path: " << c3_path
+                  << " (types=" << atom_types
+                  << ", n_max_3b=" << n_max_3b
+                  << ", n_base_3b=" << n_base_3b
+                  << ", lmax=" << lmax_3 << "/" << lmax_4 << "/" << lmax_5
+                  << ", shared=" << selected_shared_bytes
+                  << "/" << shared_limit << " bytes)" << std::endl;
+        c3_path_logged = true;
+    }
+
+    if (use_aot_specialization) {
+      // The legacy wave-level specialization was launched from the whitelist.
+    } else if (use_lds_opt) {
+      find_angular_gardc_neigh_optimized_2<true><<<
+          N, threads_per_block, dynamic_shared_bytes>>>(
+          N, grad_second, d12, NL, de_dfeat - feat_2b_num, dsnlm_dc,
+          sum_fxyz, atom_map, coeff3, tmp_dfeat_c3.data(), rcut_angular,
+          rcinv_angular, atom_nums, maxneighs, n_max_3b, n_base_3b,
+          atom_types, atom_types_sq, lmax_3, lmax_4, lmax_5, feat_2b_num,
+          multi_feat_num);
+    } else {
+      find_angular_gardc_neigh_optimized_2<false><<<N, threads_per_block>>>(
+          N, grad_second, d12, NL, de_dfeat - feat_2b_num, dsnlm_dc,
+          sum_fxyz, atom_map, coeff3, tmp_dfeat_c3.data(), rcut_angular,
+          rcinv_angular, atom_nums, maxneighs, n_max_3b, n_base_3b,
+          atom_types, atom_types_sq, lmax_3, lmax_4, lmax_5, feat_2b_num,
+          multi_feat_num);
+    }
     CUDA_CHECK_KERNEL
     hipDeviceSynchronize();
 

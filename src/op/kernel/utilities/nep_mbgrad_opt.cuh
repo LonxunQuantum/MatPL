@@ -1,6 +1,10 @@
 #pragma once
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "../../kernel_hip/utilities/nep_utilities_mb_secondc.cuh"
+#else
 #include "nep_utilities_mb_secondc.cuh"
+#endif
 #include "../../include/nep_limits.h"
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +19,8 @@ struct NepMbSecondGradArgs {
   const double* sum_fxyz;
   const int64_t* atom_type;
   const double* coeff3;
+  const double* angular_workspace;
+  const double* weighted_sums;
   double* gradsecond_c3;
   double rcut;
   double rcut_inv;
@@ -71,8 +77,20 @@ struct SharedLayout {
 template<int NMAX, int NBASIS, int TYPE_TILE>
 struct SharedTileSink {
   double* values;
+  double* accumulator = nullptr;
+  mutable double directional_sum = 0.0;
+  mutable int direction_count = 0;
+
   __device__ __forceinline__ void add(int type_slot, int n, int basis, double value) const {
-    atomicAdd(&values[(type_slot * NMAX + n) * NBASIS + basis], value);
+    directional_sum += value;
+    if (++direction_count == 4) {
+      if (accumulator != nullptr) {
+        *accumulator += directional_sum;
+      } else {
+        atomicAdd(&values[(type_slot * NMAX + n) * NBASIS + basis],
+                  directional_sum);
+      }
+    }
   }
 };
 
@@ -83,14 +101,15 @@ struct SharedTileSink {
 template<int NBASIS>
 struct NeighborContext {
   double d12;
-  double r12[3];
   double scd_r12[4];
-  double fn12[NBASIS];
-  double fnp12[NBASIS];
+  const double* fn12;
+  const double* fnp12;
   double fn, fnp, d12inv, rij_Lsq, rij_L2sq;
   const double* Fp;
   const double* dsnlm_dc;
   const double* sum_fxyz;
+  const double* weighted_sums;
+  const double* angular;
   double* output;
   int n, type_slot, tile_count;
 };
@@ -101,21 +120,32 @@ template<int L>
 struct AngularScratch {
   static_assert(L >= 1 && L <= 4, "Supported angular orders");
   double blm[2 * L + 1];
-  double rij_blm[2 * L + 1];
   double dblm_x[2 * L + 1];
   double dblm_y[2 * L + 1];
   double dblm_z[2 * L + 1];
   double dblm_r[2 * L + 1];
 };
 
-template<int L>
-__device__ __forceinline__ void build_angular_scratch(
-    double d12, double x, double y, double z, AngularScratch<L>& scratch) {
+template<typename T>
+struct AngularWorkspaceView {
+  T* blm;
+  T* dblm_x;
+  T* dblm_y;
+  T* dblm_z;
+  T* dblm_r;
+};
 
-  double d12inv = 1.0 / d12;
-  double x12 = x * d12inv;
-  double y12 = y * d12inv;
-  double z12 = z * d12inv;
+template<typename T>
+__device__ __forceinline__ AngularWorkspaceView<T> angular_workspace_view(
+    T* base, int offset) {
+  return {base + offset, base + 24 + offset, base + 48 + offset,
+          base + 72 + offset, base + 96 + offset};
+}
+
+template<int L, typename Scratch>
+__device__ __forceinline__ void build_angular_scratch(
+    double d12, double x, double y, double z, Scratch scratch) {
+
   double x2 = x * x;
   double y2 = y * y;
   double z2 = z * z;
@@ -129,29 +159,22 @@ __device__ __forceinline__ void build_angular_scratch(
   double y3 = y * y2;
   double z3 = z * z2;
   double r3 = d12 * r2;
-  double x12sq = x12 * x12;
-  double y12sq = y12 * y12;
-  double z12sq = z12 * z12;
-  double x12sq_minus_y12sq = x12sq - y12sq;
   if constexpr (L == 1) {
     scratch.blm[0]     = z;                                             // Y10 blm
     scratch.dblm_r[0]  = 0.0;                                           // Y10 blm/dr
     scratch.dblm_x[0]  = 0.0;                                           // Y10 blm/dx
     scratch.dblm_y[0]  = 0.0;                                           // Y10 blm/dy
     scratch.dblm_z[0]  = 1.0;                                           // Y10 blm/dz
-    scratch.rij_blm[0] = z12;                                           // Y10 sij_blm
     scratch.blm[1]     = x;                                             // Y11_real
     scratch.dblm_r[1]  = 0.0;
     scratch.dblm_x[1]  = 1.0;
     scratch.dblm_y[1]  = 0.0;
     scratch.dblm_z[1]  = 0.0;
-    scratch.rij_blm[1] = x12;
     scratch.blm[2]     = y;                                             // Y11_imag
     scratch.dblm_r[2]  = 0.0;
     scratch.dblm_x[2]  = 0.0;
     scratch.dblm_y[2]  = 1.0;
     scratch.dblm_z[2]  = 0.0;
-    scratch.rij_blm[2] = y12;
   }
   if constexpr (L == 2) {
     scratch.blm[0]     = 3.0 * z2- d12 * d12;                           // Y20
@@ -159,31 +182,26 @@ __device__ __forceinline__ void build_angular_scratch(
     scratch.dblm_x[0]  = 0.0;
     scratch.dblm_y[0]  = 0.0;
     scratch.dblm_z[0]  = 6.0 * z;
-    scratch.rij_blm[0] = 3.0 * z12sq - 1.0;
     scratch.blm[1]    = xz;                                             // Y21_real
     scratch.dblm_r[1] = 0.0;
     scratch.dblm_x[1] = z;
     scratch.dblm_y[1] = 0.0;
     scratch.dblm_z[1] = x;
-    scratch.rij_blm[1]= x12 * z12;
     scratch.blm[2]    = yz;                                             // Y21_imag
     scratch.dblm_r[2] = 0.0;
     scratch.dblm_x[2] = 0.0;
     scratch.dblm_y[2] = z;
     scratch.dblm_z[2] = y;
-    scratch.rij_blm[2]= y12 * z12;
     scratch.blm[3]    = x2 - y2;                                        // Y22_real
     scratch.dblm_r[3] = 0.0;
     scratch.dblm_x[3] = 2.0 * x;
     scratch.dblm_y[3] = -2.0 * y;
     scratch.dblm_z[3] = 0.0;
-    scratch.rij_blm[3]= x12sq_minus_y12sq;
     scratch.blm[4]     = 2.0 * xy;                                      // Y22_imag
     scratch.dblm_r[4]  = 0.0;
     scratch.dblm_x[4]  = 2.0 * y;
     scratch.dblm_y[4]  = 2.0 * x;
     scratch.dblm_z[4]  = 0.0;
-    scratch.rij_blm[4] = 2.0 * x12 * y12;
   }
   if constexpr (L == 3) {
     scratch.blm[0]     = (5.0 * z2 - 3.0 * r2) * z;                     // Y30
@@ -191,43 +209,36 @@ __device__ __forceinline__ void build_angular_scratch(
     scratch.dblm_x[0]  = 0.0;
     scratch.dblm_y[0]  = 0.0;
     scratch.dblm_z[0]  = 15 * z2 - 3 * r2;
-    scratch.rij_blm[0] = (5.0 * z12sq - 3.0) * z12;
     scratch.blm[1]     = (5.0 * z2 - r2) * x;                          // Y31_real
     scratch.dblm_r[1]  = -2.0 * x * d12;
     scratch.dblm_x[1]  = 5.0 * z2 - r2;
     scratch.dblm_y[1]  = 0.0;
     scratch.dblm_z[1]  = 10.0 * xz;
-    scratch.rij_blm[1] = (5.0 * z12sq - 1.0) * x12;
     scratch.blm[2]    = (5.0 * z2 - r2) * y;                          // Y31_imag
     scratch.dblm_r[2] = -2.0 * y * d12;
     scratch.dblm_x[2] = 0.0;
     scratch.dblm_y[2] = 5.0 * z2 - r2;
     scratch.dblm_z[2] = 10.0 * yz;
-    scratch.rij_blm[2]= (5.0 * z12sq - 1.0) * y12;
     scratch.blm[3]    = (x2 - y2) * z;                                // Y32_real
     scratch.dblm_r[3] = 0.0;
     scratch.dblm_x[3] = 2.0 * xz;
     scratch.dblm_y[3] = -2.0 * yz;
     scratch.dblm_z[3] = x2 - y2;
-    scratch.rij_blm[3]= x12sq_minus_y12sq * z12;
     scratch.blm[4]     = 2.0 * xyz;                                // Y32_imag
     scratch.dblm_r[4]  = 0.0;
     scratch.dblm_x[4]  = 2.0 * yz;
     scratch.dblm_y[4]  = 2.0 * xz;
     scratch.dblm_z[4]  = 2.0 * xy;
-    scratch.rij_blm[4] = 2.0 * x12 * y12 * z12;
     scratch.blm[5]    = (x2 - 3.0 * y2) * x;                           // Y33_real
     scratch.dblm_r[5] = 0.0;
     scratch.dblm_x[5] = 3.0 * (x2 - y2);
     scratch.dblm_y[5] = -6.0 * xy;
     scratch.dblm_z[5] = 0.0;
-    scratch.rij_blm[5]= (x12 * x12 - 3.0 * y12 * y12) * x12;
     scratch.blm[6]    = (3.0 * x2 - y2) * y;                           // Y33_imag
     scratch.dblm_r[6] = 0.0;
     scratch.dblm_x[6] = 6.0 * xy;
     scratch.dblm_y[6] = 3.0 * (x2 - y2);
     scratch.dblm_z[6] = 0.0;
-    scratch.rij_blm[6]= (3.0 * x12 * x12 - y12 * y12) * y12;
   }
   if constexpr (L == 4) {
     scratch.blm[0]    = (35.0 * z2 - 30.0 * r2) * z2 + 3.0 * r2 * r2;   // Y40
@@ -235,55 +246,46 @@ __device__ __forceinline__ void build_angular_scratch(
     scratch.dblm_x[0] = 0.0;
     scratch.dblm_y[0] = 0.0;
     scratch.dblm_z[0] = 140.0 * z3 - 60.0 * z * r2;
-    scratch.rij_blm[0]= ((35.0 * z12sq - 30.0) * z12sq + 3.0);
     scratch.blm[1]    = (7.0 * z2 - 3.0 * r2) * xz;                    // Y41_real
     scratch.dblm_r[1] = -6.0 * xz * d12;
     scratch.dblm_x[1] = 7.0 * z3 - 3.0 * z * r2;
     scratch.dblm_y[1] = 0.0;
     scratch.dblm_z[1]  = 21.0 * x * z2 - 3.0 * x * r2;
-    scratch.rij_blm[1] = (7.0 * z12sq - 3.0) * x12 * z12;
     scratch.blm[2]    = (7.0 * z2 - 3.0 * r2) * yz;                    // Y41_iamg
     scratch.dblm_r[2] = -6.0 * yz * d12;
     scratch.dblm_x[2] = 0.0;
     scratch.dblm_y[2] = 7.0 * z3 - 3.0 * z * r2;
     scratch.dblm_z[2] = 21.0 * y * z2 - 3.0 * y * r2;
-    scratch.rij_blm[2]= (7.0 * z12sq - 3.0) * y12 * z12;
     scratch.blm[3]    = (7.0 * z2 - r2) * x2my2;                       // Y42_real
     scratch.dblm_r[3] = 2.0 * d12 * (y2 - x2);
     scratch.dblm_x[3] = 14.0 * x * z2 - 2.0 * x * r2;
     scratch.dblm_y[3] = 2.0 * y *(r2 - 7.0 * z2);
     scratch.dblm_z[3] = 14.0 * x2 * z - 14.0 * y2 * z;
-    scratch.rij_blm[3]= (7.0 * z12sq - 1.0) * x12sq_minus_y12sq;
     scratch.blm[4]    = (7.0 * z2 - r2) * 2.0 * xy;                    // Y42_imag
     scratch.dblm_r[4] = -4.0 * xy * d12;
     scratch.dblm_x[4] = 2.0 * y * (7.0 * z2 - r2);
     scratch.dblm_y[4] = 2.0 * x * (7.0 * z2 - r2);
     scratch.dblm_z[4] = 28.0 * xyz;
-    scratch.rij_blm[4]= (7.0 * z12sq - 1.0) * x12 * y12 * 2.0;
     scratch.blm[5]    = (x2 - 3.0 * y2) * xz;                          // Y43_real
     scratch.dblm_r[5] = 0.0;
     scratch.dblm_x[5] = 3.0 * z * (x2 - y2);
     scratch.dblm_y[5] = -6.0 * xyz;
     scratch.dblm_z[5] = x3 - 3.0 * x * y2;
-    scratch.rij_blm[5]= (x12sq - 3.0 * y12sq) * x12 * z12;
     scratch.blm[6]    = (3.0 * x2 - y2) * yz;                         // Y43_imag
     scratch.dblm_r[6] = 0.0;
     scratch.dblm_x[6] = 6.0 * xyz;
     scratch.dblm_y[6] = 3.0 * x2 * z - 3.0 * y2 * z;
     scratch.dblm_z[6] = 3.0 * y * x2 - y3;
-    scratch.rij_blm[6]= (3.0 * x12sq - y12sq) * y12 * z12;
     scratch.blm[7]    = x2my2 * x2my2 - 4.0 * x2 * y2;                // Y44_real
     scratch.dblm_r[7] = 0.0;
     scratch.dblm_x[7] = 4.0 * x3 - 12.0 * x * y2;
     scratch.dblm_y[7] = 4.0 * y3 - 12.0 * x2 * y;
     scratch.dblm_z[7] = 0.0;
-    scratch.rij_blm[7]= (x12sq_minus_y12sq * x12sq_minus_y12sq - 4.0 * x12sq * y12sq);
     scratch.blm[8]    = 4.0 * x2my2 * xy;                            // Y44_imag
     scratch.dblm_r[8] = 0.0;
     scratch.dblm_x[8] = 12.0 * x2 * y - 4.0 * y3;
     scratch.dblm_y[8] = 4.0 * x3 - 12.0 * x * y2;
     scratch.dblm_z[8] = 0.0;
-    scratch.rij_blm[8]= (4.0 * x12 * y12 * x12sq_minus_y12sq);
   }
 }
 
@@ -292,16 +294,17 @@ __device__ __forceinline__ void build_angular_scratch(
 // The noinline basis helpers bound algebra temporaries to one k. Their callers
 // keep fixed, unrolled k loops and issue the same r/x/y/z atomics in that order.
 struct AngularContribution {
-  const double *fn12, *fnp12, *blm, *rij_blm;
+  const double *fn12, *fnp12, *blm;
   const double *dblm_x, *dblm_y, *dblm_z, *dblm_r;
-  const double *scd_r12, *dsnlm_dc, *s, *r12;
-  double d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp;
-  int type_slot, tile_count, n;
+  const double *scd_r12, *dsnlm_dc, *s;
+  double rij_Lsq, rij_L2sq, fn, fnp, Fp;
+  int type_slot, n;
   double* output;
+  double* accumulator = nullptr;
 };
 
 template<int L, int NMAX, int NBASIS, int TYPE_TILE>
-__device__ __noinline__ void accumulate_direct_basis(const AngularContribution& c, int k, int uj)
+__device__ __forceinline__ void accumulate_direct_basis(const AngularContribution& c, int k, int uj)
 {
   const double* fn12 = c.fn12;
   const double* fnp12 = c.fnp12;
@@ -320,7 +323,7 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
   const double Fp = c.Fp;
   const int type_slot = c.type_slot;
   const int n = c.n;
-  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output, c.accumulator};
 
   if constexpr (L == 1) {
     if (type_slot < 0) return;
@@ -552,15 +555,15 @@ __device__ __noinline__ void accumulate_direct_basis(const AngularContribution& 
 template<int L, int NMAX, int NBASIS, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_direct(
   const double* fn12, const double* fnp12,
-  const double* blm, const double* rij_blm,
+  const double* blm,
   const double* dblm_x, const double* dblm_y, const double* dblm_z, const double* dblm_r,
-  const double* scd_r12, const double* dsnlm_dc, const double* s, const double* r12,
-  double d12inv, double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
-  int type_slot, int tile_count, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
+  const double* scd_r12, const double* dsnlm_dc, const double* s,
+  double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
+  int type_slot, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
-  const AngularContribution c{fn12, fnp12, blm, rij_blm,
-      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s, r12,
-      d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, tile_count, n, sink.values};
+  const AngularContribution c{fn12, fnp12, blm,
+      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s,
+      rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, n, sink.values};
   if (type_slot < 0) return;
   #pragma unroll
   for (int k = 0; k < NBASIS; ++k) {
@@ -570,7 +573,7 @@ __device__ __forceinline__ void accumulate_direct(
 
 
 template<int L, int NMAX, int NBASIS, int TYPE_TILE>
-__device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c, int k, int uj)
+__device__ __forceinline__ void accumulate_cross_basis(const AngularContribution& c, int k, int uj)
 {
   const double* blm = c.blm;
   const double* dblm_x = c.dblm_x;
@@ -584,7 +587,7 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
   const double Fp = c.Fp;
   const int type_slot = c.type_slot;
   const int n = c.n;
-  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output, c.accumulator};
 
   if constexpr (L == 1) {
 
@@ -746,15 +749,15 @@ __device__ __noinline__ void accumulate_cross_basis(const AngularContribution& c
 template<int L, int NMAX, int NBASIS, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_cross(
   const double* fn12, const double* fnp12,
-  const double* blm, const double* rij_blm,
+  const double* blm,
   const double* dblm_x, const double* dblm_y, const double* dblm_z, const double* dblm_r,
-  const double* scd_r12, const double* dsnlm_dc, const double* s, const double* r12,
-  double d12inv, double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
+  const double* scd_r12, const double* dsnlm_dc, const double* s,
+  double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
   int type_slot, int tile_count, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
-  const AngularContribution c{fn12, fnp12, blm, rij_blm,
-      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s, r12,
-      d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, tile_count, n, sink.values};
+  const AngularContribution c{fn12, fnp12, blm,
+      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s,
+      rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, n, sink.values};
   for (int uj = 0; uj < tile_count; ++uj) {
     if (type_slot == uj) continue;
     #pragma unroll
@@ -768,7 +771,7 @@ __device__ __forceinline__ void accumulate_cross(
 // Prepare each direction inside its basis contribution so derivative arrays
 // are released immediately after their r/x/y/z atomic, in the legacy order.
 template<bool CROSS, int NMAX, int NBASIS, int TYPE_TILE>
-__device__ __noinline__ void accumulate_four_body_basis(const AngularContribution& c, int k, int uj)
+__device__ __forceinline__ void accumulate_four_body_basis(const AngularContribution& c, int k, int uj)
 {
   const double* fn12 = c.fn12;
   const double* fnp12 = c.fnp12;
@@ -787,7 +790,7 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
   const double Fp = c.Fp;
   const int type_slot = c.type_slot;
   const int n = c.n;
-  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output, c.accumulator};
 
   if constexpr (CROSS) {
     double dnlm_dc[5] = {0.0};
@@ -1170,15 +1173,15 @@ __device__ __noinline__ void accumulate_four_body_basis(const AngularContributio
 template<bool CROSS, int NMAX, int NBASIS, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_four_body(
   const double* fn12, const double* fnp12,
-  const double* blm, const double* rij_blm,
+  const double* blm,
   const double* dblm_x, const double* dblm_y, const double* dblm_z, const double* dblm_r,
-  const double* scd_r12, const double* dsnlm_dc, const double* s, const double* r12,
-  double d12inv, double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
+  const double* scd_r12, const double* dsnlm_dc, const double* s,
+  double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
   int type_slot, int tile_count, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
-  const AngularContribution c{fn12, fnp12, blm, rij_blm,
-      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s, r12,
-      d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, tile_count, n, sink.values};
+  const AngularContribution c{fn12, fnp12, blm,
+      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s,
+      rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, n, sink.values};
   if constexpr (CROSS) {
     for (int uj = 0; uj < tile_count; ++uj) {
       if (type_slot == uj) continue;
@@ -1198,7 +1201,7 @@ __device__ __forceinline__ void accumulate_four_body(
 
 
 template<bool CROSS, int NMAX, int NBASIS, int TYPE_TILE>
-__device__ __noinline__ void accumulate_five_body_basis(const AngularContribution& c, int k, int uj)
+__device__ __forceinline__ void accumulate_five_body_basis(const AngularContribution& c, int k, int uj)
 {
   const double* fn12 = c.fn12;
   const double* fnp12 = c.fnp12;
@@ -1213,7 +1216,7 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
   const double Fp = c.Fp;
   const int type_slot = c.type_slot;
   const int n = c.n;
-  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output};
+  const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{c.output, c.accumulator};
 
   if constexpr (CROSS) {
     double dnlm_dc[3] = {0.0};
@@ -1402,15 +1405,15 @@ __device__ __noinline__ void accumulate_five_body_basis(const AngularContributio
 template<bool CROSS, int NMAX, int NBASIS, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_five_body(
   const double* fn12, const double* fnp12,
-  const double* blm, const double* rij_blm,
+  const double* blm,
   const double* dblm_x, const double* dblm_y, const double* dblm_z, const double* dblm_r,
-  const double* scd_r12, const double* dsnlm_dc, const double* s, const double* r12,
-  double d12inv, double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
+  const double* scd_r12, const double* dsnlm_dc, const double* s,
+  double rij_Lsq, double rij_L2sq, double fn, double fnp, double Fp,
   int type_slot, int tile_count, int n, SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink)
 {
-  const AngularContribution c{fn12, fnp12, blm, rij_blm,
-      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s, r12,
-      d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, tile_count, n, sink.values};
+  const AngularContribution c{fn12, fnp12, blm,
+      dblm_x, dblm_y, dblm_z, dblm_r, scd_r12, dsnlm_dc, s,
+      rij_Lsq, rij_L2sq, fn, fnp, Fp, type_slot, n, sink.values};
   if constexpr (CROSS) {
     for (int uj = 0; uj < tile_count; ++uj) {
       if (type_slot == uj) continue;
@@ -1433,12 +1436,11 @@ template<int L, int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_
 // The call owns all order-specific temporaries. Keeping this boundary, with
 // only a context pointer as its argument, prevents register lifetimes from
 // spanning angular orders without imposing an artificial register cap.
-__device__ __noinline__ void accumulate_angular_order(const NeighborContext<NBASIS>& w)
+__device__ __forceinline__ void accumulate_angular_order(const NeighborContext<NBASIS>& w)
 {
   const int n = w.n, type_slot = w.type_slot, tile_count = w.tile_count;
-  const double d12 = w.d12, fn = w.fn, fnp = w.fnp;
-  const double d12inv = w.d12inv, rij_Lsq = w.rij_Lsq, rij_L2sq = w.rij_L2sq;
-  const double* r12 = w.r12;
+  const double fn = w.fn, fnp = w.fnp;
+  const double rij_Lsq = w.rij_Lsq, rij_L2sq = w.rij_L2sq;
   const double* scd_r12 = w.scd_r12;
   const double* fn12 = w.fn12;
   const double* fnp12 = w.fnp12;
@@ -1446,50 +1448,88 @@ __device__ __noinline__ void accumulate_angular_order(const NeighborContext<NBAS
   const double* dsnlm_dc = w.dsnlm_dc;
   const double* sum_fxyz = w.sum_fxyz;
   const SharedTileSink<NMAX, NBASIS, TYPE_TILE> sink{w.output};
-  AngularScratch<L> scratch{};
-  build_angular_scratch<L>(d12, r12[0], r12[1], r12[2], scratch);
   constexpr int offset = L * L - 1;
-  double sums[2 * L + 1];
-  #pragma unroll
-  for (int m = 0; m < 2 * L + 1; ++m) {
-    sums[m] = sum_fxyz[n * NUM_OF_ABC + offset + m];
+  const auto scratch = angular_workspace_view(w.angular, offset);
+  const double* sums = sum_fxyz + n * NUM_OF_ABC + offset;
+  const double* weighted_sums = w.weighted_sums + n * NUM_OF_ABC + offset;
+
+  // For L=1/2, the higher-body and angular terms target the same addresses.
+  // Combine them per (type slot, basis) while keeping the live range inside
+  // this angular order; L=3/4 retain the original one-atomic-per-address path.
+  if constexpr ((L == 1 && HAS5) || (L == 2 && HAS4)) {
+    for (int output_slot = 0; output_slot < tile_count; ++output_slot) {
+      const bool own_type = type_slot == output_slot;
+      #pragma unroll
+      for (int k = 0; k < NBASIS; ++k) {
+        double basis_sum = 0.0;
+        const AngularContribution body{fn12, fnp12, scratch.blm,
+            scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+            scd_r12, dsnlm_dc, sums, rij_Lsq, rij_L2sq, fn, fnp,
+            Fp[NMAX * LMAX3 + (L == 1 ? NMAX : 0) + n],
+            type_slot, n, w.output, &basis_sum};
+        if constexpr (L == 1) {
+          if (own_type) {
+            accumulate_five_body_basis<false, NMAX, NBASIS, TYPE_TILE>(body, k, 0);
+          } else {
+            accumulate_five_body_basis<true, NMAX, NBASIS, TYPE_TILE>(body, k, output_slot);
+          }
+        } else {
+          if (own_type) {
+            accumulate_four_body_basis<false, NMAX, NBASIS, TYPE_TILE>(body, k, 0);
+          } else {
+            accumulate_four_body_basis<true, NMAX, NBASIS, TYPE_TILE>(body, k, output_slot);
+          }
+        }
+
+        const AngularContribution angular{fn12, fnp12, scratch.blm,
+            scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+            scd_r12, dsnlm_dc, weighted_sums,
+            rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1],
+            type_slot, n, w.output, &basis_sum};
+        if (own_type) {
+          accumulate_direct_basis<L, NMAX, NBASIS, TYPE_TILE>(angular, k, 0);
+        } else {
+          accumulate_cross_basis<L, NMAX, NBASIS, TYPE_TILE>(angular, k, output_slot);
+        }
+        atomicAdd(&w.output[(output_slot * NMAX + n) * NBASIS + k], basis_sum);
+      }
+    }
+    return;
   }
   // Keep the legacy five-body, L=1, four-body, L=2, L=3, L=4 sequence.
   // The higher-body terms consume the unweighted sums of the same order.
   if constexpr (L == 1 && HAS5) {
     accumulate_five_body<false, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
-        scd_r12, dsnlm_dc, sums, r12,
-        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink);
+        scratch.blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums,
+        rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink);
     accumulate_five_body<true, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
-        scd_r12, dsnlm_dc, sums, r12,
-        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink);
+        scratch.blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums,
+        rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + NMAX + n], type_slot, tile_count, n, sink);
   }
   if constexpr (L == 2 && HAS4) {
     accumulate_four_body<false, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
-        scd_r12, dsnlm_dc, sums, r12,
-        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink);
+        scratch.blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums,
+        rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink);
     accumulate_four_body<true, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
-        scd_r12, dsnlm_dc, sums, r12,
-        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink);
-  }
-  #pragma unroll
-  for (int m = 0; m < 2 * L + 1; ++m) {
-    sums[m] *= C3B[offset + m];
+        scratch.blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, sums,
+        rij_Lsq, rij_L2sq, fn, fnp, Fp[NMAX * LMAX3 + n], type_slot, tile_count, n, sink);
   }
   accumulate_direct<L, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
-        scd_r12, dsnlm_dc, sums, r12,
-        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1], type_slot, tile_count, n, sink);
+        scratch.blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, weighted_sums,
+        rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1], type_slot, n, sink);
   accumulate_cross<L, NMAX, NBASIS, TYPE_TILE>(fn12, fnp12,
-        scratch.blm, scratch.rij_blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
-        scd_r12, dsnlm_dc, sums, r12,
-        d12inv, rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1], type_slot, tile_count, n, sink);
+        scratch.blm, scratch.dblm_x, scratch.dblm_y, scratch.dblm_z, scratch.dblm_r,
+        scd_r12, dsnlm_dc, weighted_sums,
+        rij_Lsq, rij_L2sq, fn, fnp, Fp[n * LMAX3 + L - 1], type_slot, tile_count, n, sink);
 }
 
+// The angular producer owns all polynomial arrays. This consumer retains only
+// the radial recurrence while visiting the four orders in their original order.
 template<int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE>
 __device__ __forceinline__ void accumulate_neighbor(NeighborContext<NBASIS>& w)
 {
@@ -1499,30 +1539,22 @@ __device__ __forceinline__ void accumulate_neighbor(NeighborContext<NBASIS>& w)
   w.rij_L2sq = w.d12inv * w.d12inv;
   w.fnp = w.fnp * w.d12inv - w.fn * w.d12inv * w.d12inv;
   w.fn = w.fn * w.d12inv;
-  {
-    accumulate_angular_order<1, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
-  }
+  accumulate_angular_order<1, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
   w.fnp = w.fnp * w.d12inv - w.fn * w.d12inv * w.d12inv;
   w.fn = w.fn * w.d12inv;
   w.rij_Lsq = w.rij_L2sq;
   w.rij_L2sq = w.rij_L2sq * w.d12inv;
-  {
-    accumulate_angular_order<2, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
-  }
+  accumulate_angular_order<2, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
   w.fnp = w.fnp * w.d12inv - w.fn * w.d12inv * w.d12inv;
   w.fn = w.fn * w.d12inv;
   w.rij_Lsq = w.rij_L2sq;
   w.rij_L2sq = w.rij_L2sq * w.d12inv;
-  {
-    accumulate_angular_order<3, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
-  }
+  accumulate_angular_order<3, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
   w.fnp = w.fnp * w.d12inv - w.fn * w.d12inv * w.d12inv;
   w.fn = w.fn * w.d12inv;
   w.rij_Lsq = w.rij_L2sq;
   w.rij_L2sq = w.rij_L2sq * w.d12inv;
-  {
-    accumulate_angular_order<4, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
-  }
+  accumulate_angular_order<4, NMAX, NBASIS, LMAX3, HAS4, HAS5, TYPE_TILE>(w);
 }
 
 } // namespace nep_mb_secondgrad_opt
@@ -1532,11 +1564,41 @@ __host__ __device__ constexpr size_t nep_mb_secondgrad_shared_bytes() {
   return nep_mb_secondgrad_opt::SharedLayout<NMAX, NBASIS, TYPE_TILE>::bytes;
 }
 
+template<int CTA_THREADS>
+__global__ void nep_mb_secondgrad_precompute_angular(NepMbSecondGradArgs a) {
+  using namespace nep_mb_secondgrad_opt;
+  const int row = blockIdx.x * CTA_THREADS + threadIdx.x;
+  const int row_count = a.atom_count * a.max_neighbors;
+  const int weighted_value_count = a.atom_count * 6 * 24;
+  const int grid_stride = gridDim.x * CTA_THREADS;
+  for (int i = row; i < weighted_value_count; i += grid_stride) {
+    const_cast<double*>(a.weighted_sums)[i] =
+        a.sum_fxyz[i] * C3B[i % 24];
+  }
+  if (row >= row_count) return;
+  const int64_t neighbor = a.neighbor_list[row];
+  if (neighbor < 0) return;
+  const double distance = a.d12[row * 4];
+  if (distance > a.rcut) return;
+  double* angular = const_cast<double*>(a.angular_workspace) + row * 138;
+  const double x = a.d12[row * 4 + 1];
+  const double y = a.d12[row * 4 + 2];
+  const double z = a.d12[row * 4 + 3];
+  build_angular_scratch<1>(distance, x, y, z, angular_workspace_view(angular, 0));
+  build_angular_scratch<2>(distance, x, y, z, angular_workspace_view(angular, 3));
+  build_angular_scratch<3>(distance, x, y, z, angular_workspace_view(angular, 8));
+  build_angular_scratch<4>(distance, x, y, z, angular_workspace_view(angular, 15));
+  double fc12, fcp12;
+  find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
+  find_fn_and_fnp(9, a.rcut_inv, distance, fc12, fcp12,
+                  angular + 120, angular + 129);
+}
+
 template<int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE, int CTA_THREADS>
 __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
   using namespace nep_mb_secondgrad_opt;
   static_assert(LMAX3 == 4 && HAS4 && HAS5, "Only OMat24 is dispatched");
-  static_assert(CTA_THREADS == 64, "OMat24 uses a fixed CTA width");
+  static_assert(CTA_THREADS == 128, "OMat24 uses a fixed CTA width");
   extern __shared__ __align__(8) unsigned char shared_raw[];
   SharedLayout<NMAX, NBASIS, TYPE_TILE> s(shared_raw);
   const int center = blockIdx.x;
@@ -1608,10 +1670,7 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       }
       if (type_slot < 0) continue;
 
-      double fc12, fcp12;
-      find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
-      double fn12[NBASIS];
-      find_fn(NBASIS, a.rcut_inv, distance, fc12, fn12);
+      const double* fn12 = a.angular_workspace + row * 138 + 120;
       double angular[24] = {0.0};
       accumulate_blm_rij(
           distance, a.d12[row * 4 + 1], a.d12[row * 4 + 2],
@@ -1648,9 +1707,6 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       }
       NeighborContext<NBASIS> work;
       work.d12 = distance;
-      work.r12[0] = a.d12[row * 4 + 1];
-      work.r12[1] = a.d12[row * 4 + 2];
-      work.r12[2] = a.d12[row * 4 + 3];
       work.scd_r12[0] = a.grad_second[row * 4];
       work.scd_r12[1] = a.grad_second[row * 4 + 1];
       work.scd_r12[2] = a.grad_second[row * 4 + 2];
@@ -1658,15 +1714,16 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       work.Fp = s.fp;
       work.dsnlm_dc = s.dsnlm_tile;
       work.sum_fxyz = s.sum_fxyz;
+      work.weighted_sums = a.weighted_sums + center * NMAX * 24;
+      work.angular = a.angular_workspace + row * 138;
       work.output = sink.values;
       work.n = n;
       work.type_slot = type_slot;
       work.tile_count = tile_count;
-      double (&fn12)[NBASIS] = work.fn12;
-      double (&fnp12)[NBASIS] = work.fnp12;
-      double fc12, fcp12;
-      find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
-      find_fn_and_fnp(NBASIS, a.rcut_inv, distance, fc12, fcp12, fn12, fnp12);
+      work.fn12 = work.angular + 120;
+      work.fnp12 = work.angular + 129;
+      const double* fn12 = work.fn12;
+      const double* fnp12 = work.fnp12;
 
       const int coeff_start =
           ((center_type * a.atom_types + neighbor_type) * NMAX + n) * NBASIS;

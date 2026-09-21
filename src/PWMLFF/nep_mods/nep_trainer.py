@@ -305,6 +305,11 @@ def _get_model_output_requests(sample, args: InputParam, train_virial: bool):
 def train(train_loader, model, criterion, optimizer, scheduler, epoch,
           optimizer_peak_lr, completed_updates, warmup_updates,
           device, args:InputParam):
+    max_train_steps = args.optimizer_param.max_train_steps
+    epoch_steps = (
+        min(len(train_loader), max_train_steps)
+        if max_train_steps > 0 else len(train_loader)
+    )
     batch_time = AverageMeter("Time", ":6.3f", device=device, world_size=args.world_size)
     data_time = AverageMeter("Data", ":6.3f", device=device, world_size=args.world_size)
     learning_rate = AverageMeter("LR", ":.8e", Summary.AVERAGE, device=device, world_size=args.world_size)
@@ -341,7 +346,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
     if args.optimizer_param.train_virial:
         progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
-        len(train_loader),
+        epoch_steps,
         progress_meters,
         prefix=f"Epoch: [{epoch}]",
     )
@@ -350,6 +355,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
     model.train()
     end = time.time()
     for i, sample in enumerate(train_loader):
+        if i >= epoch_steps:
+            break
         sample = {key: value.to(device) for key, value in sample.items()}
         nn_radial, nn_angular = CalcOps.calculate_maxneigh(
             sample["num_atom"],
@@ -496,17 +503,18 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         )
         learning_rate.update(optimizer_lr)
 
+        should_print = i % args.optimizer_param.print_freq == 0
         loss_val = loss
-        L1, L2 = print_l1_l2(model)
-        if args.optimizer_param.lambda_2:
-            loss_val += L2
+        parameter_norms = None
+        if should_print:
+            parameter_norms = print_l1_l2(model)
+        if should_print and args.optimizer_param.lambda_2:
+            loss_val += parameter_norms[1]
 
         losses.update(loss_val.item(), batch_size)
         loss_Etot.update(loss_Etot_val.item(), batch_size)
         loss_Etot_per_atom.update(loss_Etot_per_atom_val.item(), batch_size)
         loss_Ei.update(loss_Ei_val.item(), batch_size)
-        loss_L1.update(L1.item(), batch_size)
-        loss_L2.update(L2.item(), batch_size)
         if args.optimizer_param.train_egroup:
             loss_Egroup.update(loss_Egroup_val.item(), batch_size)
         if loss_Charge_per_atom_val is not None:
@@ -519,7 +527,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if i % args.optimizer_param.print_freq == 0:
+        if should_print:
+            L1, L2 = parameter_norms
+            loss_L1.update(L1.item(), batch_size)
+            loss_L2.update(L2.item(), batch_size)
             if args.world_size > 1 and args.reduce_loss:
                 progress.sync_meters()
             if args.rank == 0:
@@ -549,6 +560,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         progress.sync_meters()
 
     if args.rank == 0:
+        if max_train_steps > 0 and epoch_steps < len(train_loader):
+            print(
+                "NEP benchmark step limit reached: "
+                f"{epoch_steps}/{len(train_loader)} batches in epoch {epoch}"
+            )
         progress.display_summary([
             "Training Set:",
             f"PeakLR {optimizer_peak_lr:.8e}",
@@ -568,7 +584,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         loss_BEC.root,
         optimizer_lr,
         loss_L1.root,
-        loss_L2.root
+        loss_L2.root,
+        epoch_steps,
     )
 
 def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:InputParam):

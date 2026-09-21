@@ -4,6 +4,7 @@
 #include "./utilities/error.cuh"
 #include "./utilities/gpu_vector.cuh"
 #include <iostream>
+#include <c10/hip/HIPStream.h>
 #include <hip/hip_runtime.h>
 
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
@@ -122,6 +123,89 @@ __global__ void compute_gradsecond_c2(
                 // }
             }
         }
+    }
+}
+
+// Map one lane to one basis function. This makes neighboring lanes access
+// adjacent dfeat_2b_noc entries while preserving the original accumulation.
+__global__ void compute_gradsecond_c2_opt(
+    const double *grad_second,
+    const double *de_feat,
+    const double *dfeat_2b_noc,
+    double *tmp_grad,
+    int atom_nums,
+    int maxneighs,
+    int n_max_2b,
+    int n_base_2b,
+    int multi_feat_num)
+{
+    const int total = atom_nums * maxneighs * n_base_2b;
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx >= total) return;
+
+    const int k = idx % n_base_2b;
+    const int pair = idx / n_base_2b;
+    const int maxneigh_idx = pair % maxneighs;
+    const int atom_idx = pair / maxneighs;
+    const int dfeat_start = atom_idx * (n_max_2b + multi_feat_num);
+    const int dnoc = pair * n_base_2b * 4 + k * 4;
+    const int grad2 = pair * 4;
+    const double contracted =
+        dfeat_2b_noc[dnoc] * grad_second[grad2] +
+        dfeat_2b_noc[dnoc + 1] * grad_second[grad2 + 1] +
+        dfeat_2b_noc[dnoc + 2] * grad_second[grad2 + 2] +
+        dfeat_2b_noc[dnoc + 3] * grad_second[grad2 + 3];
+
+    int out = pair * n_max_2b * n_base_2b + k;
+    for (int n = 0; n < n_max_2b; ++n) {
+        tmp_grad[out] = de_feat[dfeat_start + n] * contracted;
+        out += n_base_2b;
+    }
+}
+
+__global__ void compute_gradsecond_c2_fused(
+    const double *grad_second,
+    const double *de_feat,
+    const double *dfeat_2b_noc,
+    const int64_t *atom_map,
+    const int64_t *NL_radial,
+    double *gradsecond_c2,
+    int atom_nums,
+    int maxneighs,
+    int n_max_2b,
+    int n_base_2b,
+    int atom_types,
+    int multi_feat_num)
+{
+    const int64_t task =
+        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t pair_count = static_cast<int64_t>(atom_nums) * maxneighs;
+    if (task >= pair_count * n_base_2b) return;
+
+    const int basis = task % n_base_2b;
+    const int64_t pair = task / n_base_2b;
+    const int64_t neighbor = NL_radial[pair];
+    if (neighbor < 0) return;
+
+    const int atom = pair / maxneighs;
+    const int atom_type_i = static_cast<int>(atom_map[atom]);
+    const int atom_type_j = static_cast<int>(atom_map[neighbor]);
+    const int64_t grad_start = pair * 4;
+    const int64_t noc_start = (pair * n_base_2b + basis) * 4;
+    const double contraction =
+        dfeat_2b_noc[noc_start] * grad_second[grad_start] +
+        dfeat_2b_noc[noc_start + 1] * grad_second[grad_start + 1] +
+        dfeat_2b_noc[noc_start + 2] * grad_second[grad_start + 2] +
+        dfeat_2b_noc[noc_start + 3] * grad_second[grad_start + 3];
+
+    const int64_t dfeat_start =
+        static_cast<int64_t>(atom) * (n_max_2b + multi_feat_num);
+    const int64_t output_start =
+        (atom_type_i * atom_types + atom_type_j) * n_max_2b * n_base_2b +
+        basis;
+    for (int n = 0; n < n_max_2b; ++n) {
+        atomicAdd(&gradsecond_c2[output_start + n * n_base_2b],
+                  de_feat[dfeat_start + n] * contraction);
     }
 }
 
@@ -283,37 +367,25 @@ void launch_calculate_nepfeat_secondgradout_c2(
     const int device
 ) {
     hipSetDevice(device);
-    // 每个线程块的线程数 (这里选择 8 * 16 * 2 = 256，保证不会超过 1024)
-    int total_elements = atom_nums * maxneighs;
-    int threads_per_block = 256;
-    int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    GPU_Vector<double> tmp_grad(atom_nums * maxneighs * n_max_2b * n_base_2b, 0.0);
-    compute_gradsecond_c2<<<num_blocks, threads_per_block>>>(
+    constexpr int threads_per_block = 256;
+    const int64_t total_tasks =
+        static_cast<int64_t>(atom_nums) * maxneighs * n_base_2b;
+    const int num_blocks = static_cast<int>(
+        (total_tasks + threads_per_block - 1) / threads_per_block);
+    const auto stream = c10::hip::getCurrentHIPStream(device);
+    compute_gradsecond_c2_fused<<<num_blocks, threads_per_block, 0, stream.stream()>>>(
         grad_second,
         de_feat,
         dfeat_2b_noc,
-        tmp_grad.data(),
+        atom_map,
+        NL_radial,
+        gradsecond_c2,
         atom_nums,
         maxneighs,
         n_max_2b,
         n_base_2b,
-        multi_feat_num
-        );
-    hipDeviceSynchronize();
-
-    // 优化reduce_kernel，每个wavefront处理一个output元素
-    const int WAVEFRONT_SIZE = 64;
-    int total_outputs = atom_types * atom_types * n_max_2b * n_base_2b;
-    int total_threads_optimized = total_outputs * WAVEFRONT_SIZE;
-    int threads_per_block_optimized = 256;  // 包含4个wavefront
-    int num_blocks_optimized = (total_threads_optimized + threads_per_block_optimized - 1) / threads_per_block_optimized;
-
-    reduce_kernel_warp_optimized<<<num_blocks_optimized, threads_per_block_optimized>>>(
-        tmp_grad.data(), atom_map, NL_radial,
-        atom_nums, maxneighs,
-        n_max_2b, n_base_2b, atom_types, gradsecond_c2
-    );
+        atom_types,
+        multi_feat_num);
 
     CUDA_CHECK_KERNEL
-    hipDeviceSynchronize();
 }
