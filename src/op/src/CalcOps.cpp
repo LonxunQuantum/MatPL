@@ -424,6 +424,11 @@ torch::autograd::variable_list CalculateNepFeat::forward(
         ctx->saved_data["multi_feat_num"] = multi_feat_num;
         ctx->saved_data["fix_cij"] = fix_cij;
 
+        // These are saved kernel contexts, not differentiable outputs.
+        // InputGrad supplies their complete coefficient dependence.
+        // Leaving an autograd edge here can schedule a spurious
+        // descriptor backward with a compact materialized zero seed.
+        ctx->mark_non_differentiable({dfeat_c2, dfeat_2b, dfeat_2b_noc});
         return {feats, dfeat_c2, dfeat_2b, dfeat_2b_noc};
     }
 
@@ -781,6 +786,11 @@ torch::autograd::variable_list CalculateNepMbFeat::forward(
         ctx->saved_data["lmax_4"] = lmax_4;
         ctx->saved_data["lmax_5"] = lmax_5;
         ctx->saved_data["fix_cij"] = fix_cij;
+        // These are saved kernel contexts, not differentiable outputs.
+        // InputGrad supplies their complete coefficient dependence.
+        // Leaving an autograd edge here can schedule a spurious
+        // descriptor backward with a compact materialized zero seed.
+        ctx->mark_non_differentiable({dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz});
         return {feats, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz};
     }
 

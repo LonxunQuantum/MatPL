@@ -602,6 +602,9 @@ static __global__ void find_angular_gardc_neigh_fallback(
   for (int k = threadIdx.x; k < total_Fp_elements; k += blockDim.x) {
     shm_Fp[k] = 0.0;
   }
+  // Higher-body values are loaded by different lanes from those
+  // that zeroed their slots; finish zeroing across all waves first.
+  __syncthreads();
   for (int k = threadIdx.x; k < b3_nums; k += blockDim.x) {
     int nn = k / L_max3;
     int ll = k % L_max3;
@@ -767,6 +770,9 @@ static __global__ void find_angular_gardc_neigh_opt(
   for (int k = threadIdx.x; k < total_Fp_elements; k += blockDim.x) {
     shm_Fp[k] = 0.0;
   }
+  // Higher-body values are loaded by different lanes from those
+  // that zeroed their slots; finish zeroing across all waves first.
+  __syncthreads();
 
   for (int k = threadIdx.x; k < b3_nums; k += blockDim.x) {
     int nn = k / L_max3;
