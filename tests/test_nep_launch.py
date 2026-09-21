@@ -67,7 +67,13 @@ def test_bare_gpu_preserves_automatic_spawn(monkeypatch):
 @pytest.mark.parametrize("step_key,step", [
     ("SLURM_STEP_ID", None), ("SLURM_STEP_ID", ""), ("SLURM_STEP_ID", "batch"),
     ("SLURM_STEP_ID", "extern"), ("SLURM_STEP_ID", "interactive"),
-    ("SLURM_STEPID", "batch"),
+    ("SLURM_STEP_ID", "-4"), ("SLURM_STEP_ID", "-5"),
+    ("SLURM_STEP_ID", "-6"), ("SLURM_STEPID", "batch"),
+    ("SLURM_STEPID", "-5"),
+    ("SLURM_STEP_ID", "4294967281"),
+    ("SLURM_STEP_ID", "4294967290"), ("SLURM_STEP_ID", "4294967291"),
+    ("SLURM_STEP_ID", "4294967292"), ("SLURM_STEP_ID", "4294967293"),
+    ("SLURM_STEP_ID", "4294967294"), ("SLURM_STEP_ID", "4294967295"),
 ])
 @pytest.mark.parametrize("device,gpu_count", [("cpu", 0), ("cuda", 1), ("cuda", 4)])
 def test_sbatch_direct_launch_uses_devices_not_allocated_task_count(
@@ -97,6 +103,18 @@ def test_srun_gpu_keeps_external_ranks(monkeypatch, step_key):
     p = params()
     assert not configure_nep_runtime(p, {
         step_key: "0", "SLURM_NNODES": "1", "SLURM_NTASKS": "4",
+        "SLURM_PROCID": "2", "SLURM_LOCALID": "2",
+        "MASTER_ADDR": "localhost", "MASTER_PORT": "29500",
+    })
+    assert (p.world_size, p.rank, p.local_rank) == (4, 2, 2)
+
+
+@pytest.mark.parametrize("step", ["4294967280", "-16"])
+def test_slurm_normal_step_id_boundary_keeps_external_rank(step):
+    from src.utils.nep_distributed import configure_nep_runtime
+    p = params("cpu")
+    assert not configure_nep_runtime(p, {
+        "SLURM_STEP_ID": step, "SLURM_NNODES": "1", "SLURM_NTASKS": "4",
         "SLURM_PROCID": "2", "SLURM_LOCALID": "2",
         "MASTER_ADDR": "localhost", "MASTER_PORT": "29500",
     })

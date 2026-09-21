@@ -5,6 +5,10 @@ import socket
 import torch
 
 
+_SLURM_MAX_NORMAL_STEP_ID = 0xfffffff0
+_SLURM_UINT32_MASK = 0xffffffff
+
+
 def training_device_type(params):
     requested = getattr(params, "device", "auto")
     if requested not in ("auto", "cpu", "cuda"):
@@ -28,6 +32,19 @@ def training_backend(params, device_type):
     return backend
 
 
+def _is_slurm_training_step(step):
+    """Return whether a Slurm step ID represents an srun-launched task."""
+    if step in (None, "", "batch", "extern", "interactive"):
+        return False
+    try:
+        step_id = int(step)
+    except (TypeError, ValueError):
+        return True
+    if step_id < 0:
+        step_id &= _SLURM_UINT32_MASK
+    return step_id <= _SLURM_MAX_NORMAL_STEP_ID
+
+
 def configure_nep_runtime(params, environ=None):
     """Set ranks from torchrun/srun, or request local GPU spawning.
 
@@ -47,8 +64,7 @@ def configure_nep_runtime(params, environ=None):
         local_world_size = int(env.get("LOCAL_WORLD_SIZE", world_size))
         multi_nodes = world_size > local_world_size
         external = True
-    elif ("SLURM_PROCID" in env and
-          slurm_step not in (None, "", "batch", "extern", "interactive")):
+    elif "SLURM_PROCID" in env and _is_slurm_training_step(slurm_step):
         if not all(key in env for key in ("SLURM_NTASKS", "SLURM_LOCALID")):
             raise ValueError("srun requires SLURM_NTASKS and SLURM_LOCALID")
         world_size, rank, local_rank = (int(env[key]) for key in ("SLURM_NTASKS", "SLURM_PROCID", "SLURM_LOCALID"))
