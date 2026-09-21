@@ -42,32 +42,58 @@ void launch_calculate_nepmbfeat_grad(
 
     GPU_Vector<double> dfeat_c3(N * n_types * n_max_3b * n_base_3b, 0.0);
 
-    const int grid_size = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    find_angular_gard_small_box<<<grid_size, BLOCK_SIZE>>>(
-        N,
-        n_types,
-        num_types_sq,
-        neigh_num,
-        lmax_3,
-        lmax_4,
-        lmax_5,
-        feat_2b_num,
-        feat_3b_num,
-        rcut_angular,
-        rcinv_angular,
-        n_max_3b,
-        n_base_3b,
-        NL,
-        r12,
-        coeff3,
-        atom_map,
-        grad_output - feat_2b_num,
-        sum_fxyz,
-        dsnlm_dc,
-        dfeat_c3.data(),
-        dfeat_drij,
-        grad_d12_3b
-    );
+    constexpr size_t MAX_SMALL_BOX_OPT_SHARED_BYTES = 48 * 1024;
+    const size_t small_box_opt_shared_bytes =
+        static_cast<size_t>(MAX_DIM_ANGULAR + n_max_3b * NUM_OF_ABC +
+                            2 * n_types * n_max_3b * n_base_3b +
+                            n_types * n_base_3b * NUM_OF_ABC) *
+        sizeof(double);
+    const bool use_small_box_opt =
+        n_max_3b <= MAX_NUM_N && n_base_3b <= MAX_NUM_N &&
+        lmax_3 == 4 && lmax_4 == 2 &&
+        (lmax_5 == 0 || lmax_5 == 1) &&
+        n_max_3b * (lmax_3 + (lmax_4 > 0) + (lmax_5 > 0)) <= MAX_DIM_ANGULAR &&
+        small_box_opt_shared_bytes <= MAX_SMALL_BOX_OPT_SHARED_BYTES;
+    const size_t active_types_shared_bytes =
+        static_cast<size_t>(MAX_DIM_ANGULAR + n_max_3b * NUM_OF_ABC +
+                            2 * n_max_3b * n_base_3b +
+                            n_base_3b * NUM_OF_ABC) *
+        sizeof(double);
+    const bool use_active_types_opt =
+        n_types <= 128 && n_max_3b <= MAX_NUM_N && n_base_3b <= MAX_NUM_N &&
+        lmax_3 == 4 && lmax_4 == 2 &&
+        (lmax_5 == 0 || lmax_5 == 1) &&
+        n_max_3b * (lmax_3 + (lmax_4 > 0) + (lmax_5 > 0)) <= MAX_DIM_ANGULAR &&
+        active_types_shared_bytes <= MAX_SMALL_BOX_OPT_SHARED_BYTES;
+    if (use_active_types_opt && !use_small_box_opt) {
+        find_angular_gard_small_box_active_types<<<
+            N, BLOCK_SIZE, static_cast<int>(active_types_shared_bytes)>>>(
+            N, n_types, num_types_sq, neigh_num, lmax_3, lmax_4, lmax_5,
+            feat_2b_num, feat_3b_num, rcut_angular, rcinv_angular,
+            n_max_3b, n_base_3b, NL, r12, coeff3, atom_map,
+            grad_output - feat_2b_num, sum_fxyz, dsnlm_dc, dfeat_c3.data(),
+            dfeat_drij, grad_d12_3b);
+    } else if (use_small_box_opt) {
+        const int shared_bytes =
+            (MAX_DIM_ANGULAR + n_max_3b * NUM_OF_ABC +
+             2 * n_types * n_max_3b * n_base_3b +
+             n_types * n_base_3b * NUM_OF_ABC) *
+            static_cast<int>(sizeof(double));
+        find_angular_gard_small_box_opt<<<N, BLOCK_SIZE, shared_bytes>>>(
+            N, n_types, num_types_sq, neigh_num, lmax_3, lmax_4, lmax_5,
+            feat_2b_num, feat_3b_num, rcut_angular, rcinv_angular,
+            n_max_3b, n_base_3b, NL, r12, coeff3, atom_map,
+            grad_output - feat_2b_num, sum_fxyz, dsnlm_dc, dfeat_c3.data(),
+            dfeat_drij, grad_d12_3b);
+    } else {
+        const int grid_size = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        find_angular_gard_small_box<<<grid_size, BLOCK_SIZE>>>(
+            N, n_types, num_types_sq, neigh_num, lmax_3, lmax_4, lmax_5,
+            feat_2b_num, feat_3b_num, rcut_angular, rcinv_angular,
+            n_max_3b, n_base_3b, NL, r12, coeff3, atom_map,
+            grad_output - feat_2b_num, sum_fxyz, dsnlm_dc, dfeat_c3.data(),
+            dfeat_drij, grad_d12_3b);
+    }
     CUDA_CHECK_KERNEL
 
     // print_dfeat_c3(dfeat_c3.data(), N, n_types, n_max_3b, n_base_3b);

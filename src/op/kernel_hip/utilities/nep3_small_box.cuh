@@ -145,6 +145,965 @@ static __global__ void find_mb_descriptor_small_box(
   }
 }
 
+// ============================================================================
+// round_006 block-per-atom support: _opt helper variants
+// Verbatim copies of accumulate_f12 / _with_4body / _with_5body from
+// nep_utilities.cuh, except the dfeat_c3 accumulation uses atomicAdd so a
+// whole atom-block can accumulate into SHARED memory race-free (same-type
+// neighbors hit the same (t2,n,kk) slots). Originals are untouched; only
+// find_angular_gard_small_box_opt below calls these.
+// ============================================================================
+static __device__ __forceinline__ void store_f12d_group(
+  double* output,
+  const double* f12d)
+{
+  output[0] = f12d[3];
+  output[1] = f12d[0];
+  output[2] = f12d[1];
+  output[3] = f12d[2];
+}
+
+static __device__ __forceinline__ void accumulate_f12_opt(
+  const int n,
+  const double d12,
+  const double* r12,
+  double fn,
+  double fnp,
+  const double* Fp,
+  const double* sum_fxyz,
+  const double* s_rij_blm,
+  double* f12,
+  double* dfeat_drij,
+  const int drij_idx,
+  double* dfeat_c3,
+  double* fn12,
+  double* fnp12,
+  const int type_j,
+  const int ntypes,
+  const int lmax_3,
+  const int n_max_angular,
+  const int n_base_angular,
+  const int dc_start_idx,
+  const int n1,
+  const int n2) // i-> [ntype, nmax, nbase]-> [ntyp, ]
+{
+  const double d12inv = 1.0 / d12;
+  // l = 1
+  // double gn12 = fn; //for dc
+  // double gn12p = fnp;
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s1[3] = {
+    sum_fxyz[n * NUM_OF_ABC + 0] * C3B[0],
+    sum_fxyz[n * NUM_OF_ABC + 1] * C3B[1],
+    sum_fxyz[n * NUM_OF_ABC + 2] * C3B[2]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_1(
+      d12inv, fn, fnp, Fp[n*lmax_3], s1, r12, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + n * 4, f12d_group);
+  }
+
+  // l = 2
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s2[5] = {
+    sum_fxyz[n * NUM_OF_ABC + 3] * C3B[3],
+    sum_fxyz[n * NUM_OF_ABC + 4] * C3B[4],
+    sum_fxyz[n * NUM_OF_ABC + 5] * C3B[5],
+    sum_fxyz[n * NUM_OF_ABC + 6] * C3B[6],
+    sum_fxyz[n * NUM_OF_ABC + 7] * C3B[7]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_2(
+      d12, d12inv, fn, fnp, Fp[n*lmax_3+1], s2, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (n_max_angular + n) * 4, f12d_group);
+  }
+  // l = 3
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s3[7] = {
+    sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
+    sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
+    sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
+    sum_fxyz[n * NUM_OF_ABC + 11] * C3B[11],
+    sum_fxyz[n * NUM_OF_ABC + 12] * C3B[12],
+    sum_fxyz[n * NUM_OF_ABC + 13] * C3B[13],
+    sum_fxyz[n * NUM_OF_ABC + 14] * C3B[14]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_3(
+      d12, d12inv, fn, fnp, Fp[n*lmax_3+2], s3, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (2 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+  // l = 4
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s4[9] = {
+    sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
+    sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
+    sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],
+    sum_fxyz[n * NUM_OF_ABC + 18] * C3B[18],
+    sum_fxyz[n * NUM_OF_ABC + 19] * C3B[19],
+    sum_fxyz[n * NUM_OF_ABC + 20] * C3B[20],
+    sum_fxyz[n * NUM_OF_ABC + 21] * C3B[21],
+    sum_fxyz[n * NUM_OF_ABC + 22] * C3B[22],
+    sum_fxyz[n * NUM_OF_ABC + 23] * C3B[23]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_4(
+      r12[0], r12[1], r12[2], d12, d12inv, fn, fnp,
+      Fp[n*lmax_3+3], s4, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (3 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+  for(int kk=0; kk < n_base_angular; ++kk) {
+    // l = 1
+    double tmp1 = s1[0] * s_rij_blm[0] +
+                  s1[1] * s_rij_blm[1] * 2.0 +
+                  s1[2] * s_rij_blm[2] * 2.0;
+    // l = 2
+    double tmp2 =
+                  s2[0] * s_rij_blm[3] +
+           2.0 * (s2[1] * s_rij_blm[4] +
+                  s2[2] * s_rij_blm[5] +
+                  s2[3] * s_rij_blm[6] +
+                  s2[4] * s_rij_blm[7] );
+    // l = 3
+    double tmp3 =
+                  s3[0] * s_rij_blm[8] +
+           2.0 * (s3[1] * s_rij_blm[9] +
+                  s3[2] * s_rij_blm[10] +
+                  s3[3] * s_rij_blm[11] +
+                  s3[4] * s_rij_blm[12] +
+                  s3[5] * s_rij_blm[13] +
+                  s3[6] * s_rij_blm[14] );
+    // l = 4
+    double tmp4 = s4[0] * s_rij_blm[15] +
+           2.0 * (s4[1] * s_rij_blm[16] +
+                  s4[2] * s_rij_blm[17] +
+                  s4[3] * s_rij_blm[18] +
+                  s4[4] * s_rij_blm[19] +
+                  s4[5] * s_rij_blm[20] +
+                  s4[6] * s_rij_blm[21] +
+                  s4[7] * s_rij_blm[22] +
+                  s4[8] * s_rij_blm[23] );
+
+    tmp1 = Fp[n*lmax_3]*tmp1 + Fp[n*lmax_3+1]*tmp2 + Fp[n*lmax_3+2]*tmp3 + Fp[n*lmax_3+3]*tmp4;
+    tmp1 = tmp1 * 2.0 * fn12[kk];
+    int dc_id = dc_start_idx + type_j * n_max_angular * n_base_angular + n*n_base_angular + kk;
+    atomicAdd(&dfeat_c3[dc_id], tmp1);
+  }
+}
+
+static __device__ __forceinline__ void accumulate_f12_with_4body_opt(
+  const int n,
+  const double d12,
+  const double* r12,
+  double fn,
+  double fnp,
+  const double* Fp,
+  const double* sum_fxyz,
+  const double* s_rij_blm,
+  double* f12,
+  double* dfeat_drij,
+  const int drij_idx,
+  double* dfeat_c3,
+  double* fn12,
+  double* fnp12,
+  const int type_j,
+  const int ntypes,
+  const int lmax_3,
+  const int n_max_angular,
+  const int n_base_angular,
+  const int dc_start_idx,
+  const int n1,
+  const int n2)
+{
+  const double d12inv = 1.0 / d12;
+  // l = 1
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s1[3] = {
+    sum_fxyz[n * NUM_OF_ABC + 0] * C3B[0],
+    sum_fxyz[n * NUM_OF_ABC + 1] * C3B[1],
+    sum_fxyz[n * NUM_OF_ABC + 2] * C3B[2]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_1(
+      d12inv, fn, fnp, Fp[n*lmax_3], s1, r12, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + n * 4, f12d_group);
+  }
+  // l = 2
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s2[5] = {
+    sum_fxyz[n * NUM_OF_ABC + 3],
+    sum_fxyz[n * NUM_OF_ABC + 4],
+    sum_fxyz[n * NUM_OF_ABC + 5],
+    sum_fxyz[n * NUM_OF_ABC + 6],
+    sum_fxyz[n * NUM_OF_ABC + 7]};
+
+  double s24b[5] = {
+    sum_fxyz[n * NUM_OF_ABC + 3],
+    sum_fxyz[n * NUM_OF_ABC + 4],
+    sum_fxyz[n * NUM_OF_ABC + 5],
+    sum_fxyz[n * NUM_OF_ABC + 6],
+    sum_fxyz[n * NUM_OF_ABC + 7]};
+
+  double s24bsq[5] = {
+    s24b[0] * s24b[0],
+    s24b[1] * s24b[1],
+    s24b[2] * s24b[2],
+    s24b[3] * s24b[3],
+    s24b[4] * s24b[4]};
+
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_4body(
+      d12, d12inv, fn, fnp, Fp[n_max_angular * lmax_3 + n], s2,
+      r12, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (lmax_3 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+  s2[0] *= C3B[3];
+  s2[1] *= C3B[4];
+  s2[2] *= C3B[5];
+  s2[3] *= C3B[6];
+  s2[4] *= C3B[7];
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_2(
+      d12, d12inv, fn, fnp, Fp[n*lmax_3+1], s2, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (n_max_angular + n) * 4, f12d_group);
+  }
+  // l = 3
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s3[7] = {
+    sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
+    sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
+    sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
+    sum_fxyz[n * NUM_OF_ABC + 11] * C3B[11],
+    sum_fxyz[n * NUM_OF_ABC + 12] * C3B[12],
+    sum_fxyz[n * NUM_OF_ABC + 13] * C3B[13],
+    sum_fxyz[n * NUM_OF_ABC + 14] * C3B[14]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_3(
+      d12, d12inv, fn, fnp, Fp[n*lmax_3+2], s3, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (2 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+  // l = 4
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s4[9] = {
+    sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
+    sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
+    sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],
+    sum_fxyz[n * NUM_OF_ABC + 18] * C3B[18],
+    sum_fxyz[n * NUM_OF_ABC + 19] * C3B[19],
+    sum_fxyz[n * NUM_OF_ABC + 20] * C3B[20],
+    sum_fxyz[n * NUM_OF_ABC + 21] * C3B[21],
+    sum_fxyz[n * NUM_OF_ABC + 22] * C3B[22],
+    sum_fxyz[n * NUM_OF_ABC + 23] * C3B[23]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_4(
+      r12[0], r12[1], r12[2], d12, d12inv, fn, fnp,
+      Fp[n*lmax_3+3], s4, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (3 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+
+  // for c3 param
+  double ds0_r = 0.0;
+  double ds1_r = 0.0;
+  double ds2_r = 0.0;
+  double ds3_r = 0.0;
+  double ds4_r = 0.0;
+  for(int kk=0; kk < n_base_angular; ++kk) {
+    // l = 1
+    double tmp1 = s1[0] * s_rij_blm[0] +
+                  s1[1] * s_rij_blm[1] * 2.0 +
+                  s1[2] * s_rij_blm[2] * 2.0;
+
+    // l = 2
+    ds0_r = s_rij_blm[3] * fn12[kk];
+    ds1_r = s_rij_blm[4] * fn12[kk];
+    ds2_r = s_rij_blm[5] * fn12[kk];
+    ds3_r = s_rij_blm[6] * fn12[kk];
+    ds4_r = s_rij_blm[7] * fn12[kk];
+
+    double tmp2_4b = 3.0 * C4B[0] * s24bsq[0] * ds0_r +
+              C4B[1] * ds0_r * (s24bsq[1] + s24bsq[2]) + C4B[1] * s24b[0] * (2.0 * s24b[1] * ds1_r + 2.0 * s24b[2] * ds2_r) +
+              C4B[2] * ds0_r * (s24bsq[3] + s24bsq[4]) + C4B[2] * s24b[0] * (2.0 * s24b[3] * ds3_r + 2.0 * s24b[4] * ds4_r) +
+              C4B[3] * ds3_r * (s24bsq[2] - s24bsq[1]) + C4B[3] * s24b[3] * (2.0 * s24b[2] * ds2_r - 2.0 * s24b[1] * ds1_r) +
+              C4B[4] *(ds1_r * s24b[2] * s24b[4] + s24b[1] * ds2_r * s24b[4] + s24b[1] * s24b[2] * ds4_r);
+
+    double tmp2 =
+                  s2[0] * s_rij_blm[3] +
+           2.0 * (s2[1] * s_rij_blm[4] +
+                  s2[2] * s_rij_blm[5] +
+                  s2[3] * s_rij_blm[6] +
+                  s2[4] * s_rij_blm[7] );
+
+    // l = 3
+    double tmp3 =
+                  s3[0] * s_rij_blm[8] +
+           2.0 * (s3[1] * s_rij_blm[9] +
+                  s3[2] * s_rij_blm[10] +
+                  s3[3] * s_rij_blm[11] +
+                  s3[4] * s_rij_blm[12] +
+                  s3[5] * s_rij_blm[13] +
+                  s3[6] * s_rij_blm[14] );
+    // l = 4
+    double tmp4 = s4[0] * s_rij_blm[15] +
+           2.0 * (s4[1] * s_rij_blm[16] +
+                  s4[2] * s_rij_blm[17] +
+                  s4[3] * s_rij_blm[18] +
+                  s4[4] * s_rij_blm[19] +
+                  s4[5] * s_rij_blm[20] +
+                  s4[6] * s_rij_blm[21] +
+                  s4[7] * s_rij_blm[22] +
+                  s4[8] * s_rij_blm[23] );
+
+    tmp1 = Fp[n*lmax_3]*tmp1 + Fp[n*lmax_3+1]*tmp2 + Fp[n*lmax_3+2]*tmp3 + Fp[n*lmax_3+3]*tmp4;
+    tmp1 = tmp1 * 2.0 * fn12[kk];
+    tmp1 = tmp1 + tmp2_4b * Fp[n_max_angular * lmax_3 + n];
+    int dc_id = dc_start_idx + type_j * n_max_angular * n_base_angular + n*n_base_angular + kk;
+    atomicAdd(&dfeat_c3[dc_id], tmp1);
+  }
+}
+
+static __device__ __forceinline__ void accumulate_f12_with_5body_opt(
+  const int n,
+  const double d12,
+  const double* r12,
+  double fn,
+  double fnp,
+  const double* Fp,
+  const double* sum_fxyz,
+  const double* s_rij_blm,
+  double* f12,
+  double* dfeat_drij,
+  const int drij_idx,
+  double* dfeat_c3,
+  double* fn12,
+  double* fnp12,
+  const int type_j,
+  const int ntypes,
+  const int lmax_3,
+  const int n_max_angular,
+  const int n_base_angular,
+  const int dc_start_idx,
+  const int n1,
+  const int n2)
+{
+  const double d12inv = 1.0 / d12;
+  // l = 1
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s1[3] = {
+    sum_fxyz[n * NUM_OF_ABC + 0], sum_fxyz[n * NUM_OF_ABC + 1], sum_fxyz[n * NUM_OF_ABC + 2]};
+  double s15b[3] = {
+    sum_fxyz[n * NUM_OF_ABC + 0], sum_fxyz[n * NUM_OF_ABC + 1], sum_fxyz[n * NUM_OF_ABC + 2]};
+  double s15bsq[3] = {s15b[0] * s15b[0], s15b[1] * s15b[1], s15b[2] * s15b[2]};
+
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_5body(
+      d12, d12inv, fn, fnp,
+      Fp[n_max_angular * lmax_3 + n_max_angular + n], s1, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + ((lmax_3 + 1) * n_max_angular + n) * 4,
+      f12d_group);
+  }
+
+  s1[0] *= C3B[0];
+  s1[1] *= C3B[1];
+  s1[2] *= C3B[2];
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_1(
+      d12inv, fn, fnp, Fp[n*lmax_3], s1, r12, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + n * 4, f12d_group);
+  }
+
+  // l = 2
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s2[5] = {
+    sum_fxyz[n * NUM_OF_ABC + 3],
+    sum_fxyz[n * NUM_OF_ABC + 4],
+    sum_fxyz[n * NUM_OF_ABC + 5],
+    sum_fxyz[n * NUM_OF_ABC + 6],
+    sum_fxyz[n * NUM_OF_ABC + 7]};
+
+  double s24b[5] = {
+    sum_fxyz[n * NUM_OF_ABC + 3],
+    sum_fxyz[n * NUM_OF_ABC + 4],
+    sum_fxyz[n * NUM_OF_ABC + 5],
+    sum_fxyz[n * NUM_OF_ABC + 6],
+    sum_fxyz[n * NUM_OF_ABC + 7]};
+
+  double s24bsq[5] = {
+    s24b[0] * s24b[0],
+    s24b[1] * s24b[1],
+    s24b[2] * s24b[2],
+    s24b[3] * s24b[3],
+    s24b[4] * s24b[4]};
+
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_4body(
+      d12, d12inv, fn, fnp, Fp[n_max_angular * lmax_3 + n], s2,
+      r12, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (lmax_3 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+  s2[0] *= C3B[3];
+  s2[1] *= C3B[4];
+  s2[2] *= C3B[5];
+  s2[3] *= C3B[6];
+  s2[4] *= C3B[7];
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_2(
+      d12, d12inv, fn, fnp, Fp[n*lmax_3+1], s2, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (n_max_angular + n) * 4, f12d_group);
+  }
+
+  // l = 3
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s3[7] = {
+    sum_fxyz[n * NUM_OF_ABC + 8] * C3B[8],
+    sum_fxyz[n * NUM_OF_ABC + 9] * C3B[9],
+    sum_fxyz[n * NUM_OF_ABC + 10] * C3B[10],
+    sum_fxyz[n * NUM_OF_ABC + 11] * C3B[11],
+    sum_fxyz[n * NUM_OF_ABC + 12] * C3B[12],
+    sum_fxyz[n * NUM_OF_ABC + 13] * C3B[13],
+    sum_fxyz[n * NUM_OF_ABC + 14] * C3B[14]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_3(
+      d12, d12inv, fn, fnp, Fp[n*lmax_3+2], s3, r12, f12,
+      f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (2 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+
+  // l = 4
+  fnp = fnp * d12inv - fn * d12inv * d12inv;
+  fn = fn * d12inv;
+  double s4[9] = {
+    sum_fxyz[n * NUM_OF_ABC + 15] * C3B[15],
+    sum_fxyz[n * NUM_OF_ABC + 16] * C3B[16],
+    sum_fxyz[n * NUM_OF_ABC + 17] * C3B[17],
+    sum_fxyz[n * NUM_OF_ABC + 18] * C3B[18],
+    sum_fxyz[n * NUM_OF_ABC + 19] * C3B[19],
+    sum_fxyz[n * NUM_OF_ABC + 20] * C3B[20],
+    sum_fxyz[n * NUM_OF_ABC + 21] * C3B[21],
+    sum_fxyz[n * NUM_OF_ABC + 22] * C3B[22],
+    sum_fxyz[n * NUM_OF_ABC + 23] * C3B[23]};
+  {
+    double f12d_group[4] = {0.0};
+    get_f12_4(
+      r12[0], r12[1], r12[2], d12, d12inv, fn, fnp,
+      Fp[n*lmax_3+3], s4, f12, f12d_group, n1, n2);
+    store_f12d_group(
+      dfeat_drij + drij_idx + (3 * n_max_angular + n) * 4,
+      f12d_group);
+  }
+
+  // for c3 param
+  double ds0_r = 0.0;
+  double ds1_r = 0.0;
+  double ds2_r = 0.0;
+  double ds3_r = 0.0;
+  double ds4_r = 0.0;
+  double ds5b0_r = 0.0;
+  double ds5b1_r = 0.0;
+  double ds5b2_r = 0.0;
+  for(int kk=0; kk < n_base_angular; ++kk) {
+    // l = 1
+    double tmp1 = s1[0] * s_rij_blm[0] +
+                  s1[1] * s_rij_blm[1] * 2.0 +
+                  s1[2] * s_rij_blm[2] * 2.0;
+    // l = 1 with 5b
+    ds5b0_r = s_rij_blm[0] * fn12[kk];
+    ds5b1_r = s_rij_blm[1] * fn12[kk];
+    ds5b2_r = s_rij_blm[2] * fn12[kk];
+
+    double tmp1_5b = 4.0 * C5B[0] * s15bsq[0] * s15b[0] * ds5b0_r + 2.0 * C5B[1] * s15b[0] * ds5b0_r * (s15bsq[1] + s15bsq[2]) +
+            C5B[1] * s15bsq[0] * 2.0 * (s15b[1] * ds5b1_r + s15b[2] * ds5b2_r) +
+            4.0 * C5B[2] * (s15bsq[1] + s15bsq[2]) * (s15b[1] * ds5b1_r + s15b[2] * ds5b2_r);
+
+    // l = 2 with 4b
+    ds0_r = s_rij_blm[3] * fn12[kk];
+    ds1_r = s_rij_blm[4] * fn12[kk];
+    ds2_r = s_rij_blm[5] * fn12[kk];
+    ds3_r = s_rij_blm[6] * fn12[kk];
+    ds4_r = s_rij_blm[7] * fn12[kk];
+    double tmp2_4b = 3.0 * C4B[0] * s24bsq[0] * ds0_r +
+              C4B[1] * ds0_r * (s24bsq[1] + s24bsq[2]) + C4B[1] * s24b[0] * (2.0 * s24b[1] * ds1_r + 2.0 * s24b[2] * ds2_r) +
+              C4B[2] * ds0_r * (s24bsq[3] + s24bsq[4]) + C4B[2] * s24b[0] * (2.0 * s24b[3] * ds3_r + 2.0 * s24b[4] * ds4_r) +
+              C4B[3] * ds3_r * (s24bsq[2] - s24bsq[1]) + C4B[3] * s24b[3] * (2.0 * s24b[2] * ds2_r - 2.0 * s24b[1] * ds1_r) +
+              C4B[4] *(ds1_r * s24b[2] * s24b[4] + s24b[1] * ds2_r * s24b[4] + s24b[1] * s24b[2] * ds4_r);
+
+    double tmp2 =
+                  s2[0] * s_rij_blm[3] +
+           2.0 * (s2[1] * s_rij_blm[4] +
+                  s2[2] * s_rij_blm[5] +
+                  s2[3] * s_rij_blm[6] +
+                  s2[4] * s_rij_blm[7] );
+
+    // l = 3
+    double tmp3 =
+                  s3[0] * s_rij_blm[8] +
+           2.0 * (s3[1] * s_rij_blm[9] +
+                  s3[2] * s_rij_blm[10] +
+                  s3[3] * s_rij_blm[11] +
+                  s3[4] * s_rij_blm[12] +
+                  s3[5] * s_rij_blm[13] +
+                  s3[6] * s_rij_blm[14] );
+    // l = 4
+    double tmp4 = s4[0] * s_rij_blm[15] +
+           2.0 * (s4[1] * s_rij_blm[16] +
+                  s4[2] * s_rij_blm[17] +
+                  s4[3] * s_rij_blm[18] +
+                  s4[4] * s_rij_blm[19] +
+                  s4[5] * s_rij_blm[20] +
+                  s4[6] * s_rij_blm[21] +
+                  s4[7] * s_rij_blm[22] +
+                  s4[8] * s_rij_blm[23] );
+
+    tmp1 = Fp[n*lmax_3]*tmp1 + Fp[n*lmax_3+1]*tmp2 + Fp[n*lmax_3+2]*tmp3 + Fp[n*lmax_3+3]*tmp4;
+    tmp1 = tmp1 * 2.0 * fn12[kk];
+    tmp1 = tmp1 + tmp2_4b * Fp[n_max_angular * lmax_3 + n];
+    tmp1 = tmp1 + tmp1_5b * Fp[n_max_angular * lmax_3 + n_max_angular + n];
+    int dc_id = dc_start_idx + type_j * n_max_angular * n_base_angular + n*n_base_angular + kk;
+    atomicAdd(&dfeat_c3[dc_id], tmp1);
+  }
+}
+
+// ============================================================================
+// round_006: block-per-atom rewrite of find_angular_gard_small_box.
+// One block (BPA_BLOCK threads) per atom; thread t handles neighbor t (stride
+// loop covers neigh_num > BPA_BLOCK) over the FULL n range:
+//  - per-neighbor fixed work (NL/d12 read, find_fc_and_fcp, find_fn_and_fnp,
+//    accumulate_blm_rij) is computed exactly once per atom. In round_002 each
+//    of the NSPLIT threads recomputed it for every neighbor (4x redundant).
+//  - Fp / sum_fxyz / the atom's coeff3 row are staged in dynamic shared
+//    memory once per atom and reused via LDS by all neighbor-threads.
+//  - f12 / dfeat_drij slots are (atom,neighbor)-disjoint -> plain += writes,
+//    no atomics (round_002 needed 4x atomicAdd per neighbor slot).
+//  - dfeat_c3 (t2,n,kk) and dsnlm_dc (t2,kk,j) slots are shared across
+//    same-type neighbors -> accumulated into shared memory via atomicAdd
+//    (_opt helpers / explicit atomics), then written back once per block.
+// Break semantics of the original serial loop (first n2<0 or d12>rc neighbor
+// truncates the list) is preserved exactly: every thread checks only its own
+// neighbor(s), the block reduces the first-invalid index with atomicMin, and
+// only threads below it do work.
+// ============================================================================
+static __global__ void find_angular_gard_small_box_opt(
+  const int N,
+  const int num_types,
+  const int num_types_sq,
+  const int neigh_num,
+  const int L_max3,
+  const int L_max4,
+  const int L_max5,
+  const int feat_2b_nums,
+  const int feat_3b_nums, // 3b + 4b + 5b
+  const double rc_angular,
+  const double rcinv_angular,
+  const int n_max_angular,
+  const int basis_size_angular,
+  const int64_t* __restrict__ g_NL_radial,
+  const double* __restrict__ g_d12_radial,
+  const double * __restrict__ coeff3,
+  const int64_t* __restrict__ g_type,
+  const double * __restrict__ grad_output,
+  const double* __restrict__ g_sum_fxyz,
+  double* dsnlm_dc,
+  double* dfeat_c3,
+  double* dfeat_drij,//[batch*atom, neighbornum, 3b_feat_num, 4]
+  double* grad_d12_angular
+  )
+{
+  constexpr int BPA_BLOCK = 64;
+  const int n1 = blockIdx.x; // one block per atom; gridDim.x == N
+  const int tid = threadIdx.x;
+
+  extern __shared__ double bpa_smem[];
+  const int sum_len   = n_max_angular * NUM_OF_ABC;
+  const int c3_len    = num_types * n_max_angular * basis_size_angular;
+  const int dsnlm_len = num_types * basis_size_angular * NUM_OF_ABC;
+  double* s_Fp    = bpa_smem;                    // [MAX_DIM_ANGULAR]
+  double* s_sum   = s_Fp + MAX_DIM_ANGULAR;      // [sum_len]
+  double* s_coef  = s_sum + sum_len;             // [c3_len]
+  double* s_c3    = s_coef + c3_len;             // [c3_len] shared accumulator
+  double* s_dsnlm = s_c3 + c3_len;               // [dsnlm_len] shared accumulator
+  __shared__ int s_first_bad;
+
+  // zero shared accumulators
+  for (int i = tid; i < c3_len; i += BPA_BLOCK) s_c3[i] = 0.0;
+  for (int i = tid; i < dsnlm_len; i += BPA_BLOCK) s_dsnlm[i] = 0.0;
+
+  const int g_sum_start = n1 * sum_len;
+  const int r12_start_idx = n1 * neigh_num * 4;
+  const int dc_start_idx = n1 * c3_len;
+  const int dsnlm_dc_start_idx = n1 * dsnlm_len;
+  const int de_start = n1 * (feat_3b_nums + feat_2b_nums);// dE/dq
+  const int neigh_start_idx = n1 * neigh_num;
+  const int dfeat_dr_start = n1 * neigh_num * feat_3b_nums * 4;
+
+  // stage Fp (all three groups, flattened; layout identical to the original)
+  const int b3_nums = n_max_angular * L_max3;
+  for (int e = tid; e < b3_nums; e += BPA_BLOCK) {
+    const int nn = e / L_max3;
+    const int ll = e % L_max3;
+    s_Fp[e] = grad_output[de_start + feat_2b_nums + ll * n_max_angular + nn];
+  }
+  if (L_max4 > 0) {
+    for (int e = tid; e < n_max_angular; e += BPA_BLOCK) {
+      s_Fp[b3_nums + e] = grad_output[de_start + feat_2b_nums + b3_nums + e];
+    }
+  }
+  if (L_max5 > 0) {
+    for (int e = tid; e < n_max_angular; e += BPA_BLOCK) {
+      s_Fp[b3_nums + n_max_angular + e] = grad_output[de_start + feat_2b_nums + b3_nums + n_max_angular + e];
+    }
+  }
+  // stage sum_fxyz ([N, n_max, NUM_OF_ABC] row of this atom)
+  for (int i = tid; i < sum_len; i += BPA_BLOCK) {
+    s_sum[i] = g_sum_fxyz[g_sum_start + i];
+  }
+  // stage this atom's coeff3 row: coeff3[t1, t2, n, k] for all t2
+  const int t1 = (int)g_type[n1];
+  const int c3_stage_start = t1 * c3_len;
+  for (int i = tid; i < c3_len; i += BPA_BLOCK) {
+    s_coef[i] = coeff3[c3_stage_start + i];
+  }
+  if (tid == 0) s_first_bad = 0x7fffffff;
+  __syncthreads(); // zeros + staged data + s_first_bad visible
+
+  // exact break semantics: first neighbor index that is invalid (n2<0 or
+  // d12 > rc) truncates the list; neighbors at/after it are not processed.
+  for (int i = tid; i < neigh_num; i += BPA_BLOCK) {
+    const int n2v = (int)g_NL_radial[neigh_start_idx + i];
+    const double d12v = g_d12_radial[r12_start_idx + i * 4];
+    if (n2v < 0 || d12v > rc_angular) atomicMin(&s_first_bad, i);
+  }
+  __syncthreads();
+  const int n_active = min(s_first_bad, neigh_num);
+
+  for (int i1 = tid; i1 < n_active; i1 += BPA_BLOCK) {
+    const int n2 = (int)g_NL_radial[neigh_start_idx + i1];
+    const int t2 = (int)g_type[n2];
+    const int rij_idx = r12_start_idx + i1 * 4;
+    const double d12 = g_d12_radial[rij_idx];
+    const int drij_idx = dfeat_dr_start + i1 * feat_3b_nums * 4;
+    double f12[4] = {0.0};
+
+    double fc12, fcp12;
+    find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
+    double fn12[MAX_NUM_N];
+    double fnp12[MAX_NUM_N];
+    find_fn_and_fnp(
+      basis_size_angular, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
+
+    const double r12[3] = {g_d12_radial[rij_idx+1], g_d12_radial[rij_idx+2], g_d12_radial[rij_idx+3]};
+    double s[NUM_OF_ABC] = {0.0};
+    accumulate_blm_rij(d12, r12[0], r12[1], r12[2], s);// blm * 1/(r_ij^L)
+    for (int n = 0; n < n_max_angular; ++n) {
+      double gn12 = 0.0;
+      double gnp12 = 0.0;
+      for (int k = 0; k < basis_size_angular; ++k) {
+        const double c = s_coef[t2 * n_max_angular * basis_size_angular + n * basis_size_angular + k];
+        gn12 += fn12[k] * c;
+        gnp12 += fnp12[k] * c;
+      }
+      if (L_max5 > 0) {
+        accumulate_f12_with_5body_opt(
+          n, d12, r12, gn12, gnp12, s_Fp, s_sum,
+            s, f12, dfeat_drij, drij_idx, s_c3, fn12, fnp12,
+            t2, num_types, L_max3,
+            n_max_angular, basis_size_angular, 0, n1, i1);
+      } else if (L_max4 > 0) {
+        accumulate_f12_with_4body_opt(
+          n, d12, r12, gn12, gnp12, s_Fp, s_sum,
+            s, f12, dfeat_drij, drij_idx, s_c3, fn12, fnp12,
+            t2, num_types, L_max3,
+            n_max_angular, basis_size_angular, 0, n1, i1);
+      } else {
+        accumulate_f12_opt(
+          n, d12, r12, gn12, gnp12, s_Fp, s_sum,
+            s, f12, dfeat_drij, drij_idx, s_c3, fn12, fnp12,
+            t2, num_types, L_max3,
+            n_max_angular, basis_size_angular, 0, n1, i1);
+      }
+      if (n == 0) {
+        double* dslots = &s_dsnlm[t2 * basis_size_angular * NUM_OF_ABC];
+        for(int kk = 0; kk < basis_size_angular; kk++){
+          const double fk = fn12[kk];
+          #pragma unroll
+          for (int j = 0; j < NUM_OF_ABC; ++j) {
+            atomicAdd(&dslots[kk * NUM_OF_ABC + j], s[j] * fk);
+          }
+        }
+      }
+    }
+
+    // (atom, neighbor)-disjoint slot: single writer per block -> plain +=
+    grad_d12_angular[rij_idx]   += f12[3];
+    grad_d12_angular[rij_idx+1] += f12[0];
+    grad_d12_angular[rij_idx+2] += f12[1];
+    grad_d12_angular[rij_idx+3] += f12[2];
+  }
+  __syncthreads(); // shared accumulators final
+
+  // write back per-atom shared accumulators (each slot one owner thread)
+  for (int i = tid; i < c3_len; i += BPA_BLOCK) {
+    dfeat_c3[dc_start_idx + i] += s_c3[i];
+  }
+  if (dsnlm_dc != nullptr) {
+    for (int i = tid; i < dsnlm_len; i += BPA_BLOCK) {
+      dsnlm_dc[dsnlm_dc_start_idx + i] += s_dsnlm[i];
+    }
+  }
+}
+
+// Large chemistry models cannot stage every type in LDS. Build the set of
+// types actually present around this atom and reuse one compact accumulation
+// tile for each of them.
+static __global__ void find_angular_gard_small_box_active_types(
+  const int N,
+  const int num_types,
+  const int num_types_sq,
+  const int neigh_num,
+  const int L_max3,
+  const int L_max4,
+  const int L_max5,
+  const int feat_2b_nums,
+  const int feat_3b_nums,
+  const double rc_angular,
+  const double rcinv_angular,
+  const int n_max_angular,
+  const int basis_size_angular,
+  const int64_t* __restrict__ g_NL_radial,
+  const double* __restrict__ g_d12_radial,
+  const double* __restrict__ coeff3,
+  const int64_t* __restrict__ g_type,
+  const double* __restrict__ grad_output,
+  const double* __restrict__ g_sum_fxyz,
+  double* dsnlm_dc,
+  double* dfeat_c3,
+  double* dfeat_drij,
+  double* grad_d12_angular)
+{
+  constexpr int BLOCK_THREADS = 64;
+  constexpr int MAX_ACTIVE_TYPES = 128;
+  constexpr int TYPE_MASK_WORDS = MAX_ACTIVE_TYPES / 32;
+  const int n1 = blockIdx.x;
+  const int tid = threadIdx.x;
+
+  extern __shared__ double smem[];
+  const int sum_len = n_max_angular * NUM_OF_ABC;
+  const int c3_tile_len = n_max_angular * basis_size_angular;
+  const int dsnlm_tile_len = basis_size_angular * NUM_OF_ABC;
+  double* s_Fp = smem;
+  double* s_sum = s_Fp + MAX_DIM_ANGULAR;
+  double* s_coef = s_sum + sum_len;
+  double* s_c3 = s_coef + c3_tile_len;
+  double* s_dsnlm = s_c3 + c3_tile_len;
+
+  __shared__ int s_first_bad;
+  __shared__ unsigned int s_type_mask[TYPE_MASK_WORDS];
+  __shared__ int s_active_types[MAX_ACTIVE_TYPES];
+  __shared__ int s_active_type_count;
+
+  if (tid == 0) {
+    s_first_bad = 0x7fffffff;
+    s_active_type_count = 0;
+  }
+  if (tid < TYPE_MASK_WORDS) s_type_mask[tid] = 0;
+
+  const int r12_start_idx = n1 * neigh_num * 4;
+  const int neigh_start_idx = n1 * neigh_num;
+  for (int i = tid; i < neigh_num; i += BLOCK_THREADS) {
+    const int n2 = static_cast<int>(g_NL_radial[neigh_start_idx + i]);
+    const double d12 = g_d12_radial[r12_start_idx + i * 4];
+    if (n2 < 0 || d12 > rc_angular) atomicMin(&s_first_bad, i);
+  }
+
+  const int b3_nums = n_max_angular * L_max3;
+  const int de_start = n1 * (feat_3b_nums + feat_2b_nums);
+  for (int e = tid; e < b3_nums; e += BLOCK_THREADS) {
+    const int n = e / L_max3;
+    const int l = e % L_max3;
+    s_Fp[e] = grad_output[
+      de_start + feat_2b_nums + l * n_max_angular + n];
+  }
+  if (L_max4 > 0) {
+    for (int n = tid; n < n_max_angular; n += BLOCK_THREADS) {
+      s_Fp[b3_nums + n] =
+        grad_output[de_start + feat_2b_nums + b3_nums + n];
+    }
+  }
+  if (L_max5 > 0) {
+    for (int n = tid; n < n_max_angular; n += BLOCK_THREADS) {
+      s_Fp[b3_nums + n_max_angular + n] =
+        grad_output[de_start + feat_2b_nums + b3_nums + n_max_angular + n];
+    }
+  }
+  const int g_sum_start = n1 * sum_len;
+  for (int i = tid; i < sum_len; i += BLOCK_THREADS) {
+    s_sum[i] = g_sum_fxyz[g_sum_start + i];
+  }
+  __syncthreads();
+
+  const int n_active = min(s_first_bad, neigh_num);
+  for (int i = tid; i < n_active; i += BLOCK_THREADS) {
+    const int n2 = static_cast<int>(g_NL_radial[neigh_start_idx + i]);
+    const int type = static_cast<int>(g_type[n2]);
+    atomicOr(&s_type_mask[type >> 5], 1u << (type & 31));
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+    int count = 0;
+    for (int type = 0; type < num_types; ++type) {
+      if (s_type_mask[type >> 5] & (1u << (type & 31))) {
+        s_active_types[count++] = type;
+      }
+    }
+    s_active_type_count = count;
+  }
+  __syncthreads();
+
+  const int t1 = static_cast<int>(g_type[n1]);
+  const int atom_dc_start = n1 * num_types * c3_tile_len;
+  const int atom_dsnlm_start = n1 * num_types * dsnlm_tile_len;
+  const int dfeat_dr_start = n1 * neigh_num * feat_3b_nums * 4;
+
+  for (int active_index = 0; active_index < s_active_type_count; ++active_index) {
+    const int target_type = s_active_types[active_index];
+    const int coeff_start = (t1 * num_types + target_type) * c3_tile_len;
+    for (int i = tid; i < c3_tile_len; i += BLOCK_THREADS) {
+      s_coef[i] = coeff3[coeff_start + i];
+      s_c3[i] = 0.0;
+    }
+    for (int i = tid; i < dsnlm_tile_len; i += BLOCK_THREADS) {
+      s_dsnlm[i] = 0.0;
+    }
+    __syncthreads();
+
+    for (int i1 = tid; i1 < n_active; i1 += BLOCK_THREADS) {
+      const int n2 = static_cast<int>(g_NL_radial[neigh_start_idx + i1]);
+      if (static_cast<int>(g_type[n2]) != target_type) continue;
+
+      const int rij_idx = r12_start_idx + i1 * 4;
+      const double d12 = g_d12_radial[rij_idx];
+      const int drij_idx = dfeat_dr_start + i1 * feat_3b_nums * 4;
+      double f12[4] = {0.0};
+      double fc12, fcp12;
+      find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
+      double fn12[MAX_NUM_N];
+      double fnp12[MAX_NUM_N];
+      find_fn_and_fnp(
+        basis_size_angular, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
+
+      const double r12[3] = {
+        g_d12_radial[rij_idx + 1],
+        g_d12_radial[rij_idx + 2],
+        g_d12_radial[rij_idx + 3]};
+      double s[NUM_OF_ABC] = {0.0};
+      accumulate_blm_rij(d12, r12[0], r12[1], r12[2], s);
+
+      for (int n = 0; n < n_max_angular; ++n) {
+        double gn12 = 0.0;
+        double gnp12 = 0.0;
+        for (int k = 0; k < basis_size_angular; ++k) {
+          const double c = s_coef[n * basis_size_angular + k];
+          gn12 += fn12[k] * c;
+          gnp12 += fnp12[k] * c;
+        }
+        if (L_max5 > 0) {
+          accumulate_f12_with_5body_opt(
+            n, d12, r12, gn12, gnp12, s_Fp, s_sum, s, f12,
+            dfeat_drij, drij_idx, s_c3, fn12, fnp12, 0, 1,
+            L_max3, n_max_angular,
+            basis_size_angular, 0, n1, i1);
+        } else if (L_max4 > 0) {
+          accumulate_f12_with_4body_opt(
+            n, d12, r12, gn12, gnp12, s_Fp, s_sum, s, f12,
+            dfeat_drij, drij_idx, s_c3, fn12, fnp12, 0, 1,
+            L_max3, n_max_angular,
+            basis_size_angular, 0, n1, i1);
+        } else {
+          accumulate_f12_opt(
+            n, d12, r12, gn12, gnp12, s_Fp, s_sum, s, f12,
+            dfeat_drij, drij_idx, s_c3, fn12, fnp12, 0, 1,
+            L_max3, n_max_angular,
+            basis_size_angular, 0, n1, i1);
+        }
+
+        if (n == 0) {
+          for (int kk = 0; kk < basis_size_angular; ++kk) {
+            const double fk = fn12[kk];
+            #pragma unroll
+            for (int j = 0; j < NUM_OF_ABC; ++j) {
+              atomicAdd(&s_dsnlm[kk * NUM_OF_ABC + j], s[j] * fk);
+            }
+          }
+        }
+      }
+
+      grad_d12_angular[rij_idx] += f12[3];
+      grad_d12_angular[rij_idx + 1] += f12[0];
+      grad_d12_angular[rij_idx + 2] += f12[1];
+      grad_d12_angular[rij_idx + 3] += f12[2];
+    }
+    __syncthreads();
+
+    const int global_dc_start = atom_dc_start + target_type * c3_tile_len;
+    for (int i = tid; i < c3_tile_len; i += BLOCK_THREADS) {
+      dfeat_c3[global_dc_start + i] += s_c3[i];
+    }
+    if (dsnlm_dc != nullptr) {
+      const int global_dsnlm_start = atom_dsnlm_start + target_type * dsnlm_tile_len;
+      for (int i = tid; i < dsnlm_tile_len; i += BLOCK_THREADS) {
+        dsnlm_dc[global_dsnlm_start + i] += s_dsnlm[i];
+      }
+    }
+    __syncthreads();
+  }
+}
+
 // find_mb_descriptor_small_box拆分为两个kernel，提高并行度
 // 1. 计算 s 的贡献，并行粒度为 (atom, angle, neighbor)
 static __global__ void compute_s_optimized(
@@ -462,7 +1421,7 @@ static __global__ void find_angular_gard_small_box(
             dfeat_drij[drij_idx + l_idx *n_max_angular * 4 + n * 4 + 3] = f12d[l_idx * 4 + 2];
            }
         }
-        if (n == 0) {
+        if (dsnlm_dc != nullptr && n == 0) {
           for(int kk = 0; kk < basis_size_angular;kk++){
             int dsnlm_id = dsnlm_dc_idx + kk * NUM_OF_ABC;
             dsnlm_dc[dsnlm_id + 0] += s[0] * fn12[kk];
@@ -680,7 +1639,7 @@ static __global__ void find_angular_gard_small_box_optimized(
           dfeat_drij[drij_idx + l_idx *n_max_angular * 4 + n * 4 + 3] = f12d[l_idx * 4 + 2];
         }
       }
-      if (n == 0) {
+      if (dsnlm_dc != nullptr && n == 0) {
         for(int kk = 0; kk < basis_size_angular; kk++){
           int dsnlm_id = dsnlm_dc_idx + kk * NUM_OF_ABC;
           atomicAdd(&dsnlm_dc[dsnlm_id + 0], s[0] * fn12[kk]);

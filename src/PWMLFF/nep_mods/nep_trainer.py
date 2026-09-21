@@ -305,6 +305,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
           optimizer_peak_lr, completed_updates, warmup_updates,
           device, args:InputParam):
     CalcOps = load_calc_ops(device=device)
+    max_train_steps = args.optimizer_param.max_train_steps
+    epoch_steps = (
+        min(len(train_loader), max_train_steps)
+        if max_train_steps > 0 else len(train_loader)
+    )
     batch_time = AverageMeter("Time", ":6.3f", device=device, world_size=args.world_size)
     data_time = AverageMeter("Data", ":6.3f", device=device, world_size=args.world_size)
     learning_rate = AverageMeter("LR", ":.8e", Summary.AVERAGE, device=device, world_size=args.world_size)
@@ -341,7 +346,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
     if args.optimizer_param.train_virial:
         progress_meters.extend([loss_Virial, loss_Virial_per_atom])
     progress = ProgressMeter(
-        len(train_loader),
+        epoch_steps,
         progress_meters,
         prefix=f"Epoch: [{epoch}]",
     )
@@ -350,6 +355,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
     model.train()
     end = time.time()
     for i, sample in enumerate(train_loader):
+        if i >= epoch_steps:
+            break
         sample = {key: value.to(device) for key, value in sample.items()}
         nn_radial, nn_angular = CalcOps.calculate_maxneigh(
             sample["num_atom"],
@@ -550,6 +557,11 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         progress.sync_meters()
 
     if args.rank == 0:
+        if max_train_steps > 0 and epoch_steps < len(train_loader):
+            print(
+                "NEP benchmark step limit reached: "
+                f"{epoch_steps}/{len(train_loader)} batches in epoch {epoch}"
+            )
         progress.display_summary([
             "Training Set:",
             f"PeakLR {optimizer_peak_lr:.8e}",
@@ -569,7 +581,8 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         loss_BEC.root,
         optimizer_lr,
         loss_L1.root,
-        loss_L2.root
+        loss_L2.root,
+        epoch_steps,
     )
 
 def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:InputParam):

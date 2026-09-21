@@ -514,6 +514,13 @@ static __global__ void find_angular_gardc_neigh_optimized(
 
 // 优化 f12k 的基础上，进一步优化。
 // 每个 block 处理一个原子，Fp 和 sum_fxyz 移入 shmem。
+// USE_LDS_REDUCE keeps one center-atom C3 row in LDS.  AOT specializations
+// provide every descriptor dimension as a template argument; the all-zero
+// default remains the runtime-generic path.
+template <bool USE_LDS_REDUCE, int FIXED_BASE_3B = 0,
+          int FIXED_MAX_3B = 0, int FIXED_NUM_TYPES = 0,
+          int FIXED_LMAX_3 = 0, int FIXED_LMAX_4 = 0,
+          int FIXED_LMAX_5 = 0>
 static __global__ void find_angular_gardc_neigh_optimized_2(
   const int N,
   const double* grad_second,
@@ -543,46 +550,82 @@ static __global__ void find_angular_gardc_neigh_optimized_2(
   int n1 = blockIdx.x;
   if (n1 >= N) return;
 
+  constexpr bool kFixedShape = FIXED_BASE_3B > 0 && FIXED_MAX_3B > 0 &&
+      FIXED_NUM_TYPES > 0;
+  constexpr int kSharedMax3b =
+      kFixedShape ? FIXED_MAX_3B : MAX_NUM_N;
+  constexpr int kSharedFp = kFixedShape
+      ? FIXED_MAX_3B * (FIXED_LMAX_3 + (FIXED_LMAX_4 > 0 ? 1 : 0) +
+          (FIXED_LMAX_5 > 0 ? 1 : 0))
+      : MAX_DIM_ANGULAR;
+  constexpr int kRadialScratch =
+      kFixedShape ? FIXED_BASE_3B : MAX_NUM_N;
+  const int shape_base_3b = kFixedShape ? FIXED_BASE_3B : base_3b;
+  const int shape_max_3b = kFixedShape ? FIXED_MAX_3B : max_3b;
+  const int shape_num_types = kFixedShape ? FIXED_NUM_TYPES : num_types;
+  const int shape_lmax_3 = kFixedShape ? FIXED_LMAX_3 : L_max3;
+  const int shape_lmax_4 = kFixedShape ? FIXED_LMAX_4 : L_max4;
+  const int shape_lmax_5 = kFixedShape ? FIXED_LMAX_5 : L_max5;
+
+  double* shm_dfeat_c3 = nullptr;
+  if constexpr (USE_LDS_REDUCE) {
+    if constexpr (kFixedShape) {
+      __shared__ double fixed_shm_dfeat_c3[
+          FIXED_NUM_TYPES * FIXED_MAX_3B * FIXED_BASE_3B];
+      shm_dfeat_c3 = fixed_shm_dfeat_c3;
+    } else {
+      extern __shared__ double dynamic_shm_dfeat_c3[];
+      shm_dfeat_c3 = dynamic_shm_dfeat_c3;
+    }
+  }
+
   // Block 共享存储
-  __shared__ double shm_sum_fxyz[NUM_OF_ABC * MAX_NUM_N];  // 24*20*8=3840 Bytes
-  __shared__ double shm_Fp[MAX_DIM_ANGULAR];               // (MAX_NUM_N*6)*8=(20*6)*8=960 Bytes
+  __shared__ double shm_sum_fxyz[NUM_OF_ABC * kSharedMax3b];
+  __shared__ double shm_Fp[kSharedFp];
 
   int neigh_start_idx = n1 * neigh_num;
   int t1 = g_type[n1];
 
-  int g_sum_start = n1 * max_3b * NUM_OF_ABC;
+  int g_sum_start = n1 * shape_max_3b * NUM_OF_ABC;
   int r12_start_idx =  n1 * neigh_num * 4;
   int de_start = n1 * (feat_3b_nums + feat_2b_nums);// dE/dq
-  int dsnlm_start_idx = n1 * num_types * base_3b * NUM_OF_ABC;
-  int c3_start_idx = t1 * num_types * max_3b * base_3b;
+  int dsnlm_start_idx = n1 * shape_num_types * shape_base_3b * NUM_OF_ABC;
+  int c3_start_idx = t1 * shape_num_types * shape_max_3b * shape_base_3b;
+  int c3_elements = shape_num_types * shape_max_3b * shape_base_3b;
+
+  if constexpr (USE_LDS_REDUCE) {
+    for (int k = threadIdx.x; k < c3_elements; k += blockDim.x) {
+      shm_dfeat_c3[k] = 0.0;
+    }
+  }
 
   // 加载 sum_fxyz 到 shared memory
-  int total_s_elements = max_3b * NUM_OF_ABC;
+  int total_s_elements = shape_max_3b * NUM_OF_ABC;
   for (int k = threadIdx.x; k < total_s_elements; k += blockDim.x) {
     shm_sum_fxyz[k] = g_sum_fxyz[g_sum_start + k]; // g_sum is [N, n_max, 24]
   }
 
   // 加载 Fp 到 shared memory
-  int b3_nums = max_3b * L_max3;
-  int total_Fp_elements = b3_nums + (L_max4 > 0 ? max_3b : 0) + (L_max5 > 0 ? max_3b : 0);
+  int b3_nums = shape_max_3b * shape_lmax_3;
+  int total_Fp_elements = b3_nums + (shape_lmax_4 > 0 ? shape_max_3b : 0) + (shape_lmax_5 > 0 ? shape_max_3b : 0);
 
   for (int k = threadIdx.x; k < total_Fp_elements; k += blockDim.x) {
     shm_Fp[k] = 0.0;
   }
 
   for (int k = threadIdx.x; k < b3_nums; k += blockDim.x) {
-    int nn = k / L_max3;
-    int ll = k % L_max3;
-    shm_Fp[k] = de_dfeat[de_start + feat_2b_nums + ll * max_3b + nn];
+    int nn = k / shape_lmax_3;
+    int ll = k % shape_lmax_3;
+    shm_Fp[k] = de_dfeat[de_start + feat_2b_nums + ll * shape_max_3b + nn];
   }
-  if (L_max4 > 0) {
-    for (int k = threadIdx.x; k < max_3b; k += blockDim.x) {
+  if (shape_lmax_4 > 0) {
+    for (int k = threadIdx.x; k < shape_max_3b; k += blockDim.x) {
       shm_Fp[b3_nums + k] = de_dfeat[de_start + feat_2b_nums + b3_nums + k];
     }
   }
-  if (L_max5 > 0) {
-    for (int k = threadIdx.x; k < max_3b; k += blockDim.x) {
-      shm_Fp[b3_nums + max_3b + k] = de_dfeat[de_start + feat_2b_nums + b3_nums + max_3b + k];
+  if (shape_lmax_5 > 0) {
+    for (int k = threadIdx.x; k < shape_max_3b; k += blockDim.x) {
+      shm_Fp[b3_nums + shape_max_3b + k] = de_dfeat[de_start + feat_2b_nums + b3_nums + shape_max_3b + k];
     }
   }
 
@@ -593,7 +636,10 @@ static __global__ void find_angular_gardc_neigh_optimized_2(
     if (n2 < 0) continue;
     int t2 = g_type[n2];
 
-    int dc_start_idx = (n1 * neigh_num + i1) * num_types * max_3b * base_3b;
+    // Accumulate neighbors directly into the center-atom row. This avoids
+    // materializing the O(N*neighbors*T*n*b) temporary used by the legacy
+    // aggregate path below.
+    int dc_start_idx = n1 * shape_num_types * shape_max_3b * shape_base_3b;
     int rij_idx = r12_start_idx + i1*4;
     double d12 = g_d12[rij_idx];
     if (d12 > rc_angular) continue;
@@ -603,12 +649,12 @@ static __global__ void find_angular_gardc_neigh_optimized_2(
     double fc12, fcp12;
     find_fc_and_fcp(rc_angular, rcinv_angular, d12, fc12, fcp12);
 
-    double fn12[MAX_NUM_N]; // 20*8=160 Bytes
-    double fnp12[MAX_NUM_N]; // 20*8=160 Bytes
+    double fn12[kRadialScratch];
+    double fnp12[kRadialScratch];
     find_fn_and_fnp(
-      base_3b, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
+      shape_base_3b, rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
 
-    int c_I_J_idx = c3_start_idx + t2 * max_3b * base_3b;
+    int c_I_J_idx = c3_start_idx + t2 * shape_max_3b * shape_base_3b;
     double blm[NUM_OF_ABC] = {0.0};     // 24*8=192 Bytes
     double rij_blm[NUM_OF_ABC]= {0.0};  // 24*8=192 Bytes
     double dblm_x[NUM_OF_ABC] = {0.0};  // 24*8=192 Bytes
@@ -617,48 +663,62 @@ static __global__ void find_angular_gardc_neigh_optimized_2(
     double dblm_r[NUM_OF_ABC] = {0.0};  // 24*8=192 Bytes
     scd_accumulate_blm_rij(d12, r12[0], r12[1], r12[2],
         blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r);
-    for (int n = 0; n < max_3b; ++n) {
+    for (int n = 0; n < shape_max_3b; ++n) {
       double gn12 = 0.0;
       double gnp12 = 0.0;
-      for (int k = 0; k < base_3b; ++k) {
-        int c_index = c_I_J_idx + n * base_3b + k;
+      for (int k = 0; k < shape_base_3b; ++k) {
+        int c_index = c_I_J_idx + n * shape_base_3b + k;
         gn12 += fn12[k] * coeff3[c_index];
         gnp12 += fnp12[k] * coeff3[c_index];
       }
       // min (1*20*4)*8=640 Bytes, max (20*20*4)*8=12800 Bytes
       // Reuse one fixed-size f12k buffer for each element type.
-      for (int j = 0; j < num_types; ++j) {
+      for (int j = 0; j < shape_num_types; ++j) {
         double f12k[MAX_NUM_N * 4] = {0.0}; // (20*4)*8=640 Bytes
         bool same_type = (t2 == j);
-        if (L_max5 > 0) {
+        if (shape_lmax_5 > 0) {
           scd_accumulate_f12_with_5body(
             n, d12, r12, gn12, gnp12, shm_Fp, dsnlm_dc, shm_sum_fxyz,
               blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
               f12, f12k, scd_r12, fn12, fnp12,
-              j, num_types, L_max3,
-              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
-        } else if (L_max4 > 0) {
+              j, shape_num_types, shape_lmax_3,
+              shape_max_3b, shape_base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+        } else if (shape_lmax_4 > 0) {
           scd_accumulate_f12_with_4body(
             n, d12, r12, gn12, gnp12, shm_Fp, dsnlm_dc, shm_sum_fxyz,
               blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
               f12, f12k, scd_r12, fn12, fnp12,
-              j, num_types, L_max3,
-              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+              j, shape_num_types, shape_lmax_3,
+              shape_max_3b, shape_base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
         } else {
           scd_accumulate_f12(
             n, d12, r12, gn12, gnp12, shm_Fp, dsnlm_dc, shm_sum_fxyz,
               blm, rij_blm, dblm_x, dblm_y, dblm_z, dblm_r,
               f12, f12k, scd_r12, fn12, fnp12,
-              j, num_types, L_max3,
-              max_3b, base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
+              j, shape_num_types, shape_lmax_3,
+              shape_max_3b, shape_base_3b, dc_start_idx, dsnlm_start_idx, n1, i1, same_type);
         }
-        for (int k = 0; k < base_3b; ++k){
-          int dc_id = dc_start_idx + j * max_3b * base_3b + n*base_3b + k;
+        for (int k = 0; k < shape_base_3b; ++k){
+          int dc_offset = j * shape_max_3b * shape_base_3b + n * shape_base_3b + k;
           // int k_id = j * base_3b * 4 + k * 4;
           int k_id = k * 4;
-          dfeat_c3[dc_id] += (f12k[k_id] + f12k[k_id+1] + f12k[k_id+2] + f12k[k_id+3]);
+          double contribution =
+              f12k[k_id] + f12k[k_id + 1] + f12k[k_id + 2] + f12k[k_id + 3];
+          if constexpr (USE_LDS_REDUCE) {
+            atomicAdd(&shm_dfeat_c3[dc_offset], contribution);
+          } else {
+            atomicAdd(&dfeat_c3[dc_start_idx + dc_offset], contribution);
+          }
         }
       }
+    }
+  }
+
+  if constexpr (USE_LDS_REDUCE) {
+    __syncthreads();
+    int output_start_idx = n1 * c3_elements;
+    for (int k = threadIdx.x; k < c3_elements; k += blockDim.x) {
+      dfeat_c3[output_start_idx + k] = shm_dfeat_c3[k];
     }
   }
 }

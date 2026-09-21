@@ -21,6 +21,15 @@ class OptimizerParam(object):
         # self.batch_size = 1
         self.epochs = get_parameter("epochs", optimizer_dict, 30)
         self.print_freq = get_parameter("print_freq", optimizer_dict, 10)
+        self.max_train_steps = get_parameter(
+            "max_train_steps", optimizer_dict, 0)
+        if (
+            isinstance(self.max_train_steps, bool)
+            or not isinstance(self.max_train_steps, int)
+            or self.max_train_steps < 0
+        ):
+            raise ValueError(
+                "optimizer.max_train_steps must be a non-negative integer")
         # the start epoch could be reset at the resume model code block
         self.reset_epoch = get_parameter("reset_epoch", optimizer_dict, True)
         self.start_epoch = get_parameter("start_epoch", optimizer_dict, 1)
@@ -163,6 +172,8 @@ class OptimizerParam(object):
         opt_dict["epochs"] = self.epochs
         opt_dict["batch_size"] = self.batch_size
         opt_dict["print_freq"] = self.print_freq
+        if self.max_train_steps > 0:
+            opt_dict["max_train_steps"] = self.max_train_steps
         if self.lambda_1 is not None:
             opt_dict["lambda_1"] =  self.lambda_1
         if self.lambda_2 is not None:

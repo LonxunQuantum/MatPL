@@ -1,4 +1,5 @@
 import bisect
+import fcntl
 import hashlib
 import json
 import math
@@ -666,15 +667,116 @@ class DistributedAtomBatchSampler:
         if batch:
             yield batch
 
+    def _persistent_length_path(self):
+        """Return a cache path only for MatPL's disk-backed atom-count cache."""
+        cache_dir = getattr(self.natoms, "cache_dir", None)
+        dataset = getattr(self.natoms, "dataset", None)
+        shards = getattr(dataset, "shards", None)
+        if cache_dir is None or shards is None:
+            return None
+
+        digest = hashlib.sha256()
+        digest.update(b"distributed-atom-batch-length-v1\0")
+        digest.update(
+            (
+                f"budget={self.atom_budget};world={self.world_size};"
+                f"seed={self.seed};shuffle={self.shuffle};epoch={self.epoch};"
+                f"block={self.block_size}\n"
+            ).encode("utf-8")
+        )
+        for shard in shards:
+            source = Path(shard.path).stat()
+            digest.update(
+                (
+                    f"{shard.path}\0{source.st_size}\0{source.st_mtime_ns}\0"
+                    f"{shard.nextid}\0{shard.deleted_ids}\n"
+                ).encode("utf-8")
+            )
+        return Path(cache_dir) / ("atom_batch_length_" + digest.hexdigest() + ".json")
+
+    @staticmethod
+    def _load_persistent_length(path):
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                value = json.load(stream)
+            length = value["length"]
+            if isinstance(length, bool) or not isinstance(length, int) or length < 0:
+                return None
+            return length
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    @staticmethod
+    def _store_persistent_length(path, length):
+        handle = tempfile.NamedTemporaryFile(
+            prefix=path.name + ".tmp-",
+            dir=path.parent,
+            mode="w",
+            encoding="utf-8",
+            delete=False,
+        )
+        temporary_path = Path(handle.name)
+        try:
+            with handle:
+                json.dump({"version": 1, "length": length}, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    def _cached_length(self):
+        path = self._persistent_length_path()
+        if path is None:
+            return sum(1 for _ in self._global_batches()) // self.world_size
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_stream:
+            # All ranks may request len(loader); serialize the one exact scan.
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+            try:
+                cached_length = self._load_persistent_length(path)
+                if cached_length is not None:
+                    return cached_length
+                length = sum(1 for _ in self._global_batches()) // self.world_size
+                self._store_persistent_length(path, length)
+                return length
+            finally:
+                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _benchmark_length_hint():
+        length_hint = os.environ.get("MATPL_LMDB_BATCH_LENGTH_HINT")
+        if length_hint is None:
+            return None
+        try:
+            hinted_length = int(length_hint)
+        except ValueError as exc:
+            raise ValueError(
+                "MATPL_LMDB_BATCH_LENGTH_HINT must be a positive integer"
+            ) from exc
+        if hinted_length < 1:
+            raise ValueError(
+                "MATPL_LMDB_BATCH_LENGTH_HINT must be a positive integer"
+            )
+        return hinted_length
+
     def __len__(self):
+        hinted_length = self._benchmark_length_hint()
+        if hinted_length is not None:
+            # Benchmark-only opt-in: callers must ensure enough real batches.
+            return hinted_length
         cache_key = (self.epoch, self.shuffle)
         if cache_key not in self._length_cache:
-            global_batch_count = sum(1 for _ in self._global_batches())
-            self._length_cache[cache_key] = global_batch_count // self.world_size
+            self._length_cache[cache_key] = self._cached_length()
         return self._length_cache[cache_key]
 
     def __iter__(self):
         completed_batches = []
+        hinted_length = self._benchmark_length_hint()
+        yielded_batches = 0
         self.peak_completed_batches = 0
         for batch in self._global_batches():
             completed_batches.append(batch)
@@ -685,6 +787,9 @@ class DistributedAtomBatchSampler:
                 rank_batch = completed_batches[self.rank]
                 completed_batches = []
                 yield rank_batch
+                yielded_batches += 1
+                if hinted_length is not None and yielded_batches >= hinted_length:
+                    return
 
 
 def _get_det(box: np.ndarray) -> float:

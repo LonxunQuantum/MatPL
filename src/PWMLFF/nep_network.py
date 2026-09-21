@@ -36,6 +36,7 @@ from src.utils.nep_to_gpumd import extract_model
 from src.aux.inference_plot import inference_plot
 import concurrent.futures
 import multiprocessing
+from datetime import timedelta
 from src.utils.debug_operation import check_cuda_memory, check_cpu_memory
 from src.utils.learning_rate import (
     calculate_lr_scale,
@@ -503,11 +504,16 @@ class nep_network:
             self.device = torch.device("cuda", device_index)
         if self.input_param.world_size > 1:
             backend = training_backend(self.input_param, device_type)
+            timeout_seconds = os.environ.get("MATPL_DDP_TIMEOUT_SECONDS")
+            init_options = {}
+            if timeout_seconds is not None:
+                init_options["timeout"] = timedelta(seconds=int(timeout_seconds))
             dist.init_process_group(
                 backend=backend,
                 init_method=f"tcp://{self.input_param.master_addr}:{self.input_param.master_port}",
                 rank=self.input_param.rank,
                 world_size=self.input_param.world_size,
+                **init_options,
             )
             print(f"Rank {self.input_param.rank}: LocalRank {self.input_param.local_rank}, "
                   f"device {self.device}, backend {backend}")
@@ -695,12 +701,14 @@ class nep_network:
             train_ei=self.input_param.optimizer_param.train_ei,
             **common_dataset_options,
         )
-        valid_dataset = NepLmdbDataset(
-            self.input_param.file_paths.valid_data_path,
-            cal_energy=False,
-            train_ei=self.input_param.optimizer_param.train_ei,
-            **common_dataset_options,
-        )
+        valid_dataset = None
+        if self.input_param.file_paths.valid_data_path:
+            valid_dataset = NepLmdbDataset(
+                self.input_param.file_paths.valid_data_path,
+                cal_energy=False,
+                train_ei=self.input_param.optimizer_param.train_ei,
+                **common_dataset_options,
+            )
         stat_indices, statistics = self._prepare_lmdb_statistics(train_dataset)
         batch_mode, batch_value = parse_lmdb_batch_size(
             self.input_param.optimizer_param.batch_size
@@ -724,22 +732,24 @@ class nep_network:
             batch_value=batch_value,
             world_size=max(int(self.input_param.world_size), 1),
         )
-        valid_sampler = self._lmdb_batch_sampler(
-            valid_dataset,
-            batch_mode,
-            batch_value,
-            self.input_param.valid_shuffle,
-        )
         train_loader = self._lmdb_loader(
             train_dataset,
             train_sampler,
             variable_length_collate_fn,
         )
-        val_loader = self._lmdb_loader(
-            valid_dataset,
-            valid_sampler,
-            variable_length_collate_fn,
-        )
+        val_loader = None
+        if valid_dataset is not None:
+            valid_sampler = self._lmdb_batch_sampler(
+                valid_dataset,
+                batch_mode,
+                batch_value,
+                self.input_param.valid_shuffle,
+            )
+            val_loader = self._lmdb_loader(
+                valid_dataset,
+                valid_sampler,
+                variable_length_collate_fn,
+            )
 
         stat_batch_size = max(1, calculate_batch(statistics.max_atoms, 400))
         stat_sampler = torch.utils.data.BatchSampler(
@@ -924,7 +934,9 @@ class nep_network:
         prepare_fitting_jit(model)
         # 包装模型为 DDP
         if self.input_param.world_size > 1:
-            ddp_options = {"find_unused_parameters": True}
+            ddp_options = {"find_unused_parameters": True,
+                           "broadcast_buffers": False,
+                           "gradient_as_bucket_view": True}
             if self.device.type == "cuda":
                 ddp_options.update(device_ids=[self.device.index], output_device=self.device.index)
             model = nn.parallel.DistributedDataParallel(model, **ddp_options)
@@ -1257,7 +1269,7 @@ class nep_network:
                     train_loader, model, self.criterion, optimizer, epoch, self.device, self.input_param
                 )
             else:
-                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, last_lr_used, loss_l1, loss_l2 = train(
+                loss, loss_Etot, loss_Etot_per_atom, loss_Force, loss_Ei, loss_egroup, loss_virial, loss_virial_per_atom, loss_charge, loss_bec, last_lr_used, loss_l1, loss_l2, completed_epoch_updates = train(
                     train_loader, model, self.criterion, optimizer, scheduler, epoch,
                         self.optimizer_peak_lr,
                         self.completed_optimizer_updates,
@@ -1265,7 +1277,7 @@ class nep_network:
                         self.device,
                         self.input_param,
                 )
-                self.completed_optimizer_updates += len(train_loader)
+                self.completed_optimizer_updates += completed_epoch_updates
 
             time_end = time.time()
             # self.convert_to_gpumd(model)
