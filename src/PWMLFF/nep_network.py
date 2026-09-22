@@ -663,6 +663,8 @@ class nep_network:
             "cutoff_angular": self.input_param.nep_param.cutoff[1],
             "dtype": dtype,
             "fill_metal_bec": fill_ion_bec,
+            "nonperiodic_vacuum_padding": getattr(
+                self.input_param, "nonperiodic_vacuum_padding", None),
         }
 
         if self.input_param.inference:

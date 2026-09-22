@@ -1,5 +1,6 @@
 import os
 import json
+import math
 from src.utils.json_operation import get_parameter, get_required_parameter
 from src.utils.nep_to_gpumd import get_atomic_name_from_str, validate_nep_atom_types
 from src.user.model_param import ModelParam
@@ -216,6 +217,13 @@ class InputParam(object):
         self.seed = get_parameter("seed", json_input, 2023)
         self.precision = get_parameter("precision", json_input, "float64")
         self.lmdb_stat_frames = get_parameter("lmdb_stat_frames", json_input, 32768)
+        self.nonperiodic_vacuum_padding = get_parameter(
+            "nonperiodic_vacuum_padding", json_input, None)
+        if self.nonperiodic_vacuum_padding is not None:
+            value = self.nonperiodic_vacuum_padding
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                    not math.isfinite(value) or value <= 0):
+                raise ValueError("nonperiodic_vacuum_padding must be a positive finite number")
         is_lmdb = str(get_parameter(
             "format", json_input, "pwmat/movement"
         )).lower() == "lmdb"
@@ -309,6 +317,8 @@ class InputParam(object):
             params_dict["max_neigh_num"] = self.max_neigh_num
         if self.seed is not None:
             params_dict["seed"] = self.seed
+        if self.nonperiodic_vacuum_padding is not None:
+            params_dict["nonperiodic_vacuum_padding"] = self.nonperiodic_vacuum_padding
         if self.model_num > 1 :
             params_dict["model_num"] = self.model_num
         # params_dict["E_tolerance"] = self.descriptor.E_tolerance
