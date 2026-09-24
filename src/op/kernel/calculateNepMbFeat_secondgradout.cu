@@ -403,8 +403,17 @@ bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device
     if (args.atom_count == 0) return true;
     constexpr size_t bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
     const auto stream = c10::cuda::getCurrentCUDAStream(device);
-    nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 64>
-        <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
+    constexpr size_t portable_shared_limit = 48 * 1024;
+    const size_t reduced_bytes = bytes
+        + static_cast<size_t>(args.max_neighbors) * (24 + 9) * sizeof(double)
+        + 4 * (1 + static_cast<size_t>(args.max_neighbors)) * sizeof(int);
+    if (reduced_bytes <= portable_shared_limit) {
+        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, true, 64>
+            <<<args.atom_count, 64, reduced_bytes, stream.stream()>>>(args);
+    } else {
+        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, false, 64>
+            <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
+    }
     CUDA_CHECK_KERNEL
     return true;
 }

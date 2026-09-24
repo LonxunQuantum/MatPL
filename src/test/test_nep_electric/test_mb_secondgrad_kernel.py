@@ -55,6 +55,12 @@ def _wide_neighbor_case(valid_neighbors=39, max_neighbors=43, n_max=5, n_base=9,
     return CaseSpec(types, neighbors, n_max, n_base, 0, *lmax)
 
 
+def _global_89_type_case():
+    types = (0, 1, 2, 0, 1, 2, 0, 1, 2, 88)
+    neighbors = tuple(tuple(j for j in range(10) if j != i) for i in range(10))
+    return CaseSpec(types, neighbors, 5, 9, 0, 4, 2, 1)
+
+
 def _empty_slot_case(max_neighbors=8, n_max=5, n_base=9, lmax=(4, 2, 1)):
     return CaseSpec(
         (0, 1, 2),
@@ -204,11 +210,14 @@ def test_auto_matches_optimized_for_omat24_shape():
     _six_local_type_case(),
     _wide_neighbor_case(),
     _wide_neighbor_case(valid_neighbors=65, max_neighbors=67),
+    _wide_neighbor_case(valid_neighbors=65, max_neighbors=151),
+    _global_89_type_case(),
     _empty_slot_case(),
     dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
 ], ids=[
     "single-type", "repeated-types", "six-local-types",
-    "wide-neighbor-43", "wide-neighbor-67",
+    "wide-neighbor-43", "wide-neighbor-67", "fallback-neighbor-151",
+    "global-89-types",
     "empty-slots", "radial-prefix",
 ])
 def test_optimized_matches_legacy(case):
