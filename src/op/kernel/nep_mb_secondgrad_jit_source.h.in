@@ -1,0 +1,8 @@
+#pragma once
+
+static const char kNepMbSecondgradJitSource[] = R"MATPLMBJITSRC(
+typedef unsigned long size_t;
+typedef long long int64_t;
+#define INT_MAX 2147483647
+@NEP_MB_JIT_SOURCES@
+)MATPLMBJITSRC";

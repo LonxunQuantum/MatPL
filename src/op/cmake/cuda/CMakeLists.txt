@@ -22,18 +22,42 @@ file(GLOB_RECURSE GPU_SOURCES
     ${CMAKE_SOURCE_DIR}/kernel/utilities/*.cu
 )
 
+# Embed the NVRTC translation unit so a built operator has no runtime
+# dependency on the source checkout (or the worktree used to build it).
+set(NEP_MB_JIT_SOURCES "")
+set(_nep_mb_jit_inputs
+    ${CMAKE_SOURCE_DIR}/include/nep_limits.h
+    ${CMAKE_SOURCE_DIR}/kernel/utilities/nep_utilities.cuh
+    ${CMAKE_SOURCE_DIR}/kernel/utilities/nep_utilities_mb_secondc.cuh
+    ${CMAKE_SOURCE_DIR}/kernel/utilities/nep_feature.cuh
+    ${CMAKE_SOURCE_DIR}/kernel/utilities/nep_mbgrad.cuh
+    ${CMAKE_SOURCE_DIR}/kernel/utilities/nep_mbgrad_opt.cuh
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_nep_mb_jit_inputs})
+foreach(_source IN LISTS _nep_mb_jit_inputs)
+    file(READ "${_source}" _body)
+    get_filename_component(_name "${_source}" NAME)
+    string(APPEND NEP_MB_JIT_SOURCES "\n#line 1 \"${_name}\"\n${_body}\n")
+endforeach()
+configure_file(
+    ${CMAKE_SOURCE_DIR}/kernel/nep_mb_secondgrad_jit_source.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/nep_mb_secondgrad_jit_source.h
+    @ONLY)
+
 # 移除绑定文件（绑定文件单独编译）
 list(REMOVE_ITEM GPU_SOURCES ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
 
 # 5. 创建核心计算库（把所有.cpp和.cu文件都编译到这里）
 add_library(CalcOps_cuda SHARED ${GPU_SOURCES})
-target_compile_definitions(CalcOps_cuda PRIVATE MATPL_ENABLE_FUSED_FITTING MATPL_CUDA_DESCRIPTOR_OPT)
+target_compile_definitions(CalcOps_cuda PRIVATE
+    MATPL_ENABLE_FUSED_FITTING MATPL_CUDA_DESCRIPTOR_OPT)
 
 # 设置头文件包含路径
 target_include_directories(CalcOps_cuda PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/kernel
     ${CMAKE_SOURCE_DIR}/kernel/utilities
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 # 设置CUDA架构属性

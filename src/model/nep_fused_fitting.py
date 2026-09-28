@@ -205,7 +205,7 @@ def prepare_fitting_jit(model: torch.nn.Module) -> bool:
         if output_weight.shape[0] != h:
             return False
         q = int(output_weight.shape[1])
-    if not (1 <= d <= 96 and 1 <= h <= 100 and q in (1, 2)):
+    if not (1 <= d <= 140 and 1 <= h <= 200 and q in (1, 2)):
         return False
     return bool(_load_raw_ops().nep_fitting_jit_prepare(hidden_weight, d, h, q))
 
@@ -347,8 +347,8 @@ def fused_fitting(X, W, b, V, c, groups: FittingGroups):
     Q = V.shape[2]
     if c.shape != (Ta, Q):
         raise ValueError("inconsistent fused fitting output bias shape")
-    if D > 96 or H > 100 or Q not in (1, 2):
-        raise ValueError("fused fitting supports D<=96, H<=100, and Q=1 or 2")
+    if D > 140 or H > 200 or Q not in (1, 2):
+        raise ValueError("fused fitting supports D<=140, H<=200, and Q=1 or 2")
     if len(groups.type_ids) != Ta or len(groups.counts) != Ta or sum(groups.counts) != N:
         raise ValueError("fitting groups do not match packed parameters and input rows")
     if groups.atom_ids.device != X.device or groups.offsets.device != X.device:
@@ -373,8 +373,8 @@ def fused_charge_fitting(X, fitting_net: Sequence, groups: FittingGroups):
         raise ValueError("inconsistent fused QNEP head weight shapes")
     if any(tensor.shape != (Ta, 1) for tensor in (CE, CQ)):
         raise ValueError("inconsistent fused QNEP head bias shapes")
-    if D > 96 or H > 100:
-        raise ValueError("fused QNEP fitting supports D<=96 and H<=100")
+    if D > 140 or H > 200:
+        raise ValueError("fused QNEP fitting supports D<=140 and H<=200")
     if len(groups.type_ids) != Ta or len(groups.counts) != Ta or sum(groups.counts) != N:
         raise ValueError("fitting groups do not match packed parameters and input rows")
     if groups.atom_ids.device != X.device or groups.offsets.device != X.device:

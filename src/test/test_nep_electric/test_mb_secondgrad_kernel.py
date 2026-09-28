@@ -61,6 +61,10 @@ def _global_89_type_case():
     return CaseSpec(types, neighbors, 5, 9, 0, 4, 2, 1)
 
 
+def _periodic_table_case():
+    return CaseSpec((0, 117), ((1,), (0,)), 5, 9, 0, 4, 2, 1)
+
+
 def _empty_slot_case(max_neighbors=8, n_max=5, n_base=9, lmax=(4, 2, 1)):
     return CaseSpec(
         (0, 1, 2),
@@ -168,11 +172,10 @@ def test_auto_matches_legacy_for_body_combinations(lmax):
 
 @pytest.mark.parametrize("n_max,n_base,lmax", [
     (4, 9, (4, 2, 1)),
-    (5, 8, (4, 2, 1)),
+    (5, 4, (4, 2, 1)),
     (5, 9, (3, 2, 1)),
     (5, 9, (4, 0, 1)),
-    (5, 9, (4, 2, 0)),
-], ids=["radial", "basis", "three-body", "four-body", "five-body"])
+], ids=["radial", "basis", "three-body", "four-body"])
 def test_forced_optimized_rejects_unsupported_shape(n_max, n_base, lmax):
     case = _single_type_case(n_max=n_max, n_base=n_base, lmax=lmax)
     with pytest.raises(RuntimeError, match="unsupported optimized NEP") as error:
@@ -212,12 +215,24 @@ def test_auto_matches_optimized_for_omat24_shape():
     _wide_neighbor_case(valid_neighbors=65, max_neighbors=67),
     _wide_neighbor_case(valid_neighbors=65, max_neighbors=151),
     _global_89_type_case(),
+    _periodic_table_case(),
+    _repeated_type_case(n_types=2, n_max=13, n_base=9),
+    _repeated_type_case(n_types=2, n_max=13, n_base=9, lmax=(4, 2, 0)),
+    _repeated_type_case(n_types=2, n_max=5, n_base=13),
+    _repeated_type_case(n_types=2, n_max=5, n_base=5, lmax=(4, 0, 0)),
+    _repeated_type_case(n_types=5, n_max=20, n_base=20),
+    dataclasses.replace(
+        _repeated_type_case(n_types=3, n_max=20, n_base=5, lmax=(4, 2, 0)),
+        feat_2b_num=20,
+    ),
     _empty_slot_case(),
     dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
 ], ids=[
     "single-type", "repeated-types", "six-local-types",
     "wide-neighbor-43", "wide-neighbor-67", "fallback-neighbor-151",
-    "global-89-types",
+    "global-89-types", "periodic-table-118",
+    "auag-13x9", "fec-13x9-no-five", "hfo2-5x13",
+    "lower-bound-no-four-five", "upper-bound-20x20", "mixed-bound-radial-prefix",
     "empty-slots", "radial-prefix",
 ])
 def test_optimized_matches_legacy(case):
@@ -228,10 +243,11 @@ def test_optimized_matches_legacy(case):
 
 @pytest.mark.parametrize("case", [
     dataclasses.replace(_repeated_type_case(), feat_2b_num=6),
+    _repeated_type_case(n_types=2, n_max=13, n_base=9),
     _wide_neighbor_case(),
     _wide_neighbor_case(valid_neighbors=65, max_neighbors=67),
 ], ids=[
-    "radial-prefix", "wide-neighbor-43", "wide-neighbor-67",
+    "radial-prefix", "jit-13x9", "wide-neighbor-43", "wide-neighbor-67",
 ])
 def test_optimized_secondgrad_obeys_current_stream(case):
     legacy = _coefficient_second_grad(case, "legacy")

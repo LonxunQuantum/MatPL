@@ -195,7 +195,13 @@ def test_jit_forward_and_feature_gradient_match_reference(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize(
     "d,h,q,seed_mode",
-    [(35, 61, 1, "both"), (31, 33, 2, "y"), (96, 100, 2, "g")],
+    [
+        (35, 61, 1, "both"),
+        (31, 33, 2, "y"),
+        (96, 100, 2, "g"),
+        (140, 200, 1, "both"),
+        (140, 200, 2, "both"),
+    ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
 def test_jit_backward_matches_reference(tmp_path, monkeypatch, d, h, q, seed_mode):

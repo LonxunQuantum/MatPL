@@ -5,7 +5,7 @@ extern "C" __global__ void fitting_atoms_forward(
     const double* x, const double* w, const double* b, const double* v,
     const double* c, const long long* ids, const long long* offsets,
     double* y, double* out, int n) {
-  constexpr int TILE = 16;
+  constexpr int TILE = JIT_D > 96 ? 8 : 16;
   constexpr int ATOMS = 8;
   const int type = blockIdx.y;
   const long long first = offsets[type], end = offsets[type + 1];
@@ -93,7 +93,7 @@ extern "C" __global__ void fitting_atoms_backward(
     const double* x, const double* w, const double* b, const double* v,
     const long long* ids, const long long* offsets, const double* a,
     const double* u, double* dx, int n) {
-  constexpr int TILE = 16;
+  constexpr int TILE = JIT_D > 96 ? 8 : 16;
   constexpr int ATOMS = 8;
   const int type = blockIdx.y;
   const long long first = offsets[type], end = offsets[type + 1];
@@ -161,7 +161,7 @@ extern "C" __global__ void fitting_parameter_partials(
     const double* x, const double* w, const double* b, const double* v,
     const long long* ids, const long long* offsets, const double* a,
     const double* u, double* partial, int n, int type_start, int slots) {
-  constexpr int TILE = 16;
+  constexpr int TILE = JIT_D > 96 ? 8 : 16;
   constexpr int ATOMS = 8;
   constexpr int THREADS = TILE * ATOMS;
   constexpr int CHUNK = 32;
@@ -280,7 +280,7 @@ extern "C" __global__ void fitting_parameter_partials(
 extern "C" __global__ void fitting_parameter_reduce(
     const double* partial, double* dw, double* db, double* dv, double* dc,
     int type_start, int slots) {
-  constexpr int TILE = 16;
+  constexpr int TILE = JIT_D > 96 ? 8 : 16;
   constexpr int TILES = (JIT_H + TILE - 1) / TILE;
   constexpr int STRIDE = (JIT_D + 1 + JIT_Q) * TILE + JIT_Q;
   constexpr int WEIGHT_SIZE = JIT_D * JIT_H;

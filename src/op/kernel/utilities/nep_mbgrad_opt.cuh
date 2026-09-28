@@ -1553,7 +1553,7 @@ __host__ __device__ constexpr size_t nep_mb_secondgrad_shared_bytes() {
 template<int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE, bool REDUCE_DSNLM, int CTA_THREADS>
 __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
   using namespace nep_mb_secondgrad_opt;
-  static_assert(LMAX3 == 4 && HAS4 && HAS5, "Only OMat24 is dispatched");
+  static_assert(LMAX3 == 4, "This path supports four three-body orders");
   static_assert(CTA_THREADS == 64, "OMat24 uses a fixed CTA width");
   extern __shared__ __align__(8) unsigned char shared_raw[];
   SharedLayout<NMAX, NBASIS, TYPE_TILE> s(shared_raw);
@@ -1574,7 +1574,8 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
   for (int i = tid; i < NMAX * 6; i += CTA_THREADS) {
     const int column = i < NMAX * LMAX3
         ? (i % LMAX3) * NMAX + i / LMAX3 : i;
-    s.fp[i] = a.de_dfeat[fp_start + column];
+    s.fp[i] = i < a.many_body_feat_count
+        ? a.de_dfeat[fp_start + column] : 0.0;
   }
   for (int i = tid; i < NMAX * 24; i += CTA_THREADS) {
     s.sum_fxyz[i] = a.sum_fxyz[center * NMAX * 24 + i];
