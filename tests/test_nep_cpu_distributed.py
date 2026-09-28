@@ -15,8 +15,8 @@ def config():
         "device": "cpu", "dist_backend": "gloo", "seed": 123,
         "precision": "float64", "recover_train": False,
         "model": {
-            "descriptor": {"cutoff": [5.0, 4.0], "n_max": [1, 1],
-                           "basis_size": [2, 2], "l_max": [4, 2, 1]},
+            "descriptor": {"cutoff": [5.0, 4.0], "n_max": [4, 4],
+                           "basis_size": [4, 4], "l_max": [4, 2, 1]},
             "fitting_net": {"network_size": [30, 1]},
         },
         "optimizer": {"optimizer": "ADAM", "epochs": 2,
@@ -74,7 +74,7 @@ def ddp_worker(rank, port, directory):
         assert dist.get_backend() == "gloo"
         wrapped, optimizer, _ = network.load_model_optimizer(
             [0., 0., 0.], avg_atom_num=2, iterations=3,
-            q_scaler=np.ones(14), max_NN_radial=10, max_NN_angular=10)
+            q_scaler=np.ones(35), max_NN_radial=10, max_NN_angular=10)
         assert isinstance(wrapped, torch.nn.parallel.DistributedDataParallel)
         reference = copy.deepcopy(wrapped.module)
         ref_optimizer = torch.optim.Adam(reference.parameters(), **{

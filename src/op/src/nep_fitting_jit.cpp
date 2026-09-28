@@ -1,6 +1,7 @@
 #ifdef MATPL_ENABLE_FUSED_FITTING
 
 #include "../include/nep_fitting_jit.h"
+#include "../include/nep_fitting_limits.h"
 #include "../kernel/nep_fitting_jit_source.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -283,8 +284,10 @@ bool prepare_nep_fitting_jit(
     TORCH_CHECK(reference.is_cuda(), "NEP fitting JIT requires a CUDA reference tensor");
     TORCH_CHECK(reference.scalar_type() == at::kDouble,
                 "NEP fitting JIT requires an FP64 reference tensor");
-    TORCH_CHECK(d >= 1 && d <= 140, "NEP fitting JIT requires 1 <= D <= 140");
-    TORCH_CHECK(h >= 1 && h <= 200, "NEP fitting JIT requires 1 <= H <= 200");
+    TORCH_CHECK(d >= 1 && d <= nep_fitting_limits::kMaxFeatures,
+                "NEP fitting JIT requires 1 <= D <= ", nep_fitting_limits::kMaxFeatures);
+    TORCH_CHECK(h >= 1 && h <= nep_fitting_limits::kMaxHiddenNeurons,
+                "NEP fitting JIT requires 1 <= H <= ", nep_fitting_limits::kMaxHiddenNeurons);
     TORCH_CHECK(q == 1 || q == 2, "NEP fitting JIT requires Q=1 or Q=2");
     build_module(reference, d, h, q);
     return true;

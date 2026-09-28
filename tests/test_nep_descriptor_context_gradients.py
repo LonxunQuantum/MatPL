@@ -46,13 +46,14 @@ def evaluate(spec, values, device, derivatives=True):
             'model_type': 'NEP', 'atom_type': list(range(1, ntypes + 1)),
             'device': 'cpu', 'precision': 'float64', 'recover_train': False,
             'model': {'descriptor': {'cutoff': [5., 5.],
-                       'n_max': [2, nmax-1], 'basis_size': [2, nbase-1],
+                       'n_max': [4, 4], 'basis_size': [4, 4],
                        'l_max': [l3, l4, l5]},
                       'fitting_net': {'network_size': [30, 1]}},
             'optimizer': {'optimizer': 'ADAM', 'train_energy': True, 'train_force': True},
         }
         model = NEP(InputParam(config, 'TRAIN'), [0.] * ntypes,
-                    q_scaler=np.ones(seeds.shape[1]), dtype=torch.float64,
+                    q_scaler=np.ones(5 + 5 * (l3 + (l4 > 0) + (l5 > 0))),
+                    dtype=torch.float64,
                     device=torch.device('cpu'))
         rij = rij.detach().requires_grad_()
         neighbor_types = torch.full_like(neighbors, -1)

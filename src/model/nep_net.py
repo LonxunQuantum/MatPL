@@ -1259,10 +1259,7 @@ class NEP(nn.Module):
         if (fitting_groups is not None and fitting_groups.type_ids and
                 feats_scaled.is_cuda and
                 feats_scaled.dtype == torch.float64 and
-                len(self.neuron) == 2 and 1 <= self.neuron[0] <= 200 and
-                1 <= feats_scaled.shape[1] <= 140 and
-                (torch.version.hip is None or
-                 (self.neuron[0] <= 100 and feats_scaled.shape[1] <= 96))):
+                len(self.neuron) == 2):
             if self.charge_mode:
                 Ei, charge, grad_e, grad_q = fused_charge_fitting(
                     feats_scaled, self.fitting_net, fitting_groups)

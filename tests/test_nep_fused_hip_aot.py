@@ -53,11 +53,11 @@ class HipAotFittingTests(unittest.TestCase):
         return groups, values
 
     def test_hip_build_wires_aot_fitting_without_hip_jit(self):
-        cmake = (REPO / "src/op/cmake/hip/CMakeLists.txt").read_text()
-        launcher = (REPO / "src/op/src/nep_fitting_launcher.cpp").read_text()
-        binding = (REPO / "src/op/src/CalcOps_bind.cpp").read_text()
-        adapter = (REPO / "src/model/nep_fused_fitting.py").read_text()
-        network = (REPO / "src/model/nep_net.py").read_text()
+        cmake = (REPO / "src/op/cmake/hip/CMakeLists.txt").read_text(encoding="utf-8")
+        launcher = (REPO / "src/op/src/nep_fitting_launcher.cpp").read_text(encoding="utf-8")
+        binding = (REPO / "src/op/src/CalcOps_bind.cpp").read_text(encoding="utf-8")
+        adapter = (REPO / "src/model/nep_fused_fitting.py").read_text(encoding="utf-8")
+        network = (REPO / "src/model/nep_net.py").read_text(encoding="utf-8")
 
         self.assertTrue((REPO / "src/op/kernel_hip/nep_fitting.hip").is_file())
         self.assertIn("MATPL_FUSED_FITTING_HIP", cmake)
@@ -65,7 +65,8 @@ class HipAotFittingTests(unittest.TestCase):
         self.assertIn("MATPL_FUSED_FITTING_HIP", launcher)
         self.assertIn("MATPL_FUSED_FITTING_HIP", binding)
         self.assertNotIn("hiprtc", cmake.lower())
-        self.assertIn("torch.version.hip is not None", adapter)
+        self.assertNotIn("D<=96", adapter)
+        self.assertNotIn("H<=100", adapter)
         self.assertNotIn("feats_scaled.is_cuda and not torch.version.hip", network)
 
     @unittest.skipUnless(IS_HIP, "requires a Slurm DCU allocation")
@@ -73,7 +74,8 @@ class HipAotFittingTests(unittest.TestCase):
         from src.utils.op_loader import load_calc_ops
 
         ops = load_calc_ops()
-        for d, h, q in ((35, 60, 1), (31, 33, 2), (96, 100, 2)):
+        for d, h, q in ((35, 60, 1), (31, 33, 2), (96, 100, 2),
+                        (103, 200, 1), (103, 200, 2)):
             with self.subTest(d=d, h=h, q=q):
                 torch.manual_seed(d * 1000 + h * 10 + q)
                 counts = [5, 2, 4]

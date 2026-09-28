@@ -3,6 +3,10 @@ import numpy as np
 from src.utils.atom_type_emb_dict import element_table
 from src.utils.json_operation import get_parameter
 from src.utils.nep_to_gpumd import get_atomic_name_from_str
+from src.utils.nep_limits import (
+    MIN_DESCRIPTOR_SIZE, MAX_DESCRIPTOR_SIZE, MIN_HIDDEN_NEURONS,
+    MAX_HIDDEN_NEURONS, MAX_FEATURES, MAX_ANGULAR_FEATURES, SUPPORTED_L_MAX,
+)
 
 '''
 description: 
@@ -131,11 +135,12 @@ class NepParam(object):
 
         l_maxs =  lines[4].split() 
         self.l_max = [int(l_maxs[1]), int(l_maxs[2]), int(l_maxs[3])]
+        self.set_feature_params()
 
         anns = lines[5].split()
         ann_num = int(anns[1])
         self.neuron = [ann_num, 1]
-        self.set_feature_params()
+        self.validate_neuron()
 
         #num_w0 
         self.model_wb = []
@@ -300,24 +305,11 @@ class NepParam(object):
 
         self.cutoff = get_parameter("cutoff", descriptor_dict, [8.0, 4.0]) # radial () and angular () cutoffs # use dp rcut, default to 6
         self.n_max = get_parameter("n_max", descriptor_dict, [4, 4]) # size of radial () and angular () basis
-        if len(self.n_max) != 2:
-            raise Exception("the input 'n_max' should has 2 values, such as [4, 4]")
-        if self.n_max[0] <=0 or self.n_max[0] >= 20 or self.n_max[1] <=0 or self.n_max[1] >= 20:
-            raise Exception("Error ! The input 'n_max' value should: 0 < n_max < 20")
                 
         self.basis_size = get_parameter("basis_size", descriptor_dict, [12, 12]) # number of radial () and angular () basis functions
-        if len(self.basis_size) != 2:
-            raise Exception("the input 'basis_size' should has 2 values, such as [12, 12]")
-        if self.basis_size[0] <=0 or self.basis_size[0] >= 20 or self.basis_size[1] <=0 or self.basis_size[1] >= 20:
-            raise Exception("Error ! The input 'basis_size' value should: 0 < basis_size < 20")
         
         self.l_max = get_parameter("l_max", descriptor_dict, [4, 2, 1]) # expansion order for angular terms
-        if len(self.l_max) != 3 or (self.l_max[0] != 4) or (self.l_max[1] != 2) or (self.l_max[2] > 1) :
-            error_log = "the input 'l_max' should has 3 values. The values should be [4, 2, 0] or [4, 2, 1]. The last num '1', means use 5 body features.\n"
-            raise Exception(error_log)
-        if self.l_max[2] != 0 and self.l_max[2] != 1:
-            error_log = "the input 'l_max' should has 3 values. The values should be [4, 2, 0] or [4, 2, 1]. The last num '1', means use 5 body features, '0' means not use 5 body features\n"
-            raise Exception(error_log)
+        self.set_feature_params()
 
         if "fitting_net" in model_dict.keys():
             self.neuron = get_parameter("network_size", model_dict["fitting_net"], [40]) # number of neurons in the hidden layer
@@ -334,9 +326,9 @@ class NepParam(object):
             self.fix_outlayer =get_parameter("fix_outlayer", model_dict["fitting_net"], False)        
         else:
             self.neuron = [40]
-        if self.neuron[-1] != 1:
+        if len(self.neuron) == 1:
             self.neuron.append(1) # output layer of fitting net
-        self.set_feature_params()
+        self.validate_neuron()
 
     def set_fixed_params(self, json_dict):
         model_dict = get_parameter("model", json_dict, {})
@@ -352,13 +344,43 @@ class NepParam(object):
             self.fix_hiddenlayer =get_parameter("fix_hiddenlayer", model_dict["fitting_net"], False)
             self.fix_outlayer =get_parameter("fix_outlayer", model_dict["fitting_net"], False)
 
+    def validate_neuron(self):
+        if (not isinstance(self.neuron, (list, tuple)) or len(self.neuron) != 2 or
+                type(self.neuron[0]) is not int or self.neuron[1] != 1):
+            raise ValueError("fitting_net.network_size must specify a single hidden layer and one output")
+        if not MIN_HIDDEN_NEURONS <= self.neuron[0] <= MAX_HIDDEN_NEURONS:
+            raise ValueError(
+                f"fitting_net hidden layer must have {MIN_HIDDEN_NEURONS}.."
+                f"{MAX_HIDDEN_NEURONS} neurons; got {self.neuron[0]}")
+
     def set_feature_params(self):
+        for name in ("n_max", "basis_size"):
+            values = getattr(self, name)
+            if (not isinstance(values, (list, tuple)) or len(values) != 2 or
+                    any(type(value) is not int or
+                        not MIN_DESCRIPTOR_SIZE <= value <= MAX_DESCRIPTOR_SIZE
+                        for value in values)):
+                raise ValueError(
+                    f"{name} must contain two integers in "
+                    f"[{MIN_DESCRIPTOR_SIZE}, {MAX_DESCRIPTOR_SIZE}]; got {values!r}")
+        if not isinstance(self.l_max, (list, tuple)) or tuple(self.l_max) not in SUPPORTED_L_MAX:
+            raise ValueError(f"l_max must be one of {SUPPORTED_L_MAX}; got {self.l_max!r}")
         # features
         self.two_feat_num = self.n_max[0]+1
         self.three_feat_num = (self.n_max[1]+1)*self.l_max[0]
         self.four_feat_num = (self.n_max[1]+1) if self.l_max[1] != 0 else 0
         self.five_feat_num = (self.n_max[1]+1) if self.l_max[2] != 0 else 0
+        angular_features = self.three_feat_num + self.four_feat_num + self.five_feat_num
         self.feature_nums = self.two_feat_num + self.three_feat_num + self.four_feat_num + self.five_feat_num
+        if self.feature_nums > MAX_FEATURES:
+            raise ValueError(
+                f"NEP descriptor has {self.feature_nums} features, exceeding the "
+                f"LAMMPS limit {MAX_FEATURES} (n_max={self.n_max}, l_max={self.l_max})")
+        if angular_features > MAX_ANGULAR_FEATURES:
+            raise ValueError(
+                f"NEP descriptor has {angular_features} angular features, exceeding the "
+                f"LAMMPS limit {MAX_ANGULAR_FEATURES} "
+                f"(n_max={self.n_max}, l_max={self.l_max})")
         # c params, the 4-body and 5-body use the same c param of 3-body, their N_base_a the same
         self.two_c_num = self.type_num*self.type_num*(self.n_max[0]+1)*(self.basis_size[0]+1)
         self.three_c_num = self.type_num*self.type_num*(self.n_max[1]+1)*(self.basis_size[1]+1)

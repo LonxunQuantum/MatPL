@@ -4,14 +4,14 @@
 #include <hip/hip_runtime.h>
 
 #include "../include/nep_fitting_hip.h"
+#include "../include/nep_fitting_limits.h"
 
 namespace {
 
 constexpr int kTile = 16;
 constexpr int kAtoms = 8;
 constexpr int kThreads = kTile * kAtoms;
-constexpr int kMaxD = 96;
-constexpr int kMaxH = 100;
+constexpr int kMaxD = nep_fitting_limits::kMaxFeatures;
 constexpr int kMaxQ = 2;
 constexpr int kMaxStride = (kMaxD + 1 + kMaxQ) * kTile + kMaxQ;
 constexpr int kMaxAccum = (kMaxStride + kThreads - 1) / kThreads;
