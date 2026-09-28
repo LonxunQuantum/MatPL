@@ -39,8 +39,13 @@ int64_t check_inputs(const at::Tensor& x, const at::Tensor& w,
                 "expected X[N,D], W[T,D,H], V[T,H,Q]");
     const auto n = x.size(0), d = x.size(1), t = w.size(0), h = w.size(2);
     const auto q = v.size(2);
+#ifdef MATPL_FUSED_FITTING_HIP
+    TORCH_CHECK(d >= 1 && d <= 96 && h >= 1 && h <= 100,
+                "HIP fused fitting requires 1 <= D <= 96 and 1 <= H <= 100");
+#else
     TORCH_CHECK(d >= 1 && d <= 140 && h >= 1 && h <= 200,
-                "fused fitting requires 1 <= D <= 140 and 1 <= H <= 200");
+                "CUDA fused fitting requires 1 <= D <= 140 and 1 <= H <= 200");
+#endif
     TORCH_CHECK(q == 1 || q == 2, "fused fitting supports one or two heads");
     TORCH_CHECK(t <= 65535 && n <= std::numeric_limits<int>::max(),
                 "fitting launch dimensions exceed CUDA limits");

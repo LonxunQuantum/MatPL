@@ -157,6 +157,22 @@ def test_prepare_model_skips_cpu_without_loading_cuda_ops(monkeypatch):
     assert adapter.prepare_fitting_jit(model) is False
 
 
+@pytest.mark.parametrize("d,h", [(140, 60), (35, 200)])
+def test_hip_fitting_keeps_its_fixed_kernel_capacity(monkeypatch, d, h):
+    from src.model.nep_fused_fitting import FittingGroups, fused_fitting
+
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    groups = FittingGroups(
+        (0,), (1,), torch.tensor([0]), torch.tensor([0, 1]))
+    x = torch.zeros(1, d, dtype=torch.float64)
+    w = torch.zeros(1, d, h, dtype=torch.float64)
+    b = torch.zeros(1, h, dtype=torch.float64)
+    v = torch.zeros(1, h, 1, dtype=torch.float64)
+    c = torch.zeros(1, 1, dtype=torch.float64)
+    with pytest.raises(ValueError, match="HIP.*D<=96.*H<=100"):
+        fused_fitting(x, w, b, v, c, groups)
+
+
 def test_aot_fitting_implementation_is_removed():
     assert not (REPO / "src/op/kernel/nep_fitting.cu").exists()
     wrapper = (REPO / "src/op/src/nep_fitting_launcher.cpp").read_text()

@@ -347,6 +347,8 @@ def fused_fitting(X, W, b, V, c, groups: FittingGroups):
     Q = V.shape[2]
     if c.shape != (Ta, Q):
         raise ValueError("inconsistent fused fitting output bias shape")
+    if torch.version.hip is not None and (D > 96 or H > 100):
+        raise ValueError("HIP fused fitting supports D<=96 and H<=100")
     if D > 140 or H > 200 or Q not in (1, 2):
         raise ValueError("fused fitting supports D<=140, H<=200, and Q=1 or 2")
     if len(groups.type_ids) != Ta or len(groups.counts) != Ta or sum(groups.counts) != N:
@@ -373,6 +375,8 @@ def fused_charge_fitting(X, fitting_net: Sequence, groups: FittingGroups):
         raise ValueError("inconsistent fused QNEP head weight shapes")
     if any(tensor.shape != (Ta, 1) for tensor in (CE, CQ)):
         raise ValueError("inconsistent fused QNEP head bias shapes")
+    if torch.version.hip is not None and (D > 96 or H > 100):
+        raise ValueError("HIP fused QNEP fitting supports D<=96 and H<=100")
     if D > 140 or H > 200:
         raise ValueError("fused QNEP fitting supports D<=140 and H<=200")
     if len(groups.type_ids) != Ta or len(groups.counts) != Ta or sum(groups.counts) != N:
