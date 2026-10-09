@@ -52,6 +52,20 @@ def calculate_loss_weight_progress(global_update, stop_step):
     return min(max(global_update / stop_step, 0.0), 1.0)
 
 
+def calculate_nep_loss_weight_progress(
+        global_update, stop_step, *, reset_prefactor, periodic_restart,
+        real_lr, peak_lr):
+    """Follow the cosine LR only when prefactor resets are enabled."""
+    if reset_prefactor and periodic_restart:
+        if not math.isfinite(peak_lr) or peak_lr <= 0:
+            raise ValueError("peak_lr must be finite and positive")
+        if not math.isfinite(real_lr):
+            raise ValueError("real_lr must be finite")
+        lr_ratio = min(max(real_lr / peak_lr, 0.0), 1.0)
+        return 1.0 - lr_ratio
+    return calculate_loss_weight_progress(global_update, stop_step)
+
+
 def calculate_warmup_lr(
         global_update, warmup_updates, start_lr, optimizer_peak_lr):
     """Linearly warm up by optimizer update, independent of epoch size."""

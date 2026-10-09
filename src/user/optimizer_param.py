@@ -51,6 +51,9 @@ class OptimizerParam(object):
         self.t_mult   = get_parameter("t_mult", optimizer_dict, None)
         if (self.t_0 is None and self.t_mult is not None) or (self.t_0 is not None and self.t_mult is None):
             raise Exception("ERROR! the input t_0 and t_mult need to be set simultaneously!")
+        self.reset_prefactor = get_parameter("reset_prefactor", optimizer_dict, True)
+        if not isinstance(self.reset_prefactor, bool):
+            raise ValueError("optimizer.reset_prefactor must be a boolean")
         # self.verbose  = get_parameter("verbose", optimizer_dict, False) # nouse
 
         self.lambda_1 = None
@@ -216,6 +219,7 @@ class OptimizerParam(object):
             opt_dict["stop_lr"] = self.stop_lr
             opt_dict["stop_step"] = self.stop_step
             opt_dict["decay_step"] = self.decay_step
+            opt_dict["reset_prefactor"] = self.reset_prefactor
 
             opt_dict["train_energy"] = self.train_energy
             opt_dict["train_force"] = self.train_force

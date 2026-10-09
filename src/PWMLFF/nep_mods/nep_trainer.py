@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from src.loss.loss import adjust_lr, get_loss, nep_l1_l2
 from src.utils.learning_rate import (
-    calculate_loss_weight_progress,
+    calculate_nep_loss_weight_progress,
     calculate_warmup_lr,
     optimizer_step_with_lr,
     optimizer_update_step,
@@ -401,8 +401,6 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         batch_size = sample["num_atom"].shape[0]
         avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
         global_update = optimizer_update_step(completed_updates, i)
-        loss_weight_progress = calculate_loss_weight_progress(
-            global_update, args.optimizer_param.stop_step)
         # 如果采用预热，则前n个epoch 学习率线性增加
         if global_update < warmup_updates:
             optimizer_lr = calculate_warmup_lr(
@@ -429,6 +427,14 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
                         param_group["lr"] = optimizer_peak_lr
                 optimizer_lr = optimizer.param_groups[0]["lr"]
 
+        loss_weight_progress = calculate_nep_loss_weight_progress(
+            global_update,
+            args.optimizer_param.stop_step,
+            reset_prefactor=args.optimizer_param.reset_prefactor,
+            periodic_restart=scheduler is not None,
+            real_lr=optimizer_lr,
+            peak_lr=optimizer_peak_lr,
+        )
         data_mask = Virial_label[:, 0] > -1e6
         train_virial = args.optimizer_param.train_virial and data_mask.any().item()
         output_requests = _get_model_output_requests(sample, args, train_virial)

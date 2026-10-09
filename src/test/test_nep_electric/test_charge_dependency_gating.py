@@ -33,6 +33,7 @@ from src.user.optimizer_param import OptimizerParam
 from src.user.nep_work import _prepare_nep_test_ckpt_json
 from src.utils.learning_rate import (
     calculate_loss_weight_progress,
+    calculate_nep_loss_weight_progress,
     calculate_lr_scale,
     calculate_warmup_lr,
     optimizer_step_with_lr,
@@ -1036,6 +1037,55 @@ def test_nep_loss_uses_progress_even_when_optimizer_lr_changes():
     assert low_lr_loss.item() == pytest.approx(101.0)
     assert high_lr_loss.item() == pytest.approx(101.0)
 
+
+def test_reset_prefactor_defaults_to_true_and_round_trips():
+    params = OptimizerParam()
+    params.set_optimizer({"optimizer": {"optimizer": "ADAM", "t_0": 2, "t_mult": 2}})
+    assert params.reset_prefactor is True
+    assert params.to_dict()["reset_prefactor"] is True
+
+    params.set_optimizer({"optimizer": {
+        "optimizer": "ADAM", "t_0": 2, "t_mult": 2,
+        "reset_prefactor": False,
+    }})
+    assert params.reset_prefactor is False
+    assert params.to_dict()["reset_prefactor"] is False
+
+
+def test_periodic_restart_prefactor_uses_actual_scaled_peak_lr():
+    def force_weight(lr):
+        progress = calculate_nep_loss_weight_progress(
+            1_200_000, 0, reset_prefactor=True,
+            periodic_restart=True, real_lr=lr, peak_lr=0.02,
+        )
+        return get_adam_loss_prefactor_from_progress(100.0, 1.0, progress)
+
+    assert force_weight(0.02) == pytest.approx(100.0)
+    assert force_weight(0.01) == pytest.approx(50.5)
+    assert force_weight(0.000002) == pytest.approx(1.0099)
+    assert force_weight(0.02) == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("reset_prefactor,periodic_restart", [
+    (False, True), (True, False), (False, False),
+])
+def test_stop_step_progress_is_preserved_when_restart_mode_is_inactive(
+    reset_prefactor, periodic_restart,
+):
+    progress = calculate_nep_loss_weight_progress(
+        500_000, 1_000_000, reset_prefactor=reset_prefactor,
+        periodic_restart=periodic_restart,
+        real_lr=0.02, peak_lr=0.02,
+    )
+    assert progress == 0.5
+
+
+def test_periodic_restart_rejects_nonpositive_peak_lr():
+    with pytest.raises(ValueError, match="peak_lr"):
+        calculate_nep_loss_weight_progress(
+            0, 1_000_000, reset_prefactor=True,
+            periodic_restart=True, real_lr=0.01, peak_lr=0.0,
+        )
 
 if __name__ == "__main__":
     test_shift_total_charge_converts_naked_label_to_screened_target()
