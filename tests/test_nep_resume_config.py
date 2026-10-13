@@ -60,14 +60,15 @@ def advance(network, model, optimizer, scheduler, updates):
     used_lrs = []
     for _ in range(updates):
         step = network.completed_optimizer_updates
-        warm = step < network.warmup_optimizer_updates
+        lr_step = network.completed_lr_updates
+        warm = lr_step < network.warmup_optimizer_updates
         if warm:
-            lr = calculate_warmup_lr(step, network.warmup_optimizer_updates,
+            lr = calculate_warmup_lr(lr_step, network.warmup_optimizer_updates,
                                      params.stop_lr, network.optimizer_peak_lr)
         elif scheduler is None:
             lr = adjust_lr(step, network.optimizer_peak_lr,
                            params.stop_step, params.decay_step, params.stop_lr)
-        elif step == network.warmup_optimizer_updates:
+        elif lr_step == network.warmup_optimizer_updates:
             lr = network.optimizer_peak_lr
         else:
             lr = optimizer.param_groups[0]["lr"]
@@ -77,6 +78,7 @@ def advance(network, model, optimizer, scheduler, updates):
         sum(p.square().sum() for p in model.parameters()).backward()
         used_lrs.append(optimizer_step_with_lr(optimizer, None if warm else scheduler))
         network.completed_optimizer_updates += 1
+        network.completed_lr_updates += 1
     return used_lrs
 
 
@@ -84,7 +86,9 @@ def make_checkpoint(source):
     network, model, optimizer, scheduler = source
     return copy.deepcopy(build_nep_checkpoint(
         {}, 2, model, optimizer, scheduler,
-        network.completed_optimizer_updates, network.warmup_optimizer_updates))
+        network.completed_optimizer_updates, network.warmup_optimizer_updates,
+        lr_progress_epochs=(
+            network.completed_lr_updates / network.lr_steps_per_epoch)))
 
 
 @pytest.mark.parametrize("name", ["ADAM", "ADAMW"])
@@ -104,6 +108,7 @@ def test_resume_current_cosine_config_and_moments(
     target = load_network(config, checkpoint, iterations=5)
     network, model, optimizer, scheduler = target
     assert network.completed_optimizer_updates == 8
+    assert network.completed_lr_updates == 10
     assert network.warmup_optimizer_updates == warm_epochs * 5
     assert network.input_param.optimizer_param.start_epoch == 3
     assert scheduler.T_0 == 15
@@ -112,9 +117,9 @@ def test_resume_current_cosine_config_and_moments(
     assert scheduler.base_lrs == pytest.approx([0.004])
     assert optimizer.param_groups[0]["weight_decay"] == 0.2
     if warm_epochs:
-        expected_lr = 2e-5 + 8 / 15 * (0.004 - 2e-5)
+        expected_lr = 2e-5 + 10 / 15 * (0.004 - 2e-5)
     else:
-        expected_lr = 2e-5 + (0.004 - 2e-5) * (1 + math.cos(math.pi * 8 / 15)) / 2
+        expected_lr = 2e-5 + (0.004 - 2e-5) * (1 + math.cos(math.pi * 10 / 15)) / 2
     assert optimizer.param_groups[0]["lr"] == pytest.approx(expected_lr)
     for old, new in zip(source[1].parameters(), model.parameters()):
         torch.testing.assert_close(old, new, rtol=0, atol=0)
@@ -142,6 +147,37 @@ def test_same_config_resume_matches_uninterrupted_updates(load_network, resume_a
         torch.testing.assert_close(old, new, rtol=1e-13, atol=1e-14)
 
 
+def test_resume_with_fewer_gpus_keeps_next_restart_at_epoch_62(load_network):
+    source = load_network(settings(warm_epochs=0), iterations=2)
+    advance(*source, 30 * 2)
+    checkpoint = make_checkpoint(source)
+    checkpoint["epoch"] = 30
+    checkpoint.pop("lr_progress_epochs")
+
+    target = load_network(settings(warm_epochs=0), checkpoint, iterations=6)
+    network, _, optimizer, _ = target
+    assert network.completed_optimizer_updates == 60
+    assert network.input_param.optimizer_param.start_epoch == 31
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
+
+    last_lr = advance(*target, 32 * 6)[-1]
+    assert 1e-7 <= last_lr < 2e-7
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
+
+
+def test_resume_with_fewer_gpus_keeps_warmup_epoch_fraction(load_network):
+    source = load_network(settings(warm_epochs=3), iterations=2)
+    advance(*source, 2)
+    checkpoint = make_checkpoint(source)
+    checkpoint["epoch"] = 1
+
+    target = load_network(settings(warm_epochs=3), checkpoint, iterations=6)
+    network, _, optimizer, _ = target
+    assert network.completed_optimizer_updates == 2
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(
+        1e-7 + (0.001 - 1e-7) / 3)
+
+
 def test_resume_exponential_schedule_uses_current_config(load_network):
     source = load_network(settings())
     advance(*source, 8)
@@ -164,6 +200,7 @@ def test_legacy_checkpoint_uses_epoch_fallback_and_current_warmup(load_network):
     checkpoint.pop("optimizer_updates")
     checkpoint.pop("warmup_updates")
     checkpoint.pop("scheduler")
+    checkpoint.pop("lr_progress_epochs")
     target = load_network(settings(warm_epochs=3), checkpoint, iterations=5)
     network, _, optimizer, scheduler = target
     assert network.completed_optimizer_updates == 10

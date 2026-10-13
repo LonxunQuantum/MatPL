@@ -218,15 +218,17 @@ def restore_nep_optimizer_state(
 
 def initialize_nep_learning_rate(
         optimizer, scheduler, optimizer_param, optimizer_peak_lr,
-        completed_updates, warmup_updates):
+        completed_updates, warmup_updates, lr_completed_updates=None):
     """Set the next update's LR from current settings and completed work."""
+    if lr_completed_updates is None:
+        lr_completed_updates = completed_updates
     if scheduler is not None:
         # The fresh scheduler already holds the JSON period and minimum LR.
         # Warmup does not advance its clock; never load checkpoint configuration.
-        scheduler.step(max(0, completed_updates - warmup_updates))
-    if completed_updates < warmup_updates:
+        scheduler.step(max(0, lr_completed_updates - warmup_updates))
+    if lr_completed_updates < warmup_updates:
         current_lr = calculate_warmup_lr(
-            completed_updates, warmup_updates,
+            lr_completed_updates, warmup_updates,
             optimizer_param.stop_lr, optimizer_peak_lr)
     elif scheduler is not None:
         current_lr = scheduler.get_last_lr()[0]
@@ -242,7 +244,7 @@ def initialize_nep_learning_rate(
 
 def build_nep_checkpoint(
         json_file, epoch, model, optimizer, scheduler,
-        optimizer_updates=None, warmup_updates=None):
+        optimizer_updates=None, warmup_updates=None, lr_progress_epochs=None):
     """Save training state; scheduler metadata is not configuration on resume."""
     return {
         "json_file": json_file,
@@ -252,6 +254,7 @@ def build_nep_checkpoint(
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "optimizer_updates": optimizer_updates,
         "warmup_updates": warmup_updates,
+        "lr_progress_epochs": lr_progress_epochs,
     }
 
 
@@ -1075,6 +1078,7 @@ class nep_network:
                     optimizer_message = "restored" if optimizer_restored else "not found; using a fresh optimizer"
                     print(f"NEP optimizer state: {optimizer_message}")
 
+        self.lr_steps_per_epoch = iterations
         if (
                 checkpoint is not None
                 and not self.input_param.optimizer_param.reset_epoch):
@@ -1086,8 +1090,19 @@ class nep_network:
                 self.completed_optimizer_updates = (
                     self.input_param.optimizer_param.start_epoch - 1
                 ) * iterations
+            # Epoch checkpoints retain LR phase when the new GPU count
+            # changes the number of optimizer updates per epoch.
+            lr_progress_epochs = checkpoint.get("lr_progress_epochs")
+            if lr_progress_epochs is None:
+                lr_progress_epochs = checkpoint.get("epoch")
+            if lr_progress_epochs is None:
+                self.completed_lr_updates = self.completed_optimizer_updates
+            else:
+                self.completed_lr_updates = round(
+                    float(lr_progress_epochs) * iterations)
         else:
             self.completed_optimizer_updates = 0
+            self.completed_lr_updates = 0
         # warm_epochs is configuration, not saved progress. Recompute it for
         # the current loader, including when batch/mix or world size changes.
         self.warmup_optimizer_updates = (
@@ -1096,11 +1111,12 @@ class nep_network:
             current_lr = initialize_nep_learning_rate(
                 optimizer, scheduler, self.input_param.optimizer_param,
                 self.optimizer_peak_lr, self.completed_optimizer_updates,
-                self.warmup_optimizer_updates)
+                self.warmup_optimizer_updates, self.completed_lr_updates)
             if self.is_rank_0:
                 print(
                     "NEP learning rate: computed from current configuration; "
                     f"completed_updates={self.completed_optimizer_updates}, "
+                    f"lr_progress_updates={self.completed_lr_updates}, "
                     f"warmup_updates={self.warmup_optimizer_updates}, "
                     f"peak_lr={self.optimizer_peak_lr:.8e}, "
                     f"next_lr={current_lr:.8e}")
@@ -1278,8 +1294,10 @@ class nep_network:
                         self.warmup_optimizer_updates,
                         self.device,
                         self.input_param,
+                        lr_completed_updates=self.completed_lr_updates,
                 )
                 self.completed_optimizer_updates += completed_epoch_updates
+                self.completed_lr_updates += completed_epoch_updates
 
             time_end = time.time()
             # self.convert_to_gpumd(model)
@@ -1345,6 +1363,8 @@ class nep_network:
                     scheduler,
                     self.completed_optimizer_updates,
                     self.warmup_optimizer_updates,
+                    lr_progress_epochs=(
+                        self.completed_lr_updates / self.lr_steps_per_epoch),
                 )
                 save_checkpoint(
                     checkpoint_dict,

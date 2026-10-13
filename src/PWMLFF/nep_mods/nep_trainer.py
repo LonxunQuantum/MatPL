@@ -303,7 +303,7 @@ def _get_model_output_requests(sample, args: InputParam, train_virial: bool):
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch,
           optimizer_peak_lr, completed_updates, warmup_updates,
-          device, args:InputParam):
+          device, args:InputParam, lr_completed_updates=None):
     CalcOps = load_calc_ops(device=device)
     max_train_steps = args.optimizer_param.max_train_steps
     epoch_steps = (
@@ -401,10 +401,13 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         batch_size = sample["num_atom"].shape[0]
         avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
         global_update = optimizer_update_step(completed_updates, i)
+        lr_update = optimizer_update_step(
+            completed_updates if lr_completed_updates is None
+            else lr_completed_updates, i)
         # 如果采用预热，则前n个epoch 学习率线性增加
-        if global_update < warmup_updates:
+        if lr_update < warmup_updates:
             optimizer_lr = calculate_warmup_lr(
-                global_update=global_update,
+                global_update=lr_update,
                 warmup_updates=warmup_updates,
                 start_lr=args.optimizer_param.stop_lr,
                 optimizer_peak_lr=optimizer_peak_lr,
@@ -422,7 +425,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = optimizer_lr
             else: # 周期性重启
-                if global_update == warmup_updates:
+                if lr_update == warmup_updates:
                     for param_group in optimizer.param_groups:
                         param_group["lr"] = optimizer_peak_lr
                 optimizer_lr = optimizer.param_groups[0]["lr"]
