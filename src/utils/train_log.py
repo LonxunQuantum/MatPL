@@ -79,6 +79,25 @@ class AverageMeter(object):
         return fmtstr.format(**self.__dict__)
 
 
+class RMSEMeter(AverageMeter):
+    """Accumulate squared errors by scalar target, including across ranks."""
+
+    def __init__(self, name, fmt=":f", device=None, world_size=1):
+        super().__init__(name, fmt, Summary.ROOT, device, world_size)
+
+    def all_reduce(self):
+        if not torch.distributed.is_initialized():
+            return
+        # Keep sum/count local so repeated progress synchronization never
+        # feeds globally reduced values back into the next local update.
+        total = torch.tensor([self.sum, self.count], dtype=torch.float64,
+                             device=self.device)
+        torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+        squared_error_sum, target_count = total.tolist()
+        self.avg = squared_error_sum / target_count if target_count else 0.0
+        self.root = self.avg ** 0.5
+
+
 class ProgressMeter(object):
     def __init__(self, num_batches, meters, prefix=""):
         self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
