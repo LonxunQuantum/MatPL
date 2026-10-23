@@ -43,13 +43,16 @@ class AverageMeter(object):
                 self.root = self.avg**0.5
 
     def all_reduce(self):
-        if torch.distributed.is_initialized():
-            total = torch.tensor([self.root, self.val, self.avg], 
-                               dtype=torch.float32, 
-                               device = self.device)
+        if not torch.distributed.is_initialized():
+            return
+        total = torch.tensor([self.root, self.val, self.avg],
+                             dtype=torch.float32, device=self.device)
+        if torch.distributed.get_backend() == "gloo":
+            torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+            total /= torch.distributed.get_world_size()
+        else:
             torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.AVG)
         self.root, self.val, self.avg = total.tolist()
-        # print(f" after reduce: name: {self.name} root: {self.root} val: {self.val} avg: {self.avg} ")
 
     def __str__(self):
         if self.summary_type is Summary.AVERAGE:
@@ -74,6 +77,25 @@ class AverageMeter(object):
             raise ValueError("invalid summary type %r" % self.summary_type)
 
         return fmtstr.format(**self.__dict__)
+
+
+class RMSEMeter(AverageMeter):
+    """Accumulate squared errors by scalar target, including across ranks."""
+
+    def __init__(self, name, fmt=":f", device=None, world_size=1):
+        super().__init__(name, fmt, Summary.ROOT, device, world_size)
+
+    def all_reduce(self):
+        if not torch.distributed.is_initialized():
+            return
+        # Keep sum/count local so repeated progress synchronization never
+        # feeds globally reduced values back into the next local update.
+        total = torch.tensor([self.sum, self.count], dtype=torch.float64,
+                             device=self.device)
+        torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+        squared_error_sum, target_count = total.tolist()
+        self.avg = squared_error_sum / target_count if target_count else 0.0
+        self.root = self.avg ** 0.5
 
 
 class ProgressMeter(object):

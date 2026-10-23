@@ -1,15 +1,14 @@
 import os
 import torch
 import json
-import socket
 from copy import deepcopy
-from contextlib import closing
 import argparse
 
 import torch.multiprocessing as mp
 
 from src.user.input_param import InputParam
 from src.PWMLFF.nep_network import nep_network, save_checkpoint
+from src.utils.nep_distributed import configure_nep_runtime, training_device_type
 from src.utils.atom_type_emb_dict import element_table
 from src.utils.file_operation import delete_tree, copy_tree, copy_file
 from src.utils.json_operation import get_parameter, get_required_parameter
@@ -28,23 +27,23 @@ def _get_kspace_method(input_json: dict):
     )
     return "ewald"
 
-def find_free_port():
-    """查找一个空闲的 TCP 端口"""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(('', 0))  # 绑定到任意地址，端口 0 让系统分配空闲端口
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return str(s.getsockname()[1])  # 返回分配的端口号
 
 def main_worker(rank, world_size, nep_param):
     try:
-        if nep_param.multi_nodes is False and nep_param.multi_gpus: # single node and mulit GPUs
-            nep_param.rank = rank
-            nep_param.local_rank = rank
+        if nep_param.world_size > 1 and training_device_type(nep_param) == "cpu":
+            mp.set_start_method("spawn", force=True)
         nep_net = nep_network(nep_param)
         nep_net.train()
     except Exception as e:
         print(f"Rank {nep_param.rank}, LocalRank {nep_param.local_rank}: Error occurred: {e}")
         raise
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
+def _spawn_worker(rank, world_size, nep_param):
+    nep_param.rank = nep_param.local_rank = rank
+    main_worker(rank, world_size, nep_param)
 
 '''
 description: do nep training
@@ -58,62 +57,14 @@ author: wuxingxing
 '''
 def nep_train(input_json: json, cmd:str):
     nep_param = InputParam(input_json, cmd)
-    num_nodes  = os.environ.get("SLURM_NNODES", None)
-    if num_nodes is not None and int(num_nodes) > 1: # multi node training and start by slurm srun
-        world_size = int(os.environ["SLURM_NTASKS"])
-        rank       = int(os.environ["SLURM_PROCID"])
-        local_rank = int(os.environ["SLURM_LOCALID"])
-        num_nodes  = int(num_nodes)
-    else:
-        if torch.cuda.is_available():
-            world_size = torch.cuda.device_count()   # 有GPU就按卡数
-        else:
-            world_size = 1                           # 纯CPU强制单进程
-        rank       = 0
-        local_rank = 0
-        num_nodes  = 1
-    if world_size > 1: # master ip from slurm (multi nodes) or localhost (single nodel)
-        if nep_param.master_addr is not None:
-            master_addr = nep_param.master_addr
-            master_port = nep_param.master_port
-        else:
-            master_addr= os.environ.get("MASTER_ADDR", "localhost")
-            master_port= os.environ.get("MASTER_PORT", None) # get port from slrum script
-            if master_port is None or not master_port.isdigit():
-                master_port = find_free_port()
-                if rank == 0:
-                    print(f"No valid MASTER_PORT provided, using free port: {master_port}")
-            nep_param.master_addr = master_addr
-            nep_param.master_port = master_port
-    else: # single gpu or only cpu
-        nep_param.master_addr = None
-        nep_param.master_port = None
-    # 对于LKF 和 GKF 优化器，只支持单卡训练
-    if nep_param.optimizer_param.opt_name == "LKF" or nep_param.optimizer_param.opt_name == "GKF":
-        if(num_nodes > 1 or world_size > 1):
-            raise Exception("ERROR! The LKF and GKF optimizers do not support multi-GPU training, please adjust them to single-GPU training!")
-        nep_param.multi_gpus = False
-        nep_param.multi_nodes = False
-        nep_param.world_size = 1
-        nep_param.rank = 0
-        nep_param.local_rank = 0
-        num_nodes = 1
-    else:
-        # if rank == 0:
-        #     print(f"train_multi_nep rank {rank} local_rank {local_rank} num_nodes {num_nodes} world_size {world_size} workers {nep_param.workers} master_addr {nep_param.master_addr} master_port {nep_param.master_port}")
-        nep_param.world_size = world_size
-        nep_param.multi_gpus = world_size > 1
-        nep_param.multi_nodes = num_nodes > 1
-        nep_param.rank = rank
-        nep_param.local_rank = local_rank
+    spawn_workers = configure_nep_runtime(nep_param)
     if nep_param.rank == 0:
         nep_param.print_input_params(json_file_save_name="std_input.json")
-    if nep_param.multi_gpus and nep_param.multi_nodes: # multi gpus and multi nodes: start by 'srun'
-        main_worker(rank, world_size, nep_param)
-    elif nep_param.multi_gpus and nep_param.multi_nodes is False: # single node and mulit gpus: start by mp.spawn
-        mp.spawn(main_worker, args=(world_size, nep_param), nprocs=world_size, join=True)
-    else: # single gpu
-        main_worker(0, 1, nep_param)
+    if spawn_workers:
+        mp.spawn(_spawn_worker, args=(nep_param.world_size, nep_param),
+                 nprocs=nep_param.world_size, join=True)
+    else:
+        main_worker(nep_param.rank, nep_param.world_size, nep_param)
 
 # '''
 # description: 

@@ -21,6 +21,7 @@ list(REMOVE_ITEM HIP_SOURCES ${CMAKE_SOURCE_DIR}/src/nep_fitting_jit.cpp)
 
 add_library(CalcOps_cuda SHARED ${HIP_SOURCES})
 target_compile_definitions(CalcOps_cuda PRIVATE
+    MATPL_HIP_ANGULAR_OUTPUT_PRUNE
     MATPL_ENABLE_FUSED_FITTING
     MATPL_FUSED_FITTING_HIP
 )
@@ -38,7 +39,17 @@ set_target_properties(CalcOps_cuda PROPERTIES
     HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
     POSITION_INDEPENDENT_CODE ON
 )
-target_link_libraries(CalcOps_cuda PRIVATE ${TORCH_LIBRARIES})
+find_library(MATPL_HIPRTC_LIBRARY NAMES hiprtc
+    HINTS "$ENV{ROCM_PATH}/lib" "$ENV{HIP_PATH}/lib" "${HIP_ROOT_DIR}/lib"
+          "${CMAKE_HIP_COMPILER_ROCM_ROOT}/lib")
+find_path(MATPL_HIPRTC_INCLUDE_DIR hip/hiprtc.h
+    HINTS "$ENV{ROCM_PATH}/include" "$ENV{HIP_PATH}/include"
+          "${CMAKE_HIP_COMPILER_ROCM_ROOT}/include")
+if(NOT MATPL_HIPRTC_LIBRARY OR NOT MATPL_HIPRTC_INCLUDE_DIR)
+    message(FATAL_ERROR "HIP fitting JIT requires libhiprtc and hip/hiprtc.h")
+endif()
+target_include_directories(CalcOps_cuda PRIVATE ${MATPL_HIPRTC_INCLUDE_DIR})
+target_link_libraries(CalcOps_cuda PRIVATE ${TORCH_LIBRARIES} ${MATPL_HIPRTC_LIBRARY})
 
 add_library(CalcOps_bind SHARED ${CMAKE_SOURCE_DIR}/src/CalcOps_bind.cpp)
 target_compile_definitions(CalcOps_bind PRIVATE

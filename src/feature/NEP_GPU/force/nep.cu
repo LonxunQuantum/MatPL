@@ -45,14 +45,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include <string>
 #include <vector>
 
-const std::string ELEMENTS[NUM_ELEMENTS] = {
-  "H",  "He", "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Ne", "Na", "Mg", "Al", "Si", "P",
-  "S",  "Cl", "Ar", "K",  "Ca", "Sc", "Ti", "V",  "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-  "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y",  "Zr", "Nb", "Mo", "Tc", "Ru", "Rh",
-  "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I",  "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd",
-  "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W",  "Re",
-  "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
-  "Pa", "U",  "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"};
+
 
 
 int countNonEmptyLines(const char* filename) {
@@ -120,6 +113,11 @@ NEP::NEP() {}
 
 void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const int in_device_id)
 {
+  model_loaded = false;
+  paramb = ParaMB{};
+  annmb = ANN{};
+  zbl = ZBL{};
+  is_gpumd_nep = false;
   int neplinenums = countNonEmptyLines(file_potential);
 
   rank_0 = is_rank_0;
@@ -136,10 +134,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
 
   // nep3 1 C
   std::vector<std::string> tokens = get_tokens(input);
-  if (tokens.size() < 3) {
-    std::cout << "The first line of nep.txt should have at least 3 items." << std::endl;
-    exit(1);
-  }
+  element_atomic_number_list = nep_inference::parse_elements(tokens);
   if (tokens[0] == "nep4") {
     paramb.version = 4;
     zbl.enabled = false;
@@ -171,12 +166,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     paramb.version = 5;
     zbl.enabled = true;
   }
-  paramb.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
-  if (tokens.size() != 2 + paramb.num_types) {
-    std::cout << "The first line of nep.txt should have " << paramb.num_types << " atom symbols."
-              << std::endl;
-    exit(1);
-  }
+  paramb.num_types = static_cast<int>(element_atomic_number_list.size());
   if (print_potential_info) {
     if (paramb.num_types == 1) {
       printf("Use the NEP%d potential with %d atom type.\n", paramb.version, paramb.num_types);
@@ -186,14 +176,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
   }
   element_atomic_number_list.resize(paramb.num_types);
   for (int n = 0; n < paramb.num_types; ++n) {
-    int atomic_number = 0;
-    for (int m = 0; m < NUM_ELEMENTS; ++m) {
-      if (tokens[2 + n] == ELEMENTS[m]) {
-        atomic_number = m + 1;
-        break;
-      }
-    }
-    element_atomic_number_list[n] = atomic_number;
+    const int atomic_number = element_atomic_number_list[n];
     zbl.atomic_numbers[n] = atomic_number;
     if (print_potential_info) {
       printf("    type %d (%s).\n", n, tokens[2 + n].c_str());
@@ -210,6 +193,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     zbl.rc_inner = get_double_from_token(tokens[1], __FILE__, __LINE__);
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
     if (zbl.rc_inner == 0 && zbl.rc_outer == 0) {
+      nep_inference::validate_flexible_zbl(paramb.num_types);
       zbl.flexibled = true;
       printf("    has the flexible ZBL potential\n");
     } else {
@@ -455,6 +439,7 @@ void NEP::init_from_file(const char* file_potential, const bool is_rank_0, const
     }
     zbl.num_types = paramb.num_types;
   }
+  model_loaded = true;
 }
 
 NEP::~NEP(void)
@@ -586,6 +571,8 @@ void NEP::inference(
   const char* kspace_method,
   double total_charge
   ) {
+  nep_inference::validate_types(itype_cpu, N, element_atomic_number_list,
+      model_loaded, zbl.enabled && paramb.use_typewise_cutoff_zbl);
   int BLOCK_SIZE = 64;
   int grid_size = (N- 1) / BLOCK_SIZE + 1;
 

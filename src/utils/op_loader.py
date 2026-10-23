@@ -20,8 +20,10 @@ def detect_compiled_backend(torch_module=torch) -> str:
     return "cpu"
 
 
-def select_runtime_backend(torch_module=torch) -> str:
-    """Choose GPU when it is compiled and available, otherwise choose CPU."""
+def select_runtime_backend(torch_module=torch, device=None) -> str:
+    """Honor an explicit CPU device; otherwise select the available backend."""
+    if device is not None and str(device).split(":", 1)[0] == "cpu":
+        return "cpu"
     compiled_backend = detect_compiled_backend(torch_module)
     if compiled_backend != "cpu" and torch_module.cuda.is_available():
         return compiled_backend
@@ -45,9 +47,9 @@ def get_library_path(backend: str, src_root: Path | None = None) -> Path:
     return root / "op" / "build" / normalized_backend / "lib" / library_name
 
 
-def load_calc_ops(torch_module=torch, src_root: Path | None = None):
+def load_calc_ops(torch_module=torch, src_root: Path | None = None, *, device=None):
     """Load CalcOps once and return its CPU- or GPU-compatible namespace."""
-    backend = select_runtime_backend(torch_module)
+    backend = select_runtime_backend(torch_module, device=device)
     library_path = get_library_path(backend, src_root)
     cache_key = (id(torch_module), str(library_path))
     if cache_key in _LOADED_NAMESPACES:

@@ -18,7 +18,7 @@ from src.PWMLFF.nep_network import (
     build_nep_checkpoint,
     load_nep_checkpoint_with_fallback,
     nep_network,
-    restore_nep_training_state,
+    restore_nep_optimizer_state,
 )
 from src.PWMLFF.nep_mods.nep_trainer import (
     _build_predict_metric_row,
@@ -33,6 +33,7 @@ from src.user.optimizer_param import OptimizerParam
 from src.user.nep_work import _prepare_nep_test_ckpt_json
 from src.utils.learning_rate import (
     calculate_loss_weight_progress,
+    calculate_nep_loss_weight_progress,
     calculate_lr_scale,
     calculate_warmup_lr,
     optimizer_step_with_lr,
@@ -136,41 +137,36 @@ def _checkpoint_with_training_state():
     }
 
 
-def test_resume_restores_optimizer_moments_and_scheduler_position():
+def test_resume_restores_optimizer_moments():
     checkpoint = _checkpoint_with_training_state()
     parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
     optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
 
-    restored = restore_nep_training_state(
-        checkpoint, optimizer, scheduler, reset_epoch=False)
+    restored = restore_nep_optimizer_state(
+        checkpoint, optimizer, reset_epoch=False)
 
-    assert restored == (True, True)
+    assert restored is True
     state = optimizer.state[parameter]
     assert state["step"].item() == 1
     assert torch.allclose(
         state["exp_avg"], torch.tensor([0.2], dtype=torch.float64))
-    assert scheduler.last_epoch == 1
-    assert scheduler.T_cur == 1.5
+    assert scheduler.last_epoch == 0
+    assert scheduler.T_cur == 0
 
 
-def test_resume_migrates_scheduler_base_to_configured_optimizer_peak_lr():
+def test_resume_keeps_current_optimizer_options():
     checkpoint = _checkpoint_with_training_state()
     parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
-    optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
+    optimizer = torch.optim.Adam([parameter], lr=0.02, weight_decay=0.3,
+                                 betas=(0.8, 0.99), eps=1e-6)
+    restored = restore_nep_optimizer_state(checkpoint, optimizer, reset_epoch=False)
 
-    restored = restore_nep_training_state(
-        checkpoint,
-        optimizer,
-        scheduler,
-        reset_epoch=False,
-        optimizer_peak_lr=0.02,
-    )
-
-    assert restored == (True, True)
-    assert scheduler.base_lrs == pytest.approx([0.02])
-    assert optimizer.param_groups[0]["initial_lr"] == pytest.approx(0.02)
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(
-        scheduler.get_last_lr()[0])
+    assert restored is True
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.02)
+    assert optimizer.param_groups[0]["weight_decay"] == 0.3
+    assert optimizer.param_groups[0]["betas"] == (0.8, 0.99)
+    assert optimizer.param_groups[0]["eps"] == 1e-6
+    assert checkpoint["optimizer"]["param_groups"][0]["lr"] != 0.02
 
 
 def test_legacy_checkpoint_without_training_state_uses_fresh_objects():
@@ -178,10 +174,10 @@ def test_legacy_checkpoint_without_training_state_uses_fresh_objects():
     optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
     initial_scheduler_state = scheduler.state_dict()
 
-    restored = restore_nep_training_state(
-        {"state_dict": {}}, optimizer, scheduler, reset_epoch=False)
+    restored = restore_nep_optimizer_state(
+        {"state_dict": {}}, optimizer, reset_epoch=False)
 
-    assert restored == (False, False)
+    assert restored is False
     assert optimizer.state == {}
     assert scheduler.state_dict() == initial_scheduler_state
 
@@ -192,10 +188,10 @@ def test_reset_epoch_ignores_available_training_state():
     optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
     initial_scheduler_state = scheduler.state_dict()
 
-    restored = restore_nep_training_state(
-        checkpoint, optimizer, scheduler, reset_epoch=True)
+    restored = restore_nep_optimizer_state(
+        checkpoint, optimizer, reset_epoch=True)
 
-    assert restored == (False, False)
+    assert restored is False
     assert optimizer.state == {}
     assert scheduler.state_dict() == initial_scheduler_state
 
@@ -206,31 +202,22 @@ def test_checkpoint_without_scheduler_restores_optimizer_only():
     parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
     optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
 
-    restored = restore_nep_training_state(
-        checkpoint, optimizer, scheduler, reset_epoch=False)
+    restored = restore_nep_optimizer_state(
+        checkpoint, optimizer, reset_epoch=False)
 
-    assert restored == (True, False)
+    assert restored is True
     assert optimizer.state[parameter]["step"].item() == 1
     assert scheduler.last_epoch == 0
 
 
-def test_missing_scheduler_state_restarts_optimizer_lr_at_peak():
+def test_optimizer_restore_does_not_need_saved_scheduler():
     checkpoint = _checkpoint_with_training_state()
     checkpoint.pop("scheduler")
     parameter = torch.nn.Parameter(torch.tensor([5.0], dtype=torch.float64))
-    optimizer, scheduler = _resume_optimizer_and_scheduler(parameter)
+    optimizer = torch.optim.Adam([parameter], lr=0.02)
+    restored = restore_nep_optimizer_state(checkpoint, optimizer, reset_epoch=False)
 
-    restored = restore_nep_training_state(
-        checkpoint,
-        optimizer,
-        scheduler,
-        reset_epoch=False,
-        optimizer_peak_lr=0.02,
-    )
-
-    assert restored == (True, False)
-    assert scheduler.base_lrs == pytest.approx([0.02])
-    assert scheduler.get_last_lr() == pytest.approx([0.02])
+    assert restored is True
     assert optimizer.param_groups[0]["lr"] == pytest.approx(0.02)
 
 
@@ -363,15 +350,14 @@ def test_old_trainable_optimizer_is_skipped_for_fixed_parameter_layout():
     fixed_model.other = torch.nn.Parameter(torch.tensor(2.0, dtype=torch.float64))
     fixed_optimizer = torch.optim.Adam(fixed_model.parameters(), lr=0.01)
 
-    restored = restore_nep_training_state(
+    restored = restore_nep_optimizer_state(
         checkpoint,
         fixed_optimizer,
-        scheduler=None,
         reset_epoch=False,
         allow_optimizer_param_group_mismatch=True,
     )
 
-    assert restored == (False, False)
+    assert restored is False
     assert fixed_optimizer.state == {}
 
 
@@ -385,15 +371,14 @@ def test_matching_fixed_optimizer_state_is_restored():
     target_model.other = torch.nn.Parameter(torch.tensor(3.0, dtype=torch.float64))
     target_optimizer = torch.optim.Adam(target_model.parameters(), lr=0.01)
 
-    restored = restore_nep_training_state(
+    restored = restore_nep_optimizer_state(
         {"optimizer": source_optimizer.state_dict()},
         target_optimizer,
-        scheduler=None,
         reset_epoch=False,
         allow_optimizer_param_group_mismatch=True,
     )
 
-    assert restored == (True, False)
+    assert restored is True
     assert target_optimizer.state[target_model.other]["step"].item() == 1
 
 
@@ -1052,6 +1037,55 @@ def test_nep_loss_uses_progress_even_when_optimizer_lr_changes():
     assert low_lr_loss.item() == pytest.approx(101.0)
     assert high_lr_loss.item() == pytest.approx(101.0)
 
+
+def test_reset_prefactor_defaults_to_true_and_round_trips():
+    params = OptimizerParam()
+    params.set_optimizer({"optimizer": {"optimizer": "ADAM", "t_0": 2, "t_mult": 2}})
+    assert params.reset_prefactor is True
+    assert params.to_dict()["reset_prefactor"] is True
+
+    params.set_optimizer({"optimizer": {
+        "optimizer": "ADAM", "t_0": 2, "t_mult": 2,
+        "reset_prefactor": False,
+    }})
+    assert params.reset_prefactor is False
+    assert params.to_dict()["reset_prefactor"] is False
+
+
+def test_periodic_restart_prefactor_uses_actual_scaled_peak_lr():
+    def force_weight(lr):
+        progress = calculate_nep_loss_weight_progress(
+            1_200_000, 0, reset_prefactor=True,
+            periodic_restart=True, real_lr=lr, peak_lr=0.02,
+        )
+        return get_adam_loss_prefactor_from_progress(100.0, 1.0, progress)
+
+    assert force_weight(0.02) == pytest.approx(100.0)
+    assert force_weight(0.01) == pytest.approx(50.5)
+    assert force_weight(0.000002) == pytest.approx(1.0099)
+    assert force_weight(0.02) == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("reset_prefactor,periodic_restart", [
+    (False, True), (True, False), (False, False),
+])
+def test_stop_step_progress_is_preserved_when_restart_mode_is_inactive(
+    reset_prefactor, periodic_restart,
+):
+    progress = calculate_nep_loss_weight_progress(
+        500_000, 1_000_000, reset_prefactor=reset_prefactor,
+        periodic_restart=periodic_restart,
+        real_lr=0.02, peak_lr=0.02,
+    )
+    assert progress == 0.5
+
+
+def test_periodic_restart_rejects_nonpositive_peak_lr():
+    with pytest.raises(ValueError, match="peak_lr"):
+        calculate_nep_loss_weight_progress(
+            0, 1_000_000, reset_prefactor=True,
+            periodic_restart=True, real_lr=0.01, peak_lr=0.0,
+        )
 
 if __name__ == "__main__":
     test_shift_total_charge_converts_naked_label_to_screened_target()

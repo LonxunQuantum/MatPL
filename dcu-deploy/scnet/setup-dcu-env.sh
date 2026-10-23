@@ -10,8 +10,7 @@ fi
 
 MATPL_MODULE_INIT=${MATPL_MODULE_INIT:-/etc/profile}
 MATPL_GCC_MODULE=${MATPL_GCC_MODULE:-compiler/gcc/9.3.0}
-MATPL_CONDA_SH=${MATPL_CONDA_SH:-/public/software/apps/anaconda3/2023.09/etc/profile.d/conda.sh}
-MATPL_CONDA_ENV=${MATPL_CONDA_ENV:-matpl-2026.3}
+MATPL_PYTHON_ACTIVATE=${MATPL_PYTHON_ACTIVATE:-/public/home/suolaoliu/tools/app/conda/matpl-2026.3/bin/activate}
 MATPL_DTK_ROOT=${MATPL_DTK_ROOT:-/public/software/compiler/dtk-26.04}
 MATPL_DTK_ENV=${MATPL_DTK_ENV:-$MATPL_DTK_ROOT/env.sh}
 
@@ -27,12 +26,11 @@ if ! command -v module >/dev/null 2>&1; then
 fi
 module load "$MATPL_GCC_MODULE" || return 1
 
-if [[ ! -r "$MATPL_CONDA_SH" ]]; then
-    echo "Error: Conda initialization script not found: $MATPL_CONDA_SH" >&2
+if [[ ! -r "$MATPL_PYTHON_ACTIVATE" ]]; then
+    echo "Error: Python environment activation script not found: $MATPL_PYTHON_ACTIVATE" >&2
     return 1
 fi
-source "$MATPL_CONDA_SH"
-conda activate "$MATPL_CONDA_ENV" || return 1
+source "$MATPL_PYTHON_ACTIVATE" || return 1
 if [[ -z "${CONDA_PREFIX:-}" ]]; then
     echo "Error: Conda activation did not set CONDA_PREFIX" >&2
     return 1
@@ -77,6 +75,6 @@ case ":$PATH:" in
 esac
 
 echo "MatPL DCU environment ready:"
-echo "  Conda environment: $MATPL_CONDA_ENV"
+echo "  Python environment: $CONDA_PREFIX"
 echo "  DTK root: $MATPL_DTK_ROOT"
 echo "  CUDA-compatible compiler: $MATPL_DTK_NVCC"

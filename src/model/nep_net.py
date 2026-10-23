@@ -16,7 +16,6 @@ from src.utils.op_loader import load_calc_ops
 sys.path.append(os.getcwd())
 from src.model.nep_fitting import FittingNet, QNEPFittingNet
 from src.model.nep_fused_fitting import fused_fitting, fused_charge_fitting, pack_fitting_parameters
-CalcOps = load_calc_ops()
 
 
 class _SegmentSum(torch.autograd.Function):
@@ -515,6 +514,7 @@ class NEP(nn.Module):
 
             feats = self.calculate_qn(atom_type_map, NL_radial_type, radial_Ri, NL_angular_type, Ri_angular, device, dtype)
         else:# cuda ops
+            CalcOps = load_calc_ops(device=device)
             if self.train_2b:
                 feat_2b = torch.zeros(natoms_sum, self.two_feat_num, dtype=dtype, device=device, requires_grad=True)
                 radial_outputs = CalcOps.calculateNepFeatWithGradContext(
@@ -1259,8 +1259,7 @@ class NEP(nn.Module):
         if (fitting_groups is not None and fitting_groups.type_ids and
                 feats_scaled.is_cuda and
                 feats_scaled.dtype == torch.float64 and
-                len(self.neuron) == 2 and 1 <= self.neuron[0] <= 100 and
-                1 <= feats_scaled.shape[1] <= 96):
+                len(self.neuron) == 2):
             if self.charge_mode:
                 Ei, charge, grad_e, grad_q = fused_charge_fitting(
                     feats_scaled, self.fitting_net, fitting_groups)
@@ -1353,6 +1352,7 @@ class NEP(nn.Module):
             return force, virial
 
         def aggregate_gpu(branch_dE, branch_Ri, branch_Ri_d, branch_list_neigh):
+            CalcOps = load_calc_ops(device=device)
             branch_Ri_d = branch_Ri_d.view(natoms_sum, -1, 3)
             dE_tmp = branch_dE.view(natoms_sum, 1, -1)
             force = -1 * torch.matmul(dE_tmp, branch_Ri_d).squeeze(-2)

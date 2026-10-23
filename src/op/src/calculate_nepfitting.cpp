@@ -1,6 +1,7 @@
 // Shared validation/allocation for the CUDA JIT and HIP AOT fitting backends.
 #ifdef MATPL_ENABLE_FUSED_FITTING
 #include "../include/calculate_nepfitting.h"
+#include "../include/nep_fitting_limits.h"
 #ifdef MATPL_FUSED_FITTING_HIP
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #else
@@ -39,8 +40,10 @@ int64_t check_inputs(const at::Tensor& x, const at::Tensor& w,
                 "expected X[N,D], W[T,D,H], V[T,H,Q]");
     const auto n = x.size(0), d = x.size(1), t = w.size(0), h = w.size(2);
     const auto q = v.size(2);
-    TORCH_CHECK(d >= 1 && d <= 96 && h >= 1 && h <= 100,
-                "fused fitting requires 1 <= D <= 96 and 1 <= H <= 100");
+    TORCH_CHECK(d >= 1 && d <= nep_fitting_limits::kMaxFeatures &&
+                h >= 1 && h <= nep_fitting_limits::kMaxHiddenNeurons,
+                "fused fitting requires 1 <= D <= ", nep_fitting_limits::kMaxFeatures,
+                " and 1 <= H <= ", nep_fitting_limits::kMaxHiddenNeurons);
     TORCH_CHECK(q == 1 || q == 2, "fused fitting supports one or two heads");
     TORCH_CHECK(t <= 65535 && n <= std::numeric_limits<int>::max(),
                 "fitting launch dimensions exceed CUDA limits");

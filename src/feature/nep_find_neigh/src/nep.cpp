@@ -73,15 +73,7 @@ const double C5B[3] = {0.026596810706114, 0.053193621412227, 0.026596810706114};
 const double K_C_SP = 14.399645; // 1/(4*PI*epsilon_0)
 const double PI = 3.141592653589793;
 const double PI_HALF = 1.570796326794897;
-const int NUM_ELEMENTS = 103;
-const std::string ELEMENTS[NUM_ELEMENTS] = {
-  "H",  "He", "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Ne", "Na", "Mg", "Al", "Si", "P",
-  "S",  "Cl", "Ar", "K",  "Ca", "Sc", "Ti", "V",  "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-  "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y",  "Zr", "Nb", "Mo", "Tc", "Ru", "Rh",
-  "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I",  "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd",
-  "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W",  "Re",
-  "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
-  "Pa", "U",  "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"};
+
 
 const double COVALENT_RADIUS[94] = {
   0.426667, 0.613333, 1.6,     1.25333, 1.02667, 1.0,     0.946667, 0.84,
@@ -2570,6 +2562,10 @@ NEP_CPU::NEP_CPU() {
 
 void NEP_CPU::init_from_file(const std::string& potential_filename, const bool is_rank_0)
 {
+  model_loaded = false;
+  paramb = ParaMB{};
+  annmb = ANN{};
+  zbl = ZBL{};
   int neplinenums = countNonEmptyLines(potential_filename);
 
   std::ifstream input(potential_filename);
@@ -2580,11 +2576,7 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
 
   // nep 1 C
   std::vector<std::string> tokens = get_tokens(input);
-  if (tokens.size() < 3) {
-    print_tokens(tokens);
-    std::cout << "The first line of nep.txt should have at least 3 items." << std::endl;
-    exit(1);
-  }
+  element_atomic_number_list = nep_inference::parse_elements(tokens);
   if (tokens[0] == "nep") {
     paramb.model_type = 0;
     paramb.version = 2;
@@ -2663,26 +2655,12 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
     zbl.enabled = true;
   }
 
-  paramb.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
-  if (tokens.size() != (2 + paramb.num_types)) {
-    print_tokens(tokens);
-    std::cout << "The first line of nep.txt should have " << paramb.num_types << " atom symbols."
-              << std::endl;
-    exit(1);
-  }
-
+  paramb.num_types = static_cast<int>(element_atomic_number_list.size());
   element_list.resize(paramb.num_types);
   element_atomic_number_list.resize(paramb.num_types);
   for (int n = 0; n < paramb.num_types; ++n) {
-    int atomic_number = 0;
     element_list[n] = tokens[2 + n];
-    for (int m = 0; m < NUM_ELEMENTS; ++m) {
-      if (tokens[2 + n] == ELEMENTS[m]) {
-        atomic_number = m + 1;
-        break;
-      }
-    }
-    element_atomic_number_list[n] = atomic_number;
+    const int atomic_number = element_atomic_number_list[n];
     zbl.atomic_numbers[n] = atomic_number;
   }
 
@@ -2696,6 +2674,7 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
     zbl.rc_inner = get_double_from_token(tokens[1], __FILE__, __LINE__);
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
     if (zbl.rc_inner == 0 && zbl.rc_outer == 0) {
+      nep_inference::validate_flexible_zbl(paramb.num_types);
       zbl.flexibled = true;
       // printf("    has the flexible ZBL potential\n");
     } else {
@@ -2954,6 +2933,7 @@ void NEP_CPU::init_from_file(const std::string& potential_filename, const bool i
       std::cout << "    total number of parameters = " << annmb.num_para << ".\n";
     }
   }
+  model_loaded = true;
 }
 
 NEP_CPU::NEP_CPU(const std::string& potential_filename) { init_from_file(potential_filename, true); }
@@ -3059,6 +3039,9 @@ void NEP_CPU::compute(
   const std::string& kspace_method,
   double total_charge)
 {
+  nep_inference::validate_sizes(type.size(), box.size(), position.size());
+  nep_inference::validate_types(type.data(), type.size(), element_atomic_number_list,
+      model_loaded, zbl.enabled && paramb.use_typewise_cutoff_zbl);
   if (paramb.model_type != 0) {
     std::cout << "Cannot compute potential using a non-potential NEP model.\n";
     exit(1);

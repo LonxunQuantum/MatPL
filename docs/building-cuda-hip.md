@@ -71,6 +71,25 @@ src/feature/NEP_GPU/build/cuda/nep_gpu.so
 如果 CUDA toolkit 不在标准位置，可在编译前设置 `CUDAToolkit_ROOT` 或
 `CUDA_HOME`。
 
+可用 `MATPL_CUDA_ARCHITECTURES` 指定目标显卡架构，统一作用于 `src/build.sh`
+构建的 NEP-GPU 接口、CUDA 算子以及算子使用的 PyTorch CMake 配置：
+
+```bash
+export MATPL_CUDA_ARCHITECTURES=70       # V100，只生成架构 70
+sh src/build.sh -j4
+# 多种显卡共用：export MATPL_CUDA_ARCHITECTURES="70;80;86;89;90"
+```
+
+使用数字和分号列表（例如 `70;86`），无需另设 `TORCH_CUDA_ARCH_LIST`。
+MatPL 会将 `70` 转为 PyTorch 的 `7.0` 格式，并覆盖冲突的 PyTorch 架构设置。
+未设置时，使用 `CMAKE_CUDA_ARCHITECTURES` 环境变量，或默认列表
+`60;70;75;80;86;89;90`。目标架构必须在当前 CUDA toolkit 与 PyTorch 支持范围内。
+
+编译只要求对应版本的 PyTorch 和可用的 `nvcc`，不要求节点存在可见 GPU；
+上述目标列表也不依赖 GPU 自动探测。HIP/CPU 后端不使用该 NVIDIA 架构参数。
+直接通过 CMake 构建 `src/op` 时，也可以使用 `MATPL_CUDA_ARCHITECTURES`
+环境变量；未设置它时，接受 `-DCMAKE_CUDA_ARCHITECTURES=70`。
+
 ## 4. 神威超算 DCU/DTK 环境
 
 仓库提供了参数化环境脚本；必须使用 `source`，以便环境保留在当前 shell：
@@ -138,6 +157,16 @@ python -m unittest \
 bash src/test/test_build_backend_cli.sh
 bash src/test/test_dcu_deploy_scripts.sh
 cmake -P src/op/cmake/tests/test_resolve_backend.cmake
+cmake -P src/op/cmake/tests/test_resolve_cuda_architectures.cmake
+```
+
+在加载 CUDA 工具链的计算节点上验证实际编译参数（测试主动屏蔽 GPU，模拟
+登录节点的设备可见性；临时构建目录不会覆盖现有产物）：
+
+```bash
+bash tests/test_cuda_architectures.sh
+# 同时完整编译两个 CUDA 库，并检查产物中的实际目标架构：
+MATPL_TEST_BUILD=1 MATPL_TEST_JOBS=4 bash tests/test_cuda_architectures.sh
 ```
 
 ## 6. 验证边界

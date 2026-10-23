@@ -57,7 +57,7 @@ __global__ void compute_gradsecond_c2_fused(
     int n_max_2b,
     int n_base_2b,
     int atom_types,
-    int multi_feat_num)
+    int multi_feat_num, int noc_components)
 {
     const int64_t task = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const int64_t pair_count = static_cast<int64_t>(atom_nums) * maxneighs;
@@ -72,12 +72,13 @@ __global__ void compute_gradsecond_c2_fused(
     const int atom_type_i = static_cast<int>(atom_map[atom]);
     const int atom_type_j = static_cast<int>(atom_map[neighbor]);
     const int64_t grad_start = pair * 4;
-    const int64_t noc_start = (pair * n_base_2b + basis) * 4;
-    const double contraction =
-        dfeat_2b_noc[noc_start] * grad_second[grad_start] +
-        dfeat_2b_noc[noc_start + 1] * grad_second[grad_start + 1] +
-        dfeat_2b_noc[noc_start + 2] * grad_second[grad_start + 2] +
-        dfeat_2b_noc[noc_start + 3] * grad_second[grad_start + 3];
+    const int64_t noc_start = (pair * n_base_2b + basis) * noc_components;
+    double contraction = dfeat_2b_noc[noc_start] * grad_second[grad_start];
+    if (noc_components == 4) {
+        contraction += dfeat_2b_noc[noc_start + 1] * grad_second[grad_start + 1] +
+                       dfeat_2b_noc[noc_start + 2] * grad_second[grad_start + 2] +
+                       dfeat_2b_noc[noc_start + 3] * grad_second[grad_start + 3];
+    }
 
     const int64_t dfeat_start =
         static_cast<int64_t>(atom) * (n_max_2b + multi_feat_num);
@@ -103,10 +104,12 @@ void launch_calculate_nepfeat_secondgradout(
     const int device
 ) {
     cudaSetDevice(device);
+    if (atom_nums == 0 || maxneighs == 0) return;
+    const auto stream = c10::cuda::getCurrentCUDAStream(device);
     dim3 threadsPerBlock(16);
     dim3 numBlocks((atom_nums + threadsPerBlock.x - 1) / threadsPerBlock.x);
 
-    compute_gradsecond_gradout<<<numBlocks, threadsPerBlock>>>(
+    compute_gradsecond_gradout<<<numBlocks, threadsPerBlock, 0, stream.stream()>>>(
         grad_second, 
         dfeat_b, 
         gradsecond_gradout,
@@ -133,9 +136,10 @@ void launch_calculate_nepfeat_secondgradout_c2(
     const int n_base_2b, 
     const int atom_types,
     const int multi_feat_num, 
-    const int device
+    const int device, const int noc_components
 ) {
     cudaSetDevice(device);
+    if (atom_nums == 0 || maxneighs == 0) return;
     constexpr int threads_per_block = 256;
     const int64_t total_tasks =
         static_cast<int64_t>(atom_nums) * maxneighs * n_base_2b;
@@ -154,7 +158,7 @@ void launch_calculate_nepfeat_secondgradout_c2(
         n_max_2b,
         n_base_2b,
         atom_types,
-        multi_feat_num
+        multi_feat_num, noc_components
         );
     CUDA_CHECK_KERNEL
 }

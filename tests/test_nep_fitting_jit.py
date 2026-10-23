@@ -157,6 +157,39 @@ def test_prepare_model_skips_cpu_without_loading_cuda_ops(monkeypatch):
     assert adapter.prepare_fitting_jit(model) is False
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
+@pytest.mark.parametrize("d,h", [(104, 60), (35, 201)])
+def test_native_fitting_rejects_out_of_range_shapes(d, h):
+    from src.utils.op_loader import load_calc_ops
+
+    x = torch.zeros(1, d, dtype=torch.float64, device="cuda")
+    w = torch.zeros(1, d, h, dtype=torch.float64, device="cuda")
+    b = torch.zeros(1, h, dtype=torch.float64, device="cuda")
+    v = torch.zeros(1, h, 1, dtype=torch.float64, device="cuda")
+    c = torch.zeros(1, 1, dtype=torch.float64, device="cuda")
+    ids = torch.zeros(1, dtype=torch.long, device="cuda")
+    offsets = torch.tensor([0, 1], dtype=torch.long, device="cuda")
+    with pytest.raises(RuntimeError, match="D <= 103.*H <= 200"):
+        load_calc_ops().nep_fitting_forward(x, w, b, v, c, ids, offsets, [1])
+
+
+def test_hip_fitting_accepts_max_shape(monkeypatch):
+    from src.model import nep_fused_fitting as adapter
+
+    monkeypatch.setattr(torch.version, "hip", "test-hip")
+    marker = object()
+    monkeypatch.setattr(adapter._FusedFitting, "apply", lambda *args: marker)
+    groups = adapter.FittingGroups(
+        (0,), (1,), torch.tensor([0]), torch.tensor([0, 1]))
+    d, h = 103, 200
+    x = torch.zeros(1, d, dtype=torch.float64)
+    w = torch.zeros(1, d, h, dtype=torch.float64)
+    b = torch.zeros(1, h, dtype=torch.float64)
+    v = torch.zeros(1, h, 1, dtype=torch.float64)
+    c = torch.zeros(1, 1, dtype=torch.float64)
+    assert adapter.fused_fitting(x, w, b, v, c, groups) is marker
+
+
 def test_aot_fitting_implementation_is_removed():
     assert not (REPO / "src/op/kernel/nep_fitting.cu").exists()
     wrapper = (REPO / "src/op/src/nep_fitting_launcher.cpp").read_text()
@@ -195,7 +228,13 @@ def test_jit_forward_and_feature_gradient_match_reference(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize(
     "d,h,q,seed_mode",
-    [(35, 61, 1, "both"), (31, 33, 2, "y"), (96, 100, 2, "g")],
+    [
+        (35, 61, 1, "both"),
+        (31, 33, 2, "y"),
+        (96, 100, 2, "g"),
+        (103, 200, 1, "both"),
+        (103, 200, 2, "both"),
+    ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a Slurm GPU allocation")
 def test_jit_backward_matches_reference(tmp_path, monkeypatch, d, h, q, seed_mode):

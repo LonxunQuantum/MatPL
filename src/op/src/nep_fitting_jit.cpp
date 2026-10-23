@@ -1,6 +1,7 @@
 #ifdef MATPL_ENABLE_FUSED_FITTING
 
 #include "../include/nep_fitting_jit.h"
+#include "../include/nep_fitting_limits.h"
 #include "../kernel/nep_fitting_jit_source.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -283,8 +284,10 @@ bool prepare_nep_fitting_jit(
     TORCH_CHECK(reference.is_cuda(), "NEP fitting JIT requires a CUDA reference tensor");
     TORCH_CHECK(reference.scalar_type() == at::kDouble,
                 "NEP fitting JIT requires an FP64 reference tensor");
-    TORCH_CHECK(d >= 1 && d <= 96, "NEP fitting JIT requires 1 <= D <= 96");
-    TORCH_CHECK(h >= 1 && h <= 100, "NEP fitting JIT requires 1 <= H <= 100");
+    TORCH_CHECK(d >= 1 && d <= nep_fitting_limits::kMaxFeatures,
+                "NEP fitting JIT requires 1 <= D <= ", nep_fitting_limits::kMaxFeatures);
+    TORCH_CHECK(h >= 1 && h <= nep_fitting_limits::kMaxHiddenNeurons,
+                "NEP fitting JIT requires 1 <= H <= ", nep_fitting_limits::kMaxHiddenNeurons);
     TORCH_CHECK(q == 1 || q == 2, "NEP fitting JIT requires Q=1 or Q=2");
     build_module(reference, d, h, q);
     return true;
@@ -311,7 +314,8 @@ void launch_nep_fitting_jit_forward(
     const auto stream = at::cuda::getCurrentCUDAStream();
     check_driver(cuLaunchKernel(module->forward,
         static_cast<unsigned int>((max_count + 7) / 8),
-        static_cast<unsigned int>(w.size(0)), 1, 128, 1, 1, 0,
+        static_cast<unsigned int>(w.size(0)), 1,
+        static_cast<unsigned int>((x.size(1) > 96 ? 8 : 16) * 8), 1, 1, 0,
         reinterpret_cast<CUstream>(stream.stream()), args, nullptr),
         "cuLaunchKernel(fitting_atoms_forward)");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -329,8 +333,9 @@ void launch_nep_fitting_jit_backward(
     int q = static_cast<int>(v.size(2));
     int n = static_cast<int>(x.size(0));
     int types = static_cast<int>(w.size(0));
-    int tiles = (h + 15) / 16;
-    int stride = (d + 1 + q) * 16 + q;
+    const int tile = d > 96 ? 8 : 16;
+    int tiles = (h + tile - 1) / tile;
+    int stride = (d + 1 + q) * tile + q;
     int groups = std::min<int64_t>(
         types, kWorkspaceBytes / (tiles * stride * sizeof(double)));
     int slots = std::min<int64_t>(
@@ -355,7 +360,8 @@ void launch_nep_fitting_jit_backward(
     const auto cu_stream = reinterpret_cast<CUstream>(stream.stream());
     check_driver(cuLaunchKernel(module->backward,
         static_cast<unsigned int>((max_count + 7) / 8),
-        static_cast<unsigned int>(types), 1, 128, 1, 1, 0, cu_stream,
+        static_cast<unsigned int>(types), 1,
+        static_cast<unsigned int>(tile * 8), 1, 1, 0, cu_stream,
         backward_args, nullptr), "cuLaunchKernel(fitting_atoms_backward)");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
@@ -371,7 +377,8 @@ void launch_nep_fitting_jit_backward(
             &offsets_ptr, &a_ptr, &u_ptr, &partial_ptr, &n, &start, &slots};
         check_driver(cuLaunchKernel(module->parameter_partials,
             static_cast<unsigned int>(slots), static_cast<unsigned int>(tiles),
-            static_cast<unsigned int>(batch), 128, 1, 1, 0, cu_stream,
+            static_cast<unsigned int>(batch),
+            static_cast<unsigned int>(tile * 8), 1, 1, 0, cu_stream,
             partial_args, nullptr),
             "cuLaunchKernel(fitting_parameter_partials)");
         C10_CUDA_KERNEL_LAUNCH_CHECK();

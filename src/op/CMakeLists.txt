@@ -12,7 +12,7 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
 execute_process(
     COMMAND "${Python3_EXECUTABLE}" -c
-        "import torch; print('|'.join([str(int(torch._C._GLIBCXX_USE_CXX11_ABI)), torch.utils.cmake_prefix_path, torch.version.cuda or 'NONE', getattr(torch.version, 'hip', None) or 'NONE', torch.__path__[0]]))"
+        "import sys, torch; print('|'.join([str(int(torch._C._GLIBCXX_USE_CXX11_ABI)), torch.utils.cmake_prefix_path, torch.version.cuda or 'NONE', getattr(torch.version, 'hip', None) or 'NONE', torch.__path__[0], sys.prefix]))"
     OUTPUT_VARIABLE MATPL_TORCH_INFO
     OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE MATPL_TORCH_INFO_RESULT
@@ -27,7 +27,7 @@ endif()
 
 string(REPLACE "|" ";" MATPL_TORCH_INFO_LIST "${MATPL_TORCH_INFO}")
 list(LENGTH MATPL_TORCH_INFO_LIST MATPL_TORCH_INFO_LENGTH)
-if(NOT MATPL_TORCH_INFO_LENGTH EQUAL 5)
+if(NOT MATPL_TORCH_INFO_LENGTH EQUAL 6)
     message(FATAL_ERROR "Unexpected PyTorch probe output: ${MATPL_TORCH_INFO}")
 endif()
 list(GET MATPL_TORCH_INFO_LIST 0 MATPL_TORCH_ABI)
@@ -35,6 +35,7 @@ list(GET MATPL_TORCH_INFO_LIST 1 MATPL_TORCH_CMAKE_PREFIX_PATH)
 list(GET MATPL_TORCH_INFO_LIST 2 MATPL_TORCH_CUDA_VERSION)
 list(GET MATPL_TORCH_INFO_LIST 3 MATPL_TORCH_HIP_VERSION)
 list(GET MATPL_TORCH_INFO_LIST 4 MATPL_TORCH_PATH)
+list(GET MATPL_TORCH_INFO_LIST 5 MATPL_PYTHON_PREFIX)
 if(MATPL_TORCH_CUDA_VERSION STREQUAL "NONE")
     set(MATPL_TORCH_CUDA_VERSION "")
 endif()
@@ -52,11 +53,41 @@ endif()
 
 list(APPEND CMAKE_PREFIX_PATH "${MATPL_TORCH_CMAKE_PREFIX_PATH}")
 set(CMAKE_DISABLE_FIND_PACKAGE_MKL TRUE)
-find_package(Torch REQUIRED)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveBackend.cmake")
+matpl_resolve_backend(
+    "${MATPL_GPU_BACKEND}"
+    "${MATPL_TORCH_CUDA_VERSION}"
+    "${MATPL_TORCH_HIP_VERSION}"
+    MATPL_RESOLVED_BACKEND
+)
+# CPU builds need headers and CPU libraries, not CUDA/HIP toolkit discovery.
+if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveCudaArchitectures.cmake")
+    matpl_resolve_cuda_architectures(
+        MATPL_RESOLVED_CUDA_ARCHITECTURES TORCH_CUDA_ARCH_LIST
+    )
+    set(CMAKE_CUDA_ARCHITECTURES "${MATPL_RESOLVED_CUDA_ARCHITECTURES}")
+endif()
+if(NOT MATPL_RESOLVED_BACKEND STREQUAL "CPU")
+    find_package(Torch REQUIRED)
+endif()
+if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")
+    # Torch 2.2 sets CMAKE_CUDA_ARCHITECTURES=OFF. Restore our targets after
+    # discovery, and keep the cache consistent with the actual target flags.
+    set(CMAKE_CUDA_ARCHITECTURES "${MATPL_RESOLVED_CUDA_ARCHITECTURES}")
+    set(CMAKE_CUDA_ARCHITECTURES "${MATPL_RESOLVED_CUDA_ARCHITECTURES}"
+        CACHE STRING "MatPL CUDA target architectures" FORCE)
+endif()
 
 include_directories("${Python3_INCLUDE_DIRS}")
 include_directories("${MATPL_TORCH_PATH}/include")
 include_directories("${MATPL_TORCH_PATH}/include/torch/csrc/api/include")
+if(MATPL_RESOLVED_BACKEND STREQUAL "CPU")
+    # A packaged PyTorch may keep public dependencies such as gflags next to
+    # Python rather than under torch/include. TorchConfig adds this directory
+    # for accelerator builds; add it explicitly for the standalone CPU path.
+    include_directories("${MATPL_PYTHON_PREFIX}/include")
+endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
@@ -65,14 +96,6 @@ file(MAKE_DIRECTORY
     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
     "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
     "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}"
-)
-
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveBackend.cmake")
-matpl_resolve_backend(
-    "${MATPL_GPU_BACKEND}"
-    "${MATPL_TORCH_CUDA_VERSION}"
-    "${MATPL_TORCH_HIP_VERSION}"
-    MATPL_RESOLVED_BACKEND
 )
 
 if(MATPL_RESOLVED_BACKEND STREQUAL "CUDA")

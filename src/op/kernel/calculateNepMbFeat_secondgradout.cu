@@ -2,6 +2,7 @@
 #include "./utilities/nep_feature.cuh"
 #include "./utilities/nep_mbgrad.cuh"
 #include "./utilities/nep_mbgrad_opt.cuh"
+#include "../include/nep_mb_secondgrad_jit.h"
 #include "./utilities/error.cuh"
 #include "./utilities/gpu_vector.cuh"
 #include <iostream>
@@ -392,19 +393,47 @@ static void launch_calculate_nepmbfeat_secondgradout_c3_legacy(
 static bool nep_mb_secondgrad_optimized_supported(
     int nmax, int nbasis, int lmax3, int lmax4, int lmax5,
     size_t shared_bytes, const cudaDeviceProp& prop) {
-    return prop.major >= 6 &&
-           nmax == 5 && nbasis == 9 && lmax3 == 4 &&
-           lmax4 > 0 && lmax5 > 0 &&
+    return prop.major >= 6 && nmax >= 5 && nmax <= 20 &&
+           nbasis >= 5 && nbasis <= 20 && lmax3 == 4 &&
+           ((lmax4 == 2 && (lmax5 == 0 || lmax5 == 1)) ||
+            (lmax4 == 0 && lmax5 == 0)) &&
            shared_bytes <= prop.sharedMemPerBlock;
 }
+
+static constexpr size_t nep_mb_secondgrad_runtime_shared_bytes(int nmax, int nbasis) {
+    const auto align = [](size_t value) { return (value + 7) & ~size_t(7); };
+    size_t offset = align(4 * sizeof(unsigned int));
+    offset = align(offset + NEP_MAX_ELEMENT_TYPES * sizeof(int));
+    offset = align(offset + sizeof(int));
+    offset = align(offset + static_cast<size_t>(nmax) * 6 * sizeof(double));
+    offset = align(offset + static_cast<size_t>(nmax) * 24 * sizeof(double));
+    offset = align(offset + static_cast<size_t>(4) * nbasis * 24 * sizeof(double));
+    return align(offset + static_cast<size_t>(4) * nmax * nbasis * sizeof(double));
+}
+
+static_assert(nep_mb_secondgrad_runtime_shared_bytes(5, 9) ==
+              nep_mb_secondgrad_shared_bytes<5, 9, 4>(),
+              "runtime and template shared layouts differ");
+static_assert(nep_mb_secondgrad_runtime_shared_bytes(20, 20) ==
+              nep_mb_secondgrad_shared_bytes<20, 20, 4>(),
+              "runtime and template shared layouts differ");
 
 bool launch_nep_mb_secondgrad_omat24(const NepMbSecondGradArgs& args, int device) {
     cudaSetDevice(device);
     if (args.atom_count == 0) return true;
     constexpr size_t bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
     const auto stream = c10::cuda::getCurrentCUDAStream(device);
-    nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, 64>
-        <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
+    constexpr size_t portable_shared_limit = 48 * 1024;
+    const size_t reduced_bytes = bytes
+        + static_cast<size_t>(args.max_neighbors) * (24 + 9) * sizeof(double)
+        + 4 * (1 + static_cast<size_t>(args.max_neighbors)) * sizeof(int);
+    if (reduced_bytes <= portable_shared_limit) {
+        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, true, 64>
+            <<<args.atom_count, 64, reduced_bytes, stream.stream()>>>(args);
+    } else {
+        nep_mb_secondgrad_fused<5, 9, 4, true, true, 4, false, 64>
+            <<<args.atom_count, 64, bytes, stream.stream()>>>(args);
+    }
     CUDA_CHECK_KERNEL
     return true;
 }
@@ -438,7 +467,8 @@ bool should_recompute_nep_mb_dsnlm(
     if (mode == NepMbSecondGradMode::Legacy) return false;
     cudaDeviceProp prop{};
     C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-    constexpr size_t shared_bytes = nep_mb_secondgrad_shared_bytes<5, 9, 4>();
+    const size_t shared_bytes = nep_mb_secondgrad_runtime_shared_bytes(
+        n_max_3b, n_base_3b);
     const bool supported = nep_mb_secondgrad_optimized_supported(
         n_max_3b, n_base_3b, lmax_3, lmax_4, lmax_5, shared_bytes, prop)
         && atom_types >= 1 && atom_types <= NEP_MAX_ELEMENT_TYPES;
@@ -488,7 +518,14 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
                 grad_second, d12, NL, de_dfeat, sum_fxyz, atom_map,
                 coeff3, gradsecond_c3, rcut_angular, 1.0 / rcut_angular,
                 atom_nums, maxneighs, atom_types, feat_2b_num, multi_feat_num};
-            launch_nep_mb_secondgrad_omat24(args, device);
+            if (n_max_3b == 5 && n_base_3b == 9 &&
+                lmax_4 == 2 && lmax_5 == 1) {
+                launch_nep_mb_secondgrad_omat24(args, device);
+            } else {
+                launch_nep_mb_secondgrad_jit(args, n_max_3b, n_base_3b,
+                    lmax_4 == 2, lmax_5 == 1, device,
+                    nep_mb_secondgrad_runtime_shared_bytes(n_max_3b, n_base_3b));
+            }
             return;
     }
     if (dsnlm_dc == nullptr) {

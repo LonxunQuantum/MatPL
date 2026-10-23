@@ -1,5 +1,6 @@
 import os
 import json
+import math
 from src.utils.json_operation import get_parameter, get_required_parameter
 from src.utils.nep_to_gpumd import get_atomic_name_from_str, validate_nep_atom_types
 from src.user.model_param import ModelParam
@@ -188,7 +189,8 @@ class InputParam(object):
         self.workers = get_parameter("workers", json_input, 1)
         # dist training by horovod, when multi GPU train, need True,
         self.hvd = get_parameter("hvd", json_input, False) # 本身不支持hvd，所以不需要设置
-        self.dist_backend = get_parameter("dist_backend", json_input, "nccl")
+        self.device = get_parameter("device", json_input, "auto")
+        self.dist_backend = get_parameter("dist_backend", json_input, "auto" if self.model_type == "NEP" else "nccl")
         # self.dist_socket_ifname = get_parameter("dist_backend_ifname", json_input, "eth0")
         self.distributed = get_parameter("distributed", json_input, False)
         self.master_addr = get_parameter("master_addr", json_input, None)
@@ -215,6 +217,13 @@ class InputParam(object):
         self.seed = get_parameter("seed", json_input, 2023)
         self.precision = get_parameter("precision", json_input, "float64")
         self.lmdb_stat_frames = get_parameter("lmdb_stat_frames", json_input, 32768)
+        self.nonperiodic_vacuum_padding = get_parameter(
+            "nonperiodic_vacuum_padding", json_input, None)
+        if self.nonperiodic_vacuum_padding is not None:
+            value = self.nonperiodic_vacuum_padding
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                    not math.isfinite(value) or value <= 0):
+                raise ValueError("nonperiodic_vacuum_padding must be a positive finite number")
         is_lmdb = str(get_parameter(
             "format", json_input, "pwmat/movement"
         )).lower() == "lmdb"
@@ -299,10 +308,17 @@ class InputParam(object):
         params_dict = {}
         params_dict["model_type"] = self.model_type
         params_dict["atom_type"] = self.atom_type
+        if self.model_type == "NEP":
+            if self.device != "auto":
+                params_dict["device"] = self.device
+            if self.dist_backend != "auto":
+                params_dict["dist_backend"] = self.dist_backend
         if self.model_type !="NEP":
             params_dict["max_neigh_num"] = self.max_neigh_num
         if self.seed is not None:
             params_dict["seed"] = self.seed
+        if self.nonperiodic_vacuum_padding is not None:
+            params_dict["nonperiodic_vacuum_padding"] = self.nonperiodic_vacuum_padding
         if self.model_num > 1 :
             params_dict["model_num"] = self.model_num
         # params_dict["E_tolerance"] = self.descriptor.E_tolerance

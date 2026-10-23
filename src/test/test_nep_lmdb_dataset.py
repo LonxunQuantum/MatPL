@@ -11,11 +11,15 @@ import numpy as np
 import torch
 
 import src.pre_data.nep_lmdb_dataset as lmdb_dataset_module
-from src.pre_data.nep_lmdb_dataset import AseLmdbShard, NepLmdbDataset
+from src.pre_data.nep_lmdb_dataset import AseLmdbShard, LmdbNatomsCache, NepLmdbDataset
 
 
 def _compressed_json(value):
     return zlib.compress(json.dumps(value).encode("utf-8"))
+
+
+def _ase_array(values, shape, dtype="float64"):
+    return {"__ndarray__": [list(shape), dtype, np.asarray(values).reshape(-1).tolist()]}
 
 
 def _frame(numbers, *, energy=-1.0, stress=None, atomic_energy=None):
@@ -323,6 +327,40 @@ class NepLmdbDatasetTest(unittest.TestCase):
                 self._dataset([unknown])[0]
             with self.assertRaisesRegex(ValueError, r"nonperiodic\.aselmdb: frame key 1.*periodic"):
                 self._dataset([nonperiodic])[0]
+
+    def test_omol_ase_arrays_use_vacuum_cell_and_nested_total_charge(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "omol.aselmdb"
+            frame = {
+                "numbers": _ase_array([1, 8], (2,), "int64"),
+                "positions": _ase_array([[-1.0, 0.0, 0.0], [3.0, 0.0, 0.0]], (2, 3)),
+                "forces": _ase_array([[0.1, 0.2, 0.3], [-0.1, -0.2, -0.3]], (2, 3)),
+                "cell": _ase_array(np.zeros((3, 3)), (3, 3)),
+                "pbc": _ase_array([False, False, False], (3,), "bool"),
+                "energy": -2.0,
+                "data": {"charge": 1, "spin": 2},
+            }
+            _write_aselmdb(path, {1: frame})
+            dataset = self._dataset([path], nonperiodic_vacuum_padding=8.0)
+
+            sample = dataset[0]
+
+            positions = sample["position"].numpy()
+            lattice = sample["box_original"].reshape(3, 3).numpy()
+            self.assertEqual(sample["charge"].tolist(), [1.0])
+            self.assertEqual(sample["num_cell"].tolist(), [1, 1, 1])
+            np.testing.assert_allclose(lattice, np.diag([20.0, 16.0, 16.0]))
+            np.testing.assert_allclose(positions, [[8.0, 8.0, 8.0], [12.0, 8.0, 8.0]])
+            np.testing.assert_allclose(positions[1] - positions[0], [4.0, 0.0, 0.0])
+            self.assertGreater(np.linalg.norm(positions[0] - positions[1] - lattice[0]), 6.0)
+            self.assertTrue((sample["virial"] == -1e6).all())
+
+            cache = LmdbNatomsCache(dataset, Path(tmpdir) / "cache")
+            cache.build_assigned(rank=0, world_size=1)
+            cache.load()
+            self.assertEqual(cache[0], 2)
+            cache.close()
+            dataset.close()
 
     def test_corrupt_payload_and_invalid_shapes_are_rejected_with_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:

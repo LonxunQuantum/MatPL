@@ -29,7 +29,6 @@ http://doc.lonxun.com/MatPL/models/nep/
 #include <tuple>
 #include <utility> // for std::move
 
-#define PARAM_SIZE 100
 
 struct LMP_Data  {
   GPU_Vector<float> r12;
@@ -118,17 +117,14 @@ public:
     int num_para_ann = 0;
     int num_c2 = 0;
     int num_c3 = 0;
-    const float* w0[PARAM_SIZE]; // weight from the input layer to the hidden layer
-    const float* b0[PARAM_SIZE]; // bias for the hidden layer
-    const float* w1[PARAM_SIZE]; // weight from the hidden layer to the output layer
+    const float* w0[nep_inference::kElementCount]; // weight from the input layer to the hidden layer
+    const float* b0[nep_inference::kElementCount]; // bias for the hidden layer
+    const float* w1[nep_inference::kElementCount]; // weight from the hidden layer to the output layer
     const float* sqrt_epsilon_inf;
     const float* b1;             // bias for the output layer
     const float* c;
-    // for the scalar part of polarizability
-    const float* w0_pol[10];
-    const float* b0_pol[10];
-    const float* w1_pol[10];
-    const float* b1_pol;
+    // Keep this by-value kernel argument within CUDA's legacy 4 KiB limit.
+    // GPU inference has no polarizability head; do not reserve pointers for it.
   };
 
   struct Charge_Para {
@@ -157,6 +153,7 @@ public:
 
   ~NEP(void);
 
+  bool model_loaded = false;
   ParaMB paramb;
   ANN annmb;
   ZBL zbl;

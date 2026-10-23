@@ -78,6 +78,20 @@ def _decode_compressed_json(value: bytes, context: str):
         raise ValueError("{}: invalid zlib-compressed JSON".format(context)) from exc
 
 
+def _ase_array(value, dtype=None):
+    """Decode ASE's JSON ndarray wrapper for fields used by NEP."""
+    if isinstance(value, dict) and "__ndarray__" in value:
+        encoded = value["__ndarray__"]
+        if not isinstance(encoded, list) or len(encoded) != 3:
+            raise ValueError("invalid ASE ndarray encoding")
+        shape, _, values = encoded
+        try:
+            return np.asarray(values, dtype=dtype).reshape(shape)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid ASE ndarray shape or values") from exc
+    return np.asarray(value, dtype=dtype)
+
+
 class AseLmdbShard:
     """Immutable ASE-LMDB metadata with logical-to-physical row mapping."""
 
@@ -496,13 +510,21 @@ class LmdbNatomsCache:
                         if value is None:
                             raise ValueError("{}: row is missing".format(context))
                         frame = _decode_compressed_json(value, context)
-                        if not isinstance(frame, dict) or not isinstance(
-                            frame.get("numbers"), list
-                        ):
-                            raise ValueError(
-                                "{}: numbers must be a JSON array".format(context)
-                            )
-                        natoms = len(frame["numbers"])
+                        if not isinstance(frame, dict):
+                            raise ValueError("{}: frame must be a JSON object".format(context))
+                        encoded_numbers = frame.get("numbers")
+                        if isinstance(encoded_numbers, list):
+                            natoms = len(encoded_numbers)
+                        elif isinstance(encoded_numbers, dict) and "__ndarray__" in encoded_numbers:
+                            try:
+                                shape, _, values = encoded_numbers["__ndarray__"]
+                                if len(shape) != 1 or len(values) != shape[0]:
+                                    raise ValueError("invalid dimensions")
+                                natoms = shape[0]
+                            except (TypeError, ValueError, IndexError) as exc:
+                                raise ValueError("{}: invalid ASE numbers array".format(context)) from exc
+                        else:
+                            raise ValueError("{}: numbers must be a JSON array".format(context))
                         if natoms < 1 or natoms > np.iinfo(np.int32).max:
                             raise ValueError(
                                 "{}: invalid atom count {}".format(context, natoms)
@@ -860,6 +882,7 @@ class NepLmdbDataset(Dataset):
         fill_metal_bec=False,
         train_ei=False,
         max_open_shards=8,
+        nonperiodic_vacuum_padding=None,
     ):
         super().__init__()
         if not use_cartesian:
@@ -914,6 +937,13 @@ class NepLmdbDataset(Dataset):
         self.fill_metal_bec = fill_metal_bec
         self.train_ei = train_ei
         self.max_open_shards = max_open_shards
+        if nonperiodic_vacuum_padding is not None:
+            if (isinstance(nonperiodic_vacuum_padding, bool) or
+                    not isinstance(nonperiodic_vacuum_padding, (int, float)) or
+                    not math.isfinite(nonperiodic_vacuum_padding) or
+                    nonperiodic_vacuum_padding <= max(cutoff_radial, cutoff_angular)):
+                raise ValueError("nonperiodic_vacuum_padding must exceed both NEP cutoffs")
+        self.nonperiodic_vacuum_padding = nonperiodic_vacuum_padding
         self._env_cache = OrderedDict()
         self._env_pid = os.getpid()
 
@@ -1002,7 +1032,7 @@ class NepLmdbDataset(Dataset):
     def _finite_array(frame, key, shape=None, dtype=float):
         if key not in frame:
             raise ValueError("missing required field '{}'".format(key))
-        value = np.asarray(frame[key], dtype=dtype)
+        value = _ase_array(frame[key], dtype=dtype)
         if shape is not None and value.shape != shape:
             raise ValueError(
                 "{} has shape {}, expected {}".format(key, value.shape, shape)
@@ -1030,8 +1060,18 @@ class NepLmdbDataset(Dataset):
         positions = self._finite_array(frame, "positions", (natoms, 3))
         forces = self._finite_array(frame, "forces", (natoms, 3))
         cell = self._finite_array(frame, "cell", (3, 3))
-        pbc = np.asarray(frame.get("pbc"))
-        if pbc.shape != (3,) or not np.asarray(pbc, dtype=bool).all():
+        pbc = _ase_array(frame.get("pbc"), dtype=bool)
+        if pbc.shape != (3,):
+            raise ValueError("pbc must have three directions")
+        synthetic_cell = False
+        if not pbc.any() and self.nonperiodic_vacuum_padding is not None:
+            padding = self.nonperiodic_vacuum_padding
+            minimum = positions.min(axis=0)
+            maximum = positions.max(axis=0)
+            cell = np.diag(maximum - minimum + 2.0 * padding)
+            positions = positions - minimum + padding
+            synthetic_cell = True
+        elif not pbc.all():
             raise ValueError("pbc must mark all three cell directions periodic")
 
         energy_array = self._finite_array(frame, "energy")
@@ -1043,10 +1083,10 @@ class NepLmdbDataset(Dataset):
         if not np.isfinite(volume) or volume <= 0:
             raise ValueError("cell must have a finite, non-zero volume")
         stress = frame.get("stress")
-        if stress is None:
+        if stress is None or synthetic_cell:
             virial = np.full(9, -1e6, dtype=float)
         else:
-            stress = np.asarray(stress, dtype=float)
+            stress = _ase_array(stress, dtype=float)
             if stress.shape != (6,):
                 raise ValueError("stress has shape {}, expected (6,)".format(stress.shape))
             if not np.isfinite(stress).all():
@@ -1063,7 +1103,7 @@ class NepLmdbDataset(Dataset):
         atomic_energy = None
         for key in ("atomic_energy", "atomic_energies", "energies"):
             if key in frame:
-                atomic_energy = np.asarray(frame[key], dtype=float)
+                atomic_energy = _ase_array(frame[key], dtype=float)
                 break
         if atomic_energy is None:
             if self.train_ei:
@@ -1087,7 +1127,9 @@ class NepLmdbDataset(Dataset):
 
         fragment = np.full(natoms, -1, dtype=np.int64)
         fragment_charge = np.full(natoms, np.nan, dtype=float)
-        total_charge = float(frame.get("charge", frame.get("total_charge", 0.0)))
+        metadata = frame.get("data")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        total_charge = float(frame.get("charge", frame.get("total_charge", metadata.get("charge", 0.0))))
         if not np.isfinite(total_charge):
             raise ValueError("charge must be finite")
 

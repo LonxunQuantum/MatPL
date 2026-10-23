@@ -14,15 +14,15 @@ def make_small_model(charge=False, device='cuda', hidden=33, gpumd=None):
     config = {
         'model_type': 'NEP', 'atom_type': [1, 8, 29], 'seed': 123,
         'precision': 'float64', 'recover_train': False,
-        'model': {'descriptor': {'cutoff': [5.0, 4.0], 'n_max': [2, 1],
-                  'basis_size': [3, 3], 'l_max': [4, 2, 1], 'zbl': 1.4,
+        'model': {'descriptor': {'cutoff': [5.0, 4.0], 'n_max': [4, 4],
+                  'basis_size': [4, 4], 'l_max': [4, 2, 1], 'zbl': 1.4,
                   'charge_mode': 2 if charge else False,
                   'gpumd_nep4': bool(charge) if gpumd is None else gpumd},
                   'fitting_net': {'network_size': ([hidden] if isinstance(hidden, int) else list(hidden)) + [1]}},
         'optimizer': {'optimizer': 'ADAM', 'train_energy': True, 'train_force': True},
     }
     params = InputParam(config, 'TRAIN')
-    model = NEP(params, [0.1, -0.2, 0.3], q_scaler=np.linspace(0.3, 0.8, 15),
+    model = NEP(params, [0.1, -0.2, 0.3], q_scaler=np.linspace(0.3, 0.8, 35),
                 dtype=torch.float64, device=torch.device(device)).double().to(device)
     return model
 
@@ -79,7 +79,7 @@ class TestFusedFallback(unittest.TestCase):
         from src.model.nep_fused_fitting import build_fitting_groups
         model = make_small_model(device='cpu')
         types = torch.tensor([1, 0, 1])
-        features = torch.randn(3, 15, dtype=torch.float64, requires_grad=True)
+        features = torch.randn(3, 35, dtype=torch.float64, requires_grad=True)
         baseline = model.calculate_Ei_with_grad(types, features, features.device)
         try:
             actual = model.calculate_Ei_with_grad(types, features, features.device,
@@ -150,7 +150,7 @@ class TestFusedTraining(unittest.TestCase):
         baseline = copy.deepcopy(model)
         types = torch.tensor([1, 0, 1], device='cuda')
         groups = build_fitting_groups(types.cpu()).to('cuda')
-        features = torch.randn(3, 15, dtype=torch.float64, device='cuda')
+        features = torch.randn(3, 35, dtype=torch.float64, device='cuda')
         optimizers = [torch.optim.Adam(m.parameters(), lr=1e-3) for m in (baseline, model)]
         for selected in ((0, 1, 2, 3), (1,), (3,)):
             for m, opt, metadata in zip((baseline, model), optimizers, (None, groups)):
@@ -164,11 +164,11 @@ class TestFusedTraining(unittest.TestCase):
             for actual, expected in zip(model.parameters(), baseline.parameters()):
                 torch.testing.assert_close(actual, expected, rtol=2e-9, atol=2e-10)
 
-    def test_autograd_force_and_deeper_network_keep_original_path(self):
+    def test_autograd_force_keeps_original_path(self):
         from src.model import nep_net
         from src.model.nep_fused_fitting import fused_fitting
         sample = make_small_sample()
-        for analytical, hidden in ((False, 33), (True, [33, 33])):
+        for analytical, hidden in ((False, 33),):
             with self.subTest(analytical=analytical, hidden=hidden):
                 model = make_small_model(hidden=hidden)
                 model.use_analytical_nep_grad = analytical

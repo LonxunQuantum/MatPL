@@ -152,6 +152,7 @@ class NepLmdbLoadDataIntegrationTest(unittest.TestCase):
                 "virial",
                 "bec",
                 "num_atom_sum",
+                "fitting_groups",
             }
             self.assertEqual(set(batch), expected_keys)
             self.assertEqual(batch["num_atom"].flatten().tolist(), [2, 1])

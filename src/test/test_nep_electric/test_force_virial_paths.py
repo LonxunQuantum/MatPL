@@ -1,7 +1,7 @@
 import torch
 
 from src.model.nep_fitting import FittingNet
-from src.model.nep_net import CalcOps
+from src.utils.op_loader import load_calc_ops
 from src.model.nep_net import NEP
 
 
@@ -78,6 +78,7 @@ def test_radial_analytical_force_matches_autograd_on_gpu_backend():
         return
     torch.manual_seed(20260728)
     device = torch.device("cuda")
+    CalcOps = load_calc_ops(device=device)
     dtype = torch.float64
     model = _make_nep(train_2b=True, l_max_3b=0)
     model.dtype = dtype
@@ -188,6 +189,7 @@ def test_nep_force_gpu_backward_accumulates_neighbor_gradient():
         return
 
     device = torch.device("cuda")
+    CalcOps = load_calc_ops(device=device)
     dtype = torch.float64
     list_neigh = torch.tensor([[1], [0]], dtype=torch.int64, device=device)
     dE = torch.zeros(2, 1, 4, dtype=dtype, device=device, requires_grad=True)
@@ -218,6 +220,7 @@ def test_nep_virial_gpu_backward_uses_each_batch_gradient():
         return
 
     device = torch.device("cuda")
+    CalcOps = load_calc_ops(device=device)
     dtype = torch.float64
     list_neigh = torch.tensor([[0], [1]], dtype=torch.int64, device=device)
     num_atom = torch.tensor([1, 1], dtype=torch.int64, device=device)

@@ -36,6 +36,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 ------------------------------------------------------------------------------*/
 
 #pragma once
+#include "../../nep_elements.h"
 #include <string>
 #include <vector>
 
@@ -63,7 +64,7 @@ public:
     int num_c_radial = 0;
     int num_types = 0;
     double q_scaler[140];
-    int atomic_numbers[94];
+    int atomic_numbers[nep_inference::kElementCount];
   };
 
   struct ANN {
@@ -73,16 +74,16 @@ public:
     int num_para_ann = 0;
     int num_c2 = 0;
     int num_c3 = 0;
-    const double* w0[103];
-    const double* b0[103];
-    const double* w1[103];
+    const double* w0[nep_inference::kElementCount];
+    const double* b0[nep_inference::kElementCount];
+    const double* w1[nep_inference::kElementCount];
     const double* sqrt_epsilon_inf;
     const double* b1;
     const double* c;
     // for the scalar part of polarizability
-    const double* w0_pol[103];
-    const double* b0_pol[103];
-    const double* w1_pol[103];
+    const double* w0_pol[nep_inference::kElementCount];
+    const double* b0_pol[nep_inference::kElementCount];
+    const double* w1_pol[nep_inference::kElementCount];
     const double* b1_pol;
   };
 
@@ -98,7 +99,7 @@ public:
     int num_types;
     double rc_inner = 1.0;
     double rc_outer = 2.0;
-    double atomic_numbers[103];
+    double atomic_numbers[nep_inference::kElementCount];
     double para[550];
   };
 
@@ -136,6 +137,7 @@ public:
     const std::string& kspace_method = "ewald",
     double total_charge = 0.0);
 
+  bool model_loaded = false;
   ParaMB paramb;
   ANN annmb;
   ZBL zbl;

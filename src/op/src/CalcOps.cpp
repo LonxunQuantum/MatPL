@@ -1,5 +1,6 @@
 #include <torch/torch.h>
 #include <iostream>
+#include <cstdlib>
 #include "../include/CalcOps.h"
 #include "../include/op_declare.h"
 
@@ -409,7 +410,12 @@ torch::autograd::variable_list CalculateNepFeat::forward(
         // options() 集成dtype和device
         auto dfeat_c2 = torch::zeros({atom_nums, atom_types, n_base_2b}, d12_radial.options());
         auto dfeat_2b = torch::zeros({atom_nums, maxneighs, n_max_2b}, d12_radial.options()); // [i, j, n] dfeature/drij
-        auto dfeat_2b_noc = torch::zeros({atom_nums, maxneighs, n_base_2b, 4}, d12_radial.options()); // [i, j, n] dfeature/drij without c
+#ifdef MATPL_CUDA_DESCRIPTOR_OPT
+        constexpr int noc_components = 1;
+#else
+        constexpr int noc_components = 4;
+#endif
+        auto dfeat_2b_noc = torch::zeros({atom_nums, maxneighs, n_base_2b, noc_components}, d12_radial.options()); // [i, j, n] dfeature/drij without c
         
         torch_launch_calculate_nepfeat(coeff2, d12_radial, NL_radial, atom_map, 
                                 rcut_radial, feats, dfeat_c2, dfeat_2b, dfeat_2b_noc,
@@ -419,6 +425,11 @@ torch::autograd::variable_list CalculateNepFeat::forward(
         ctx->saved_data["multi_feat_num"] = multi_feat_num;
         ctx->saved_data["fix_cij"] = fix_cij;
 
+        // These are saved kernel contexts, not differentiable outputs.
+        // InputGrad supplies their complete coefficient dependence.
+        // Leaving an autograd edge here can schedule a spurious
+        // descriptor backward with a compact materialized zero seed.
+        ctx->mark_non_differentiable({dfeat_c2, dfeat_2b, dfeat_2b_noc});
         return {feats, dfeat_c2, dfeat_2b, dfeat_2b_noc};
     }
 
@@ -455,7 +466,7 @@ torch::autograd::variable_list CalculateNepFeat::backward(
         int64_t multi_feat_num = ctx->saved_data["multi_feat_num"].toInt();
         int64_t fix_cij = ctx->saved_data["fix_cij"].toInt();
         
-        auto result = CalculateNepFeatGrad::apply(grad_output[0], coeff2, d12_radial, NL_radial, dfeat_c2, dfeat_2b, dfeat_2b_noc, atom_map, multi_feat_num, fix_cij);
+        auto result = CalculateNepFeatGrad::apply(grad_output[0], coeff2, d12_radial, NL_radial, dfeat_c2, dfeat_2b, dfeat_2b_noc, atom_map, multi_feat_num, fix_cij, false, at::GradMode::is_enabled());
         // return CalculateNepFeatFuncs::backward(grad_output, coeff2, d12_radial, dfeat_c2, dfeat_2b, atom_map);
         auto grad_coeff2 = result[0];
         auto grad_d12_radial = result[1];
@@ -529,8 +540,13 @@ torch::autograd::variable_list CalculateNepFeatGrad::forward(
             at::Tensor dfeat_2b_noc,
             at::Tensor atom_map,
             int64_t multi_feat_num,
-            int64_t fix_cij) 
+            int64_t fix_cij, bool input_grad_only, bool need_context)
     {
+#ifndef MATPL_CUDA_DESCRIPTOR_OPT
+        input_grad_only = false;
+        need_context = true;
+#endif
+
         auto dims_2b = coeff2.sizes();
         int64_t atom_types = dims_2b[0];
         int64_t n_max_2b = dims_2b[2];
@@ -540,7 +556,9 @@ torch::autograd::variable_list CalculateNepFeatGrad::forward(
         int64_t atom_nums = dims_image[0];
         int64_t maxneighs = dims_image[1];
         // options() 集成dtype和device
-        auto grad_coeff2 = torch::zeros({atom_types, atom_types, n_max_2b, n_base_2b}, d12_radial.options());
+        auto grad_coeff2 = input_grad_only
+            ? torch::empty({0}, d12_radial.options())
+            : torch::zeros({atom_types, atom_types, n_max_2b, n_base_2b}, d12_radial.options());
         auto grad_d12_radial = torch::zeros({atom_nums, maxneighs, 4}, d12_radial.options());
 
         torch_launch_calculate_nepfeat_grad(grad_input, dfeat_c2, dfeat_2b, atom_map, 
@@ -675,8 +693,9 @@ torch::autograd::variable_list CalculateNepFeatGrad::backward(
             torch::autograd::Variable(),
             torch::autograd::Variable(),
             torch::autograd::Variable(),
-            torch::autograd::Variable()
-            };
+            torch::autograd::Variable(),
+            torch::autograd::Variable(),
+            torch::autograd::Variable()};
     }
 
 torch::autograd::variable_list calculateNepFeat(
@@ -717,7 +736,7 @@ at::Tensor calculateNepFeatInputGrad(
     int64_t multi_feat_num,
     int64_t fix_cij)
     {
-        auto result = CalculateNepFeatGrad::apply(grad_input, coeff2, d12_radial, NL_radial, dfeat_c2, dfeat_2b, dfeat_2b_noc, atom_map, multi_feat_num, fix_cij);
+        auto result = CalculateNepFeatGrad::apply(grad_input, coeff2, d12_radial, NL_radial, dfeat_c2, dfeat_2b, dfeat_2b_noc, atom_map, multi_feat_num, fix_cij, true, at::GradMode::is_enabled());
         return result[1];
     }
 
@@ -746,9 +765,16 @@ torch::autograd::variable_list CalculateNepMbFeat::forward(
         int64_t maxneighs = dims_image[1];
         // options() 集成dtype和device
         const int64_t NUM_OF_ABC = 24;
+#ifdef MATPL_CUDA_DESCRIPTOR_OPT
+        // Compatibility slots: the CUDA descriptor consumes only sum_fxyz.
+        auto dfeat_c3 = torch::empty({0}, d12.options());
+        auto dfeat_3b = torch::empty({0}, d12.options());
+        auto dfeat_3b_noc = torch::empty({0}, d12.options());
+#else
         auto dfeat_c3 = torch::zeros({atom_nums, atom_types, n_base}, d12.options());
         auto dfeat_3b = torch::zeros({atom_nums, maxneighs, n_max}, d12.options()); // [i, j, n] dfeature/drij
         auto dfeat_3b_noc = torch::zeros({atom_nums, maxneighs, n_base, 4}, d12.options()); // [i, j, n] dfeature/drij without c
+#endif
         auto sum_fxyz = torch::zeros({atom_nums, n_max * NUM_OF_ABC}, d12.options());
         torch_launch_calculate_nepmbfeat(coeff3, d12, NL, atom_map,
                                 feats, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz,
@@ -761,6 +787,11 @@ torch::autograd::variable_list CalculateNepMbFeat::forward(
         ctx->saved_data["lmax_4"] = lmax_4;
         ctx->saved_data["lmax_5"] = lmax_5;
         ctx->saved_data["fix_cij"] = fix_cij;
+        // These are saved kernel contexts, not differentiable outputs.
+        // InputGrad supplies their complete coefficient dependence.
+        // Leaving an autograd edge here can schedule a spurious
+        // descriptor backward with a compact materialized zero seed.
+        ctx->mark_non_differentiable({dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz});
         return {feats, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz};
     }
 
@@ -784,7 +815,7 @@ torch::autograd::variable_list CalculateNepMbFeat::backward(
         int64_t lmax_4 = ctx->saved_data["lmax_4"].toInt();
         int64_t lmax_5 = ctx->saved_data["lmax_5"].toInt();
         int64_t fix_cij = ctx->saved_data["fix_cij"].toInt();
-        auto result = CalculateNepMbFeatGrad::apply(grad_output[0], coeff3, d12, NL, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz, atom_map, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut_angular, fix_cij);
+        auto result = CalculateNepMbFeatGrad::apply(grad_output[0], coeff3, d12, NL, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz, atom_map, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut_angular, fix_cij, false, at::GradMode::is_enabled());
         auto grad_coeff3 = result[0];
         auto grad_d12_angular = result[1];
         // std::cout << "CalculateNepMbFeat::backward out grad_coeff3 3b shape: " << grad_coeff3.sizes() << " grad_d12_angular 3b shape: " << grad_d12_angular.sizes() << std::endl;;
@@ -818,8 +849,19 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::forward(
             int64_t lmax_4,
             int64_t lmax_5,
             double rcut_angular,
-            int64_t fix_cij) 
+            int64_t fix_cij, bool input_grad_only, bool need_context)
     {
+#if defined(MATPL_HIP_ANGULAR_OUTPUT_PRUNE)
+        const char* prune_env = std::getenv("MATPL_NEP_ANGULAR_PRUNE");
+        if (prune_env != nullptr && prune_env[0] == '0') {
+            input_grad_only = false;
+            need_context = true;
+        }
+#elif !defined(MATPL_CUDA_DESCRIPTOR_OPT)
+        input_grad_only = false;
+        need_context = true;
+#endif
+
         // printf("============ 3b firstgrad forward ===========\n");
         auto dims = coeff3.sizes();
         int64_t atom_types = dims[0];
@@ -847,15 +889,19 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::forward(
         }
         // options() 集成dtype和device
         const int64_t NUM_OF_ABC = 24;
-        auto grad_coeff3= torch::zeros({atom_types, atom_types, n_max, n_base}, d12.options());
+        auto grad_coeff3 = input_grad_only
+            ? torch::empty({0}, d12.options())
+            : torch::zeros({atom_types, atom_types, n_max, n_base}, d12.options());
         auto grad_d12_angular = torch::zeros({atom_nums, maxneighs, 4}, d12.options());
         const bool recompute_dsnlm = fix_cij == 0 && torch_should_recompute_nep_mb_dsnlm(
             d12, n_max, n_base, atom_types, lmax_3, lmax_4, lmax_5);
-        const bool retain_dsnlm = fix_cij == 0 && !recompute_dsnlm;
+        const bool retain_dsnlm = need_context && fix_cij == 0 && !recompute_dsnlm;
         auto dsnlm_dc = retain_dsnlm
             ? torch::zeros({atom_nums, atom_types, n_base, NUM_OF_ABC}, d12.options())
             : torch::empty({0}, d12.options());
-        auto dfeat_drij = torch::zeros({atom_nums, maxneighs, feat_3b_num, 4}, d12.options());
+        auto dfeat_drij = need_context
+            ? torch::zeros({atom_nums, maxneighs, feat_3b_num, 4}, d12.options())
+            : torch::empty({0}, d12.options());
         torch_launch_calculate_nepmbfeat_grad(
             // grad_input.view({atom_nums, feat_3b_num}), 
             grad_input,
@@ -1061,8 +1107,9 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::backward(
             torch::autograd::Variable(),
             torch::autograd::Variable(),
             torch::autograd::Variable(),
-            torch::autograd::Variable()
-            };
+            torch::autograd::Variable(),
+            torch::autograd::Variable(),
+            torch::autograd::Variable()};
     }
 
 torch::autograd::variable_list calculateNepMbFeat(
@@ -1114,7 +1161,7 @@ at::Tensor calculateNepMbFeatInputGrad(
     double rcut_angular,
     int64_t fix_cij)
     {
-        auto result = CalculateNepMbFeatGrad::apply(grad_input, coeff3, d12, NL, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz, atom_map, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut_angular, fix_cij);
+        auto result = CalculateNepMbFeatGrad::apply(grad_input, coeff3, d12, NL, dfeat_c3, dfeat_3b, dfeat_3b_noc, sum_fxyz, atom_map, feat_2b_num, lmax_3, lmax_4, lmax_5, rcut_angular, fix_cij, true, at::GradMode::is_enabled());
         return result[1];
     }
 

@@ -337,7 +337,8 @@ void launch_calculate_nepfeat_secondgradout(
     int total_threads = atom_nums * maxneighs;
     int numBlocks = (total_threads + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    compute_gradsecond_gradout_optimized<<<numBlocks, BLOCK_SIZE>>>(
+    const auto stream = c10::hip::getCurrentHIPStream(device);
+    compute_gradsecond_gradout_optimized<<<numBlocks, BLOCK_SIZE, 0, stream.stream()>>>(
         grad_second,
         dfeat_b,
         gradsecond_gradout,

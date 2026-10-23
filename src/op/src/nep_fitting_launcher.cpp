@@ -2,9 +2,8 @@
 
 #ifdef MATPL_FUSED_FITTING_HIP
 #include "../include/nep_fitting_hip.h"
-#else
-#include "../include/nep_fitting_jit.h"
 #endif
+#include "../include/nep_fitting_jit.h"
 
 void launch_nep_fitting_forward(
     const at::Tensor& x, const at::Tensor& w, const at::Tensor& b,
@@ -12,6 +11,11 @@ void launch_nep_fitting_forward(
     const at::Tensor& offsets, int64_t max_count, at::Tensor& y,
     at::Tensor& g) {
 #ifdef MATPL_FUSED_FITTING_HIP
+    if (use_nep_fitting_hiprtc()) {
+        launch_nep_fitting_jit_forward(
+            x, w, b, v, c, atom_ids, offsets, max_count, y, g);
+        return;
+    }
     launch_nep_fitting_hip_forward(
 #else
     launch_nep_fitting_jit_forward(
@@ -26,6 +30,11 @@ void launch_nep_fitting_backward(
     const at::Tensor& grad_y, const at::Tensor& grad_g,
     std::vector<at::Tensor>& grads) {
 #ifdef MATPL_FUSED_FITTING_HIP
+    if (use_nep_fitting_hiprtc()) {
+        launch_nep_fitting_jit_backward(
+            x, w, b, v, atom_ids, offsets, max_count, grad_y, grad_g, grads);
+        return;
+    }
     launch_nep_fitting_hip_backward(
 #else
     launch_nep_fitting_jit_backward(
