@@ -13,6 +13,9 @@ A complete user manual can be found here: http://doc.lonxun.com/MatPL/
 CUDA 与 DCU/HIP 双后端的目录约定、编译命令和算子维护规则见
 [`docs/building-cuda-hip.md`](docs/building-cuda-hip.md)。
 
+NEP 的 DCU/HIP 最新优化、HIPRTC 动态特化范围、运行开关及已知数值差异见
+[`docs/nep-hiprtc-optimization.md`](docs/nep-hiprtc-optimization.md)。
+
 **Citation**
 
 https://chemrxiv.org/doi/full/10.26434/chemrxiv.15001665
