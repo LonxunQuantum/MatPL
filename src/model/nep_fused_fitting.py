@@ -171,7 +171,7 @@ def _load_raw_ops():
 
 
 def prepare_fitting_jit(model: torch.nn.Module) -> bool:
-    """Precompile the bounded FP64 CUDA fitting specialization for ``model``."""
+    """Precompile the bounded FP64 CUDA/HIP fitting specialization for ``model``."""
     fitting_net = getattr(model, "fitting_net", None)
     if not fitting_net:
         return False
@@ -185,7 +185,7 @@ def prepare_fitting_jit(model: torch.nn.Module) -> bool:
     hidden_weight = getattr(layers[0], "weight", None)
     if not isinstance(hidden_weight, torch.Tensor) or hidden_weight.ndim != 2:
         return False
-    if hidden_weight.device.type != "cuda" or torch.version.hip is not None:
+    if hidden_weight.device.type != "cuda":
         return False
     if hidden_weight.dtype != torch.float64:
         return False
@@ -207,7 +207,11 @@ def prepare_fitting_jit(model: torch.nn.Module) -> bool:
         q = int(output_weight.shape[1])
     if q not in (1, 2):
         return False
-    return bool(_load_raw_ops().nep_fitting_jit_prepare(hidden_weight, d, h, q))
+    # Earlier HIP operator libraries expose only AOT fitting operations.
+    prepare = getattr(_load_raw_ops(), "nep_fitting_jit_prepare", None)
+    if prepare is None:
+        return False
+    return bool(prepare(hidden_weight, d, h, q))
 
 
 class _FusedFitting(torch.autograd.Function):

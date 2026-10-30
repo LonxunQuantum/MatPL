@@ -1560,12 +1560,12 @@ __host__ __device__ constexpr size_t nep_mb_secondgrad_shared_bytes() {
   return nep_mb_secondgrad_opt::SharedLayout<NMAX, NBASIS, TYPE_TILE>::bytes;
 }
 
-template<int CTA_THREADS>
+template<int NMAX, int NBASIS, int CTA_THREADS>
 __global__ void nep_mb_secondgrad_precompute_angular(NepMbSecondGradArgs a) {
   using namespace nep_mb_secondgrad_opt;
   const int row = blockIdx.x * CTA_THREADS + threadIdx.x;
   const int row_count = a.atom_count * a.max_neighbors;
-  const int weighted_value_count = a.atom_count * 6 * 24;
+  const int weighted_value_count = a.atom_count * NMAX * 24;
   const int grid_stride = gridDim.x * CTA_THREADS;
   for (int i = row; i < weighted_value_count; i += grid_stride) {
     const_cast<double*>(a.weighted_sums)[i] =
@@ -1576,7 +1576,7 @@ __global__ void nep_mb_secondgrad_precompute_angular(NepMbSecondGradArgs a) {
   if (neighbor < 0) return;
   const double distance = a.d12[row * 4];
   if (distance > a.rcut) return;
-  double* angular = const_cast<double*>(a.angular_workspace) + row * 138;
+  double* angular = const_cast<double*>(a.angular_workspace) + row * (120 + 2 * NBASIS);
   const double x = a.d12[row * 4 + 1];
   const double y = a.d12[row * 4 + 2];
   const double z = a.d12[row * 4 + 3];
@@ -1586,15 +1586,15 @@ __global__ void nep_mb_secondgrad_precompute_angular(NepMbSecondGradArgs a) {
   build_angular_scratch<4>(distance, x, y, z, angular_workspace_view(angular, 15));
   double fc12, fcp12;
   find_fc_and_fcp(a.rcut, a.rcut_inv, distance, fc12, fcp12);
-  find_fn_and_fnp(9, a.rcut_inv, distance, fc12, fcp12,
-                  angular + 120, angular + 129);
+  find_fn_and_fnp(NBASIS, a.rcut_inv, distance, fc12, fcp12,
+                  angular + 120, angular + 120 + NBASIS);
 }
 
 template<int NMAX, int NBASIS, int LMAX3, bool HAS4, bool HAS5, int TYPE_TILE, int CTA_THREADS>
 __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
   using namespace nep_mb_secondgrad_opt;
-  static_assert(LMAX3 == 4 && HAS4 && HAS5, "Only OMat24 is dispatched");
-  static_assert(CTA_THREADS == 128, "OMat24 uses a fixed CTA width");
+  static_assert(LMAX3 == 4 && (!HAS5 || HAS4), "Supported NEP angular channels");
+  static_assert(CTA_THREADS == 128, "Reused HIP optimized CTA width");
   extern __shared__ __align__(8) unsigned char shared_raw[];
   SharedLayout<NMAX, NBASIS, TYPE_TILE> s(shared_raw);
   const int center = blockIdx.x;
@@ -1606,7 +1606,8 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
   // The public argument points at the first many-body column. Its row stride
   // includes the preceding two-body columns, as in the legacy launcher.
   const int fp_start = center * (a.feat_2b_count + a.many_body_feat_count);
-  for (int i = tid; i < NMAX * 6; i += CTA_THREADS) {
+  constexpr int CHANNELS = LMAX3 + (HAS4 ? 1 : 0) + (HAS5 ? 1 : 0);
+  for (int i = tid; i < NMAX * CHANNELS; i += CTA_THREADS) {
     const int column = i < NMAX * LMAX3
         ? (i % LMAX3) * NMAX + i / LMAX3 : i;
     s.fp[i] = a.de_dfeat[fp_start + column];
@@ -1666,7 +1667,7 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       }
       if (type_slot < 0) continue;
 
-      const double* fn12 = a.angular_workspace + row * 138 + 120;
+      const double* fn12 = a.angular_workspace + row * (120 + 2 * NBASIS) + 120;
       double angular[24] = {0.0};
       accumulate_blm_rij(
           distance, a.d12[row * 4 + 1], a.d12[row * 4 + 2],
@@ -1711,13 +1712,13 @@ __global__ void nep_mb_secondgrad_fused(NepMbSecondGradArgs a) {
       work.dsnlm_dc = s.dsnlm_tile;
       work.sum_fxyz = s.sum_fxyz;
       work.weighted_sums = a.weighted_sums + center * NMAX * 24;
-      work.angular = a.angular_workspace + row * 138;
+      work.angular = a.angular_workspace + row * (120 + 2 * NBASIS);
       work.output = sink.values;
       work.n = n;
       work.type_slot = type_slot;
       work.tile_count = tile_count;
       work.fn12 = work.angular + 120;
-      work.fnp12 = work.angular + 129;
+      work.fnp12 = work.angular + 120 + NBASIS;
       const double* fn12 = work.fn12;
       const double* fnp12 = work.fnp12;
 

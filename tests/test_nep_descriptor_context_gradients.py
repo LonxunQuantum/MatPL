@@ -138,3 +138,63 @@ def test_radial_context_outputs_are_nondifferentiable():
                 seed[i, :, None] * context[-1][i, j, :, 0]
                 * force_seed[i, j, 0])
     torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-11)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or not torch.version.hip,
+                    reason='requires an allocated HIP device')
+@pytest.mark.parametrize('spec', [(9, 5, 16, 4, 2, 0), (13, 5, 2, 4, 2, 1),
+                                  (9, 13, 8, 4, 2, 1), (17, 13, 118, 4, 2, 1)])
+def test_hip_angular_output_pruning_preserves_mixed_derivatives(spec, monkeypatch):
+    values = inputs(spec)
+    monkeypatch.setenv('MATPL_NEP_ANGULAR_PRUNE', '0')
+    expected = evaluate(spec, values, 'cuda')
+    monkeypatch.setenv('MATPL_NEP_ANGULAR_PRUNE', '1')
+    actual = evaluate(spec, values, 'cuda')
+    for got, want in zip(actual, expected):
+        torch.testing.assert_close(got, want, rtol=0, atol=1e-10)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or not torch.version.hip,
+                    reason='requires an allocated HIP device')
+@pytest.mark.parametrize('fix_cij', [0, 1])
+def test_hip_angular_input_only_without_context_beyond_one_block(fix_cij, monkeypatch):
+    spec = (9, 5, 16, 4, 2, 0)
+    coeff, rij, neighbors, types, seeds, _ = [v.cuda() for v in inputs(spec)]
+    # Exercise the neighbor-stride loop as well as a padded final neighbor.
+    rij = rij.repeat(1, 12, 1)[:, :70].contiguous()
+    neighbors = neighbors[:, :5].repeat(1, 14).contiguous()
+    neighbors[:, -1] = -1
+    ops = load_calc_ops(device='cuda')
+    context = ops.calculateNepMbFeatWithGradContext(
+        coeff, rij, neighbors, types, torch.zeros_like(seeds[:, 3:]),
+        3, 4, 2, 0, 5., fix_cij)
+    outputs = []
+    for enabled in ['0', '1']:
+        monkeypatch.setenv('MATPL_NEP_ANGULAR_PRUNE', enabled)
+        with torch.no_grad():
+            outputs.append(ops.calculateNepMbFeatInputGrad(
+                seeds[:, 3:], coeff, rij, neighbors, *context[1:], types,
+                3, 4, 2, 0, 5., fix_cij))
+    torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=1e-10)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or not torch.version.hip,
+                    reason='requires an allocated HIP device')
+def test_hip_angular_frozen_coefficients_preserve_seed_gradient(monkeypatch):
+    spec = (9, 5, 16, 4, 2, 0)
+    coeff, rij, neighbors, types, seeds, probe = [v.cuda() for v in inputs(spec)]
+    ops = load_calc_ops(device='cuda')
+    context = ops.calculateNepMbFeatWithGradContext(
+        coeff, rij, neighbors, types, torch.zeros_like(seeds[:, 3:]),
+        3, 4, 2, 0, 5., 1)
+    results = []
+    for enabled in ['0', '1']:
+        monkeypatch.setenv('MATPL_NEP_ANGULAR_PRUNE', enabled)
+        seed = seeds[:, 3:].detach().requires_grad_()
+        vjp = ops.calculateNepMbFeatInputGrad(
+            seed, coeff, rij, neighbors, *context[1:], types,
+            3, 4, 2, 0, 5., 1)
+        grad_seed, = torch.autograd.grad((vjp * probe).sum(), (seed,))
+        results.append((vjp.detach(), grad_seed))
+    for got, want in zip(results[0], results[1]):
+        torch.testing.assert_close(got, want, rtol=0, atol=1e-10)

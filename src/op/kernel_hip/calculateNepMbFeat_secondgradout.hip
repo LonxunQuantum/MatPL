@@ -12,58 +12,50 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <cstring>
+#include "./utilities/nep_mb_secondgrad_hiprtc.hpp"
 #include <hip/hip_runtime.h>
 
-static bool nep_mb_secondgrad_omat24_supported(
-    int n_max_3b, int n_base_3b, int atom_types, int lmax_3,
-    int lmax_4, int lmax_5) {
-    return n_max_3b == 6 && n_base_3b == 9 && atom_types >= 1 &&
-           atom_types <= NEP_MAX_ELEMENT_TYPES && lmax_3 == 4 &&
-           lmax_4 > 0 && lmax_5 > 0;
+// 与 CUDA NVRTC 路径对齐的数学参数范围；默认包含 HfO2。
+static constexpr size_t nep_mb_secondgrad_runtime_shared_bytes(int nn,int kb) {
+ const auto align=[](size_t v){return (v+7)&~size_t(7);};
+ size_t bytes=align(4*sizeof(unsigned int));
+ bytes=align(bytes+NEP_MAX_ELEMENT_TYPES*sizeof(int));bytes=align(bytes+sizeof(int));
+ bytes=align(bytes+static_cast<size_t>(nn)*6*sizeof(double));
+ bytes=align(bytes+static_cast<size_t>(nn)*24*sizeof(double));
+ bytes=align(bytes+static_cast<size_t>(4)*kb*24*sizeof(double));
+ return align(bytes+static_cast<size_t>(4)*nn*kb*sizeof(double));
 }
-
-bool should_recompute_nep_mb_dsnlm(
-    const int n_max_3b, const int n_base_3b, const int atom_types,
-    const int lmax_3, const int lmax_4, const int lmax_5, const int) {
-    return nep_mb_secondgrad_omat24_supported(
-        n_max_3b, n_base_3b, atom_types, lmax_3, lmax_4, lmax_5);
+static_assert(nep_mb_secondgrad_runtime_shared_bytes(20,20)==nep_mb_secondgrad_shared_bytes<20,20,4>(),"shared layout mismatch");
+static int nep_mb_secondgrad_mode() {
+ const char* mode=std::getenv("MATPL_NEP_MB_SECONDGRAD_MODE");
+ if(mode) {
+  if(std::strcmp(mode,"auto")==0)return 0;
+  if(std::strcmp(mode,"optimized")==0)return 1;
+  if(std::strcmp(mode,"legacy")==0)return -1;
+  TORCH_CHECK(false,"MATPL_NEP_MB_SECONDGRAD_MODE must be auto, optimized, or legacy");
+ }
+ const char* compat=std::getenv("MATPL_NEP_MB_SECONDGRAD_FUSED");
+ return compat && compat[0]=='0' ? -1 : 0;
 }
-
-static void launch_nep_mb_secondgrad_omat24(
-    const NepMbSecondGradArgs& args, int device) {
-    hipSetDevice(device);
-    if (args.atom_count == 0) return;
-    constexpr size_t shared_bytes = nep_mb_secondgrad_shared_bytes<6, 9, 4>();
-    const auto stream = c10::hip::getCurrentHIPStream(device);
-    constexpr int angular_values_per_neighbor = 138;
-    constexpr int weighted_values_per_center = 6 * 24;
-    const size_t angular_values =
-        static_cast<size_t>(args.atom_count) * args.max_neighbors *
-        angular_values_per_neighbor;
-    const size_t workspace_bytes =
-        (angular_values + static_cast<size_t>(args.atom_count) *
-         weighted_values_per_center) * sizeof(double);
-    auto workspace_deleter = [](void* ptr) {
-        c10::hip::HIPCachingAllocator::raw_delete(ptr);
-    };
-    std::unique_ptr<void, decltype(workspace_deleter)> angular_workspace(
-        c10::hip::HIPCachingAllocator::raw_alloc_with_stream(
-            workspace_bytes, stream.stream()),
-        workspace_deleter);
-    double* workspace = static_cast<double*>(angular_workspace.get());
-    NepMbSecondGradArgs kernel_args = args;
-    kernel_args.angular_workspace = workspace;
-    kernel_args.weighted_sums = workspace + angular_values;
-    const int rows = std::max(
-        args.atom_count * args.max_neighbors, args.atom_count * 6);
-    constexpr int precompute_threads = 256;
-    nep_mb_secondgrad_precompute_angular<precompute_threads><<<
-        (rows + precompute_threads - 1) / precompute_threads,
-        precompute_threads, 0, stream.stream()>>>(kernel_args);
-    CUDA_CHECK_KERNEL
-    nep_mb_secondgrad_fused<6, 9, 4, true, true, 4, 128><<<
-        args.atom_count, 128, shared_bytes, stream.stream()>>>(kernel_args);
-    CUDA_CHECK_KERNEL
+bool should_recompute_nep_mb_dsnlm(const int nn,const int kb,const int types,
+ const int l3,const int l4,const int l5,const int device) {
+ const int mode=nep_mb_secondgrad_mode();if(mode<0)return false;
+ hipDeviceProp_t prop{};matpl_mb_secondgrad_rtc::driver(hipGetDeviceProperties(&prop,device),"hipGetDeviceProperties");
+ const bool supported=nn>=5 && nn<=20 && kb>=5 && kb<=20 && types>=1 && types<=NEP_MAX_ELEMENT_TYPES && l3==4 &&
+  ((l4==2 && (l5==0 || l5==1)) || (l4==0 && l5==0)) && nep_mb_secondgrad_runtime_shared_bytes(nn,kb)<=prop.sharedMemPerBlock;
+ TORCH_CHECK(mode!=1 || supported,"unsupported optimized NEP many-body second-gradient shape: NMAX=",nn," NBASIS=",kb," TYPES=",types," L3=",l3," L4=",l4," L5=",l5);
+ return supported;
+}
+static void launch_nep_mb_secondgrad_parameterized_dispatch(const NepMbSecondGradArgs& args,int nn,int kb,int l4,int l5,int device) {
+ hipSetDevice(device);if(args.atom_count==0)return;
+ const auto stream=c10::hip::getCurrentHIPStream(device);
+ const size_t angular_values=static_cast<size_t>(args.atom_count)*args.max_neighbors*(120+2*kb);
+ const size_t bytes=(angular_values+static_cast<size_t>(args.atom_count)*nn*24)*sizeof(double);
+ auto deleter=[](void* p){c10::hip::HIPCachingAllocator::raw_delete(p);};
+ std::unique_ptr<void,decltype(deleter)> workspace(c10::hip::HIPCachingAllocator::raw_alloc_with_stream(bytes,stream.stream()),deleter);
+ NepMbSecondGradArgs a=args;a.angular_workspace=static_cast<double*>(workspace.get());a.weighted_sums=a.angular_workspace+angular_values;
+ matpl_mb_secondgrad_rtc::launch(a,nn,kb,l4>0,l5>0,device,nep_mb_secondgrad_runtime_shared_bytes(nn,kb));
 }
 
 __global__ void compute_gradsecond_mbgradout(
@@ -145,7 +137,7 @@ void launch_calculate_nepmbfeat_secondgradout_c3(
             nullptr, nullptr, gradsecond_c3, rcut_angular,
             1.0 / rcut_angular, atom_nums,
             maxneighs, atom_types, feat_2b_num, multi_feat_num};
-        launch_nep_mb_secondgrad_omat24(args, device);
+        launch_nep_mb_secondgrad_parameterized_dispatch(args,n_max_3b,n_base_3b,lmax_4,lmax_5,device);
         return;
     }
     hipSetDevice(device);

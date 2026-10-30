@@ -1,5 +1,6 @@
 #include <torch/torch.h>
 #include <iostream>
+#include <cstdlib>
 #include "../include/CalcOps.h"
 #include "../include/op_declare.h"
 
@@ -850,7 +851,13 @@ torch::autograd::variable_list CalculateNepMbFeatGrad::forward(
             double rcut_angular,
             int64_t fix_cij, bool input_grad_only, bool need_context)
     {
-#ifndef MATPL_CUDA_DESCRIPTOR_OPT
+#if defined(MATPL_HIP_ANGULAR_OUTPUT_PRUNE)
+        const char* prune_env = std::getenv("MATPL_NEP_ANGULAR_PRUNE");
+        if (prune_env != nullptr && prune_env[0] == '0') {
+            input_grad_only = false;
+            need_context = true;
+        }
+#elif !defined(MATPL_CUDA_DESCRIPTOR_OPT)
         input_grad_only = false;
         need_context = true;
 #endif

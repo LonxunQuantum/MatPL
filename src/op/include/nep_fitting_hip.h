@@ -3,6 +3,8 @@
 #include <ATen/ATen.h>
 #include <vector>
 
+bool use_nep_fitting_hiprtc();
+
 void launch_nep_fitting_hip_forward(
     const at::Tensor& x, const at::Tensor& w, const at::Tensor& b,
     const at::Tensor& v, const at::Tensor& c, const at::Tensor& atom_ids,
