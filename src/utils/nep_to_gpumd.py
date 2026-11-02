@@ -110,6 +110,9 @@ def extract_model(nep_path:str):
     if "max_NN_radial" in model['state_dict'].keys():
         max_NN_radial = model['state_dict']['max_NN_radial']
         max_NN_angular = model['state_dict']['max_NN_angular']
+    elif "module.max_NN_radial" in model['state_dict'].keys():
+        max_NN_radial = model['state_dict']['module.max_NN_radial']
+        max_NN_angular = model['state_dict']['module.max_NN_angular']
     elif "max_neighbor" in model.keys():
         max_NN_radial, max_NN_angular = model['max_neighbor']
     else:
