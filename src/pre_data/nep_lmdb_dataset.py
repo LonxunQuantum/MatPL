@@ -18,6 +18,9 @@ import lmdb
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from src.utils.nep_energy_reference import (
+    normalize_lmdb_type, validate_reference_elements, REFERENCE_TABLES,
+)
 
 try:
     import orjson as _orjson
@@ -883,6 +886,7 @@ class NepLmdbDataset(Dataset):
         train_ei=False,
         max_open_shards=8,
         nonperiodic_vacuum_padding=None,
+        energy_reference_type=None,
     ):
         super().__init__()
         if not use_cartesian:
@@ -936,6 +940,15 @@ class NepLmdbDataset(Dataset):
         self.cal_energy = cal_energy
         self.fill_metal_bec = fill_metal_bec
         self.train_ei = train_ei
+        self.energy_reference_type = (
+            normalize_lmdb_type(energy_reference_type)
+            if energy_reference_type is not None else None
+        )
+        self._reference_array = None
+        if self.energy_reference_type is not None:
+            validate_reference_elements(self.energy_reference_type, self.atom_types)
+            self._reference_array = np.asarray(
+                REFERENCE_TABLES[self.energy_reference_type], dtype=np.float64)
         self.max_open_shards = max_open_shards
         if nonperiodic_vacuum_padding is not None:
             if (isinstance(nonperiodic_vacuum_padding, bool) or
@@ -1077,7 +1090,11 @@ class NepLmdbDataset(Dataset):
         energy_array = self._finite_array(frame, "energy")
         if energy_array.size != 1:
             raise ValueError("energy must be a scalar")
-        energy = float(energy_array.reshape(-1)[0])
+        energy_raw = float(energy_array.reshape(-1)[0])
+        if self.energy_reference_type is None:
+            energy = energy_raw
+        else:
+            energy = energy_raw - float(self._reference_array[numbers - 1].sum())
 
         volume = abs(float(np.linalg.det(cell)))
         if not np.isfinite(volume) or volume <= 0:
@@ -1133,7 +1150,7 @@ class NepLmdbDataset(Dataset):
         if not np.isfinite(total_charge):
             raise ValueError("charge must be finite")
 
-        return {
+        sample = {
             "box": torch.as_tensor(box, dtype=self.dtype),
             "box_original": torch.as_tensor(lattice, dtype=self.dtype),
             "num_cell": torch.as_tensor(num_cell, dtype=self.index_type),
@@ -1152,3 +1169,6 @@ class NepLmdbDataset(Dataset):
                 _default_bec(numbers, self.fill_metal_bec), dtype=self.dtype
             ),
         }
+        if self.energy_reference_type is not None:
+            sample["energy_raw"] = torch.tensor([energy_raw], dtype=self.dtype)
+        return sample

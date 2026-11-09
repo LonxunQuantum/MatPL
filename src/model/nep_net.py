@@ -220,6 +220,7 @@ class NEP(nn.Module):
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
                                                     last_bias= not self.gpumd_nep4,
+                                                    zero_last_bias= getattr(input_param, "lmdb_type", None) is not None,
                                                     ))
             else:
                 self.fitting_net.append(FittingNet(network_size   = fitting_network_size, #[50, output_num]
@@ -231,6 +232,7 @@ class NEP(nn.Module):
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
                                                     last_bias= True,
+                                                    zero_last_bias= getattr(input_param, "lmdb_type", None) is not None,
                                                     #    self.nep_param["net_cfg"]["fitting_net"]["resnet_dt"],
                                                     #    self.nep_param["net_cfg"]["fitting_net"]["activation"], 
                                                     ))

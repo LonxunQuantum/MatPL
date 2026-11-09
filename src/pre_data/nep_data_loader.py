@@ -71,12 +71,52 @@ class NepTestData():
         self.input_param = input_param
 
         if len(self.input_param.file_paths.test_data_path) > 0:
-            for config in self.input_param.file_paths.test_data_path:
-                image_read = Config(data_path=config, format=self.input_param.file_paths.format).images
-                if isinstance(image_read, list):
-                    self.image_list.extend(image_read)
-                else:
-                    self.image_list.append(image_read)
+            if self.input_param.file_paths.format == "lmdb":
+                from pwdata.image import Image
+                from src.pre_data.nep_lmdb_dataset import NepLmdbDataset
+                dataset = NepLmdbDataset(
+                    self.input_param.file_paths.test_data_path,
+                    atom_types=self.input_param.atom_type,
+                    cutoff_radial=self.input_param.nep_param.cutoff[0],
+                    cutoff_angular=self.input_param.nep_param.cutoff[1],
+                    nonperiodic_vacuum_padding=getattr(
+                        self.input_param, "nonperiodic_vacuum_padding", None),
+                )
+                try:
+                    for index in range(len(dataset)):
+                        sample = dataset[index]
+                        numbers = np.asarray(self.input_param.atom_type)[
+                            sample["atom_type_map"].numpy()]
+                        atom_type, atom_type_num = np.unique(
+                            numbers, return_counts=True)
+                        virial = sample["virial"].numpy().reshape(3, 3)
+                        if np.all(virial == -1e6):
+                            virial = None
+                        image = Image(
+                            atom_type=atom_type,
+                            atom_type_num=atom_type_num,
+                            atom_nums=len(numbers),
+                            atom_types_image=numbers,
+                            Ep=sample["energy"].item(),
+                            Etot=sample["energy"].item(),
+                            lattice=sample["box_original"].numpy().reshape(3, 3).T,
+                            virial=virial,
+                            position=sample["position"].numpy(),
+                            force=sample["force"].numpy(),
+                            atomic_energy=sample["ei"].numpy(),
+                            pbc=[True, True, True],
+                            cartesian=True,
+                        )
+                        self.image_list.append(image)
+                finally:
+                    dataset.close()
+            else:
+                for config in self.input_param.file_paths.test_data_path:
+                    image_read = Config(data_path=config, format=self.input_param.file_paths.format).images
+                    if isinstance(image_read, list):
+                        self.image_list.extend(image_read)
+                    else:
+                        self.image_list.append(image_read)
 
         for image in self.image_list:
             if image.cartesian is False:

@@ -83,19 +83,20 @@ def nep_train(input_json: json, cmd:str):
 def nep_test(input_json: json, cmd:str):
     kspace_method = _get_kspace_method(input_json)
     model_load_path = get_parameter("model_load_file", input_json, None)
-    try:
-        _model_checkpoint = torch.load(model_load_path, map_location=torch.device("cpu"), weights_only=False)
+    if model_load_path is None:
+        raise ValueError("NEP test requires model_load_file")
+    with open(model_load_path, "rb") as rf:
+        is_nep_text = rf.read(4) in (b"nep4", b"nep5")
+    if is_nep_text:
+        print("the input model file is txt format")
+    else:
+        # Export errors (including a mismatched reference table) must propagate.
         nep_content, model_atom_type, atom_names = extract_model(model_load_path)
-        model_load_path = os.path.join(os.path.dirname(os.path.abspath(model_load_path)), "tmp_pwmlff_nep_test.txt")
-        with open(model_load_path, 'w') as wf:
+        model_load_path = os.path.join(
+            os.path.dirname(os.path.abspath(model_load_path)),
+            "tmp_pwmlff_nep_test.txt")
+        with open(model_load_path, "w", encoding="utf-8") as wf:
             wf.writelines(nep_content)
-    except Exception as e:
-        with open(model_load_path, 'r') as rf:
-            line = rf.readline()
-        if "nep" in line:
-            print("the input model file is txt format")
-        else:
-            raise Exception("ERROR! The input model file cannot be parsed!")
 
     if model_load_path is None or not os.path.exists(model_load_path):
         raise Exception("Error! NEP test should have nep.txt files or nep_model.ckpt file!")

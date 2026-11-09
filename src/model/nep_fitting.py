@@ -91,7 +91,8 @@ class FittingNet(nn.Module):
                  ener_shift: float, 
                  magic = False,
                  nep_txt_param: List[np.array]=None,
-                 last_bias:bool=True):
+                 last_bias:bool=True,
+                 zero_last_bias:bool=False):
         super(FittingNet, self).__init__()
         self.network_size = [input_dim] + network_size
         self.bias_flag = bias
@@ -137,7 +138,10 @@ class FittingNet(nn.Module):
 
             if self.last_bias:
                 bias_init = torch.randn(1, self.network_size[i])
-                normal(bias_init, mean=0.0, std=1.0)
+                if zero_last_bias:
+                    bias_init.zero_()
+                else:
+                    normal(bias_init, mean=0.0, std=1.0)
                 ener_shift_tensor = torch.as_tensor(ener_shift, dtype=bias_init.dtype)
                 if ener_shift_tensor.ndim == 0:
                     bias_init += ener_shift_tensor
@@ -242,7 +246,8 @@ class QNEPFittingNet(nn.Module):
                  charge_mode: int,
                  magic = False,
                  nep_txt_param: List[np.array]=None,
-                 last_bias:bool=True):
+                 last_bias:bool=True,
+                 zero_last_bias:bool=False):
         super(QNEPFittingNet, self).__init__()
         self.network_size = [input_dim] + network_size
         self.bias_flag = bias
@@ -294,7 +299,7 @@ class QNEPFittingNet(nn.Module):
             normal(charge_weight, mean=0, std=(1.0 / np.sqrt(hidden_dim + 1)))
             energy_bias = None
             if self.last_bias:
-                energy_bias = torch.as_tensor(ener_shift, dtype=energy_weight.dtype).reshape(1, 1)
+                energy_bias = torch.zeros(1, 1, dtype=energy_weight.dtype) if zero_last_bias else torch.as_tensor(ener_shift, dtype=energy_weight.dtype).reshape(1, 1)
 
         self.energy_head = LayerModule(energy_weight, energy_bias, None)
         self.charge_head = LayerModule(charge_weight, None, None)

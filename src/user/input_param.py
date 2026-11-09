@@ -9,6 +9,7 @@ from src.user.work_file_param import WorkFileStructure
 from src.user.nn_feature_type import Descriptor
 
 from src.user.nep_param import NepParam
+from src.utils.nep_energy_reference import normalize_lmdb_type, validate_reference_elements
 '''
 description: 
     covert the input json file to class
@@ -42,6 +43,8 @@ class InputParam(object):
         self.profiling = get_parameter("profiling", json_input, False)#not realized
 
         self.set_feature_params(json_input)
+        if self.lmdb_type is not None:
+            validate_reference_elements(self.lmdb_type, self.atom_type)
         self.set_workdir_structures(json_input)
         if self.inference and self.model_type in ["NN", "LINEAR"]:
             self.file_paths.nn_work = os.path.join(self.file_paths.json_dir, "work_test_dir")
@@ -63,7 +66,7 @@ class InputParam(object):
             raise Exception("ERROR! {} model type not supported!".format(self.model_type))
 
         # DP, NN, and NEP common file paths
-        self.file_paths.set_model_file_paths(json_input)
+        self.file_paths.set_model_file_paths({**json_input, "lmdb_type": self.lmdb_type})
         self.file_paths.set_train_valid_file(json_input)
 
     '''
@@ -93,6 +96,11 @@ class InputParam(object):
         # if nep_in_file is not None:
         #     nep_param.set_nep_param_from_nep_in(nep_in_file, self.atom_type)
         nep_txt_file = get_parameter("nep_txt_file", json_input, None)
+        if nep_txt_file is not None and self.lmdb_type is not None and self.cmd == "TRAIN":
+            raise ValueError(
+                "nep_txt_file has no energy_reference metadata; use a checkpoint "
+                "with an explicit migration for residual LMDB training"
+            )
         if nep_txt_file is not None:
             nep_param.set_nep_nn_c_param_from_nep_txt(nep_txt_file, self.atom_type)
         else:
@@ -100,6 +108,11 @@ class InputParam(object):
         # if fixed
         nep_param.set_fixed_params(json_input)
         self.nep_param = nep_param
+        if self.lmdb_type is not None and nep_param.charge_mode and nep_param.gpumd_nep4:
+            raise ValueError(
+                "LMDB energy references require per-element energy bias; "
+                "gpumd_nep4 charge mode cannot export them"
+            )
         self.model_param.fitting_net.network_size = nep_param.neuron
         self.descriptor.cutoff = nep_param.cutoff
         self.descriptor.n_max = nep_param.n_max
@@ -172,8 +185,12 @@ class InputParam(object):
     
     def set_optimizer(self, json_input:dict):
         self.optimizer_param = OptimizerParam()
-        self.optimizer_param.set_optimizer( json_input ,self.nep_param)
-        #
+        self.optimizer_param.set_optimizer(json_input, self.nep_param)
+        # Residual LMDB checkpoints resume their epoch and Adam moments unless
+        # the user explicitly requests a new stage with reset_epoch=true.
+        if (self.model_type == "NEP" and self.lmdb_type is not None
+                and "reset_epoch" not in get_parameter("optimizer", json_input, {})):
+            self.optimizer_param.reset_epoch = False
 
     '''
     description: 
@@ -227,6 +244,16 @@ class InputParam(object):
         is_lmdb = str(get_parameter(
             "format", json_input, "pwmat/movement"
         )).lower() == "lmdb"
+        raw_lmdb_type = get_parameter("lmdb_type", json_input, None)
+        if is_lmdb and self.model_type == "NEP" and self.cmd == "TRAIN" and raw_lmdb_type is None:
+            raise ValueError("lmdb_type is required for NEP LMDB training")
+        if not is_lmdb and raw_lmdb_type is not None:
+            raise ValueError("lmdb_type is only valid when format is lmdb")
+        self.lmdb_type = normalize_lmdb_type(raw_lmdb_type) if raw_lmdb_type is not None else None
+        self.migrate_legacy_energy_reference = get_parameter(
+            "migrate_legacy_energy_reference", json_input, False)
+        if not isinstance(self.migrate_legacy_energy_reference, bool):
+            raise ValueError("migrate_legacy_energy_reference must be a boolean")
         if (is_lmdb and (isinstance(self.lmdb_stat_frames, bool) or
                 not isinstance(self.lmdb_stat_frames, int) or
                 self.lmdb_stat_frames <= 0)):
@@ -367,6 +394,10 @@ class InputParam(object):
             params_dict[key] = file_dir_dict[key]
         if self.file_paths.format == "lmdb":
             params_dict["lmdb_stat_frames"] = self.lmdb_stat_frames
+            if self.lmdb_type is not None:
+                params_dict["lmdb_type"] = self.lmdb_type
+            if self.migrate_legacy_energy_reference:
+                params_dict["migrate_legacy_energy_reference"] = True
         return params_dict
     
     def print_input_params(self, json_file_save_name="json_all.json"):

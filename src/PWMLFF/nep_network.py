@@ -30,6 +30,9 @@ from src.pre_data.nep_lmdb_dataset import (
     select_stat_indices,
 )
 from src.PWMLFF.nep_mods.nep_trainer import train_KF, train, valid, save_checkpoint, predict
+from src.utils.nep_energy_reference import (
+    checkpoint_reference_for_config, prepare_energy_reference_checkpoint,
+)
 from src.user.input_param import InputParam
 from src.utils.file_operation import write_arrays_to_file, write_force_ei
 from src.utils.nep_to_gpumd import extract_model
@@ -246,7 +249,7 @@ def build_nep_checkpoint(
         json_file, epoch, model, optimizer, scheduler,
         optimizer_updates=None, warmup_updates=None, lr_progress_epochs=None):
     """Save training state; scheduler metadata is not configuration on resume."""
-    return {
+    checkpoint = {
         "json_file": json_file,
         "epoch": epoch,
         "state_dict": model.state_dict(),
@@ -256,6 +259,10 @@ def build_nep_checkpoint(
         "warmup_updates": warmup_updates,
         "lr_progress_epochs": lr_progress_epochs,
     }
+    reference = checkpoint_reference_for_config(json_file)
+    if reference is not None:
+        checkpoint["energy_reference"] = reference
+    return checkpoint
 
 
 def _get_image_total_charge(image, default_total_charge=0.0):
@@ -604,7 +611,9 @@ class nep_network:
         statistics = self._reduce_lmdb_statistics(local_statistics)
         if statistics.frame_count == 0:
             raise ValueError("LMDB training data contains no frames")
-        dataset.energy_shift = statistics.energy_shift()
+        dataset.energy_shift = ([0.0] * len(dataset.atom_types)
+                                if getattr(dataset, "energy_reference_type", None)
+                                else statistics.energy_shift())
         dataset.avg_image_atom = statistics.average_atoms
         dataset.max_atom_nums = statistics.max_atoms
         return indices, statistics
@@ -666,6 +675,7 @@ class nep_network:
             "cutoff_angular": self.input_param.nep_param.cutoff[1],
             "dtype": dtype,
             "fill_metal_bec": fill_ion_bec,
+            "energy_reference_type": getattr(self.input_param, "lmdb_type", None),
             "nonperiodic_vacuum_padding": getattr(
                 self.input_param, "nonperiodic_vacuum_padding", None),
         }
@@ -975,9 +985,22 @@ class nep_network:
                 allow_periodic_fallback=allow_periodic_checkpoint_fallback,
             )
             model_path = loaded_model_path
+            new_reference_stage, source_reference_type = prepare_energy_reference_checkpoint(
+                checkpoint,
+                getattr(self.input_param, "lmdb_type", None),
+                self.input_param.atom_type,
+                migrate_legacy=getattr(
+                    self.input_param, "migrate_legacy_energy_reference", False),
+            )
             checkpoint = _adjust_ckpt_keys(checkpoint, model) # 适配旧版本以及单卡多卡版本
             model.load_state_dict(checkpoint["state_dict"])
-            if "epoch" in checkpoint:
+            if new_reference_stage:
+                if self.is_rank_0:
+                    print(f"NEP energy reference: {source_reference_type} -> "
+                          f"{self.input_param.lmdb_type}; fresh optimizer and epoch")
+                self.input_param.optimizer_param.start_epoch = 1
+                checkpoint = None
+            elif "epoch" in checkpoint:
                 if self.input_param.optimizer_param.reset_epoch and self.input_param.inference is False:
                     if checkpoint["epoch"] != 1:
                         print(f"Rank {self.input_param.rank}: Resetting epoch to 1 from {checkpoint['epoch']}")
@@ -1400,6 +1423,9 @@ class nep_network:
         nep_content, model_atom_type, atom_names = extract_model(ckpt_path)
         first_line = nep_content.splitlines()[0] if nep_content else ""
         nep_file_name = "nep4.txt" if first_line.startswith("nep4") else "nep5.txt"
+        if getattr(self.input_param, "lmdb_type", None):
+            stem, extension = os.path.splitext(nep_file_name)
+            nep_file_name = f"{stem}_{self.input_param.lmdb_type}{extension}"
         save_nep_txt_path = os.path.join(self.input_param.file_paths.model_store_dir, f"{prefix}{nep_file_name}")
         with open(save_nep_txt_path, 'w') as wf:
                 wf.writelines(nep_content)

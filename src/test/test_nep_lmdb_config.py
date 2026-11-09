@@ -22,13 +22,16 @@ def _minimal_nep_json(lmdb_path, **overrides):
                 "basis_size": [8, 8],
                 "l_max": [4, 2, 1],
             },
-            "fitting_net": {"network_size": [8, 1]},
+            "fitting_net": {"network_size": [30, 1]},
         },
         "optimizer": {"optimizer": "ADAM", "epochs": 1, "batch_size": 1},
         "format": "lmdb",
+        "lmdb_type": "omat24",
         "train_data": [str(lmdb_path)],
     }
     config.update(overrides)
+    if config["format"] != "lmdb":
+        config.pop("lmdb_type", None)
     return config
 
 
@@ -160,8 +163,8 @@ class NepElementConfigurationTest(unittest.TestCase):
             "TRAIN",
         )
 
-    def test_accepts_all_118_periodic_table_elements(self):
-        param = self._param(list(range(1, 119)))
+    def test_accepts_all_118_periodic_table_elements_without_reference_table(self):
+        param = self._param(list(range(1, 119)), format="extxyz")
 
         self.assertEqual(param.atom_type, list(range(1, 119)))
 

@@ -128,6 +128,12 @@ class WorkFileStructure(object):
             model_name = get_parameter("model_name", json_input, "dp_model.ckpt")
         elif self.model_type == "NEP":
             model_name = get_parameter("model_name", json_input, "nep_model.ckpt")
+            lmdb_type = json_input.get("lmdb_type")
+            if str(json_input.get("format", "")).lower() == "lmdb" and lmdb_type:
+                stem, extension = os.path.splitext(model_name)
+                suffix = "_" + lmdb_type
+                if not stem.lower().endswith(suffix):
+                    model_name = stem + suffix + extension
         elif self.model_type == "CHEBY":
             model_name = get_parameter("model_name", json_input, "chey_model.ckpt")
         best_model_path = os.path.join(self.json_dir, "best_model.ckpt")

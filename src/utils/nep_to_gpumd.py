@@ -1,6 +1,9 @@
 import torch
 import os 
 import sys
+from src.utils.nep_energy_reference import (
+    normalize_lmdb_type, validate_energy_reference_metadata, reference_for_numbers,
+)
 
 element_table = [
     '', 'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
@@ -100,12 +103,39 @@ m['json_file']['model']['descriptor']
 return {*}
 author: wuxingxing
 '''
-def extract_model(nep_path:str):
+def energy_reference_export_state(state_dict, atom_types, metadata, selected_type=None):
+    """Fold per-element reference energy into an export-only state copy."""
+    active_type = validate_energy_reference_metadata(metadata)
+    target_type = normalize_lmdb_type(selected_type) if selected_type else active_type
+    state = dict(state_dict)
+    prefix = "module." if any(key.startswith("module.") for key in state) else ""
+    for index, atomic_number in enumerate(atom_types):
+        reference = reference_for_numbers(target_type, [atomic_number])
+        keys = (
+            f"{prefix}fitting_net.{index}.layers.1.bias",
+            f"{prefix}fitting_net.{index}.energy_head.bias",
+        )
+        key = next((key for key in keys if key in state), None)
+        if key is None:
+            raise ValueError(
+                f"cannot fold element reference into missing energy bias for atomic number {atomic_number}"
+            )
+        state[key] = state[key].clone() + reference
+    return state
+
+
+def extract_model(nep_path:str, selected_type=None):
     model = torch.load(nep_path, map_location=torch.device('cpu'), weights_only=False)
     model_type = model['json_file']['model_type']
     if model_type.upper() != "NEP":
         raise Exception("Error! the input model is not NEP model, please check the model!")
     model_atom_type = model['json_file']['atom_type']
+    metadata = model.get("energy_reference")
+    if metadata is not None:
+        model["state_dict"] = energy_reference_export_state(
+            model["state_dict"], model_atom_type, metadata, selected_type)
+    elif selected_type is not None:
+        raise ValueError("legacy checkpoint has no energy_reference metadata")
 
     if "max_NN_radial" in model['state_dict'].keys():
         max_NN_radial = model['state_dict']['max_NN_radial']
@@ -249,32 +279,45 @@ def extract_model(nep_path:str):
 
     return head_content, model_atom_type, atom_names
 
+def parse_nep_totxt_arguments(cmd_list):
+    if not cmd_list:
+        raise ValueError("totxt requires a checkpoint path")
+    checkpoint_path = cmd_list[0]
+    output_name = None
+    selected_type = None
+    for argument in cmd_list[1:]:
+        if argument.startswith("-"):
+            try:
+                parsed = normalize_lmdb_type(argument[1:])
+            except ValueError as exc:
+                raise ValueError(f"unknown totxt energy reference option: {argument}") from exc
+            if selected_type is not None:
+                raise ValueError("totxt energy reference type specified twice")
+            selected_type = parsed
+        elif output_name is None:
+            output_name = argument
+        else:
+            raise ValueError("totxt output name specified twice")
+    return checkpoint_path, output_name, selected_type
+
+
 def nep_ckpt_to_gpumd(cmd_list):
-    infos = "\n\nThis cmd is used to convert the nep_model.ckpt trained by MatPL to nep5.txt for Lammps or GPUMD !\n\n"
-    # infos += "This cmd requires installation of pytorch in your Python environment, and there is no mandatory version requirement.\n"
-    infos += "The command example 'MatPL totxt nep_model.ckpt'.\n\n"
-    print(infos)
-
-    nep_model_path = cmd_list[0]
-    if len(cmd_list) > 1:
-        save_name = cmd_list[1]
-    else:
-        model = torch.load(nep_model_path, map_location=torch.device('cpu'), weights_only=False)
-        descriptor_dict = model['json_file']['model']['descriptor']
-        save_name = "nep4.txt" if descriptor_dict.get("charge_mode", 0) and descriptor_dict.get("gpumd_nep4", False) else "nep5.txt"
-    # os.chdir("/data/home/wuxingxing/datas/pwmat_mlff_workdir/hfo2/nep_lkf/model_record")
-    # nep_model_path = "/data/home/wuxingxing/datas/pwmat_mlff_workdir/hfo2/nep_lkf/model_record/nep_model.ckpt"
-    # atom_types = [8, 72]
-    # atom_type_nums = [10, 10]
-    # save_name = "nep_to_gpumd.txt"
-
-    nep_content, model_atom_type, atom_names = extract_model(nep_model_path)
-    with open(save_name, 'w') as wf:
+    print("\nThis command converts a MatPL NEP checkpoint to GPUMD text.\n")
+    nep_model_path, save_name, selected_type = parse_nep_totxt_arguments(cmd_list)
+    model = torch.load(nep_model_path, map_location=torch.device("cpu"), weights_only=False)
+    if save_name is None:
+        descriptor = model["json_file"]["model"]["descriptor"]
+        version = "nep4" if descriptor.get("charge_mode", 0) and descriptor.get("gpumd_nep4", False) else "nep5"
+        metadata = model.get("energy_reference")
+        suffix = ""
+        if metadata is not None:
+            active = validate_energy_reference_metadata(metadata)
+            suffix = "_" + (selected_type or active)
+        save_name = version + suffix + ".txt"
+    nep_content, _, _ = extract_model(nep_model_path, selected_type=selected_type)
+    with open(save_name, "w", encoding="utf-8") as wf:
         wf.writelines(nep_content)
-    
-    print("Successfully converted from MatPL nep.model.ckpt to GPUMD nep.txt format!")
-    print("The result file is {}.".format(save_name))
-    
+    print(f"Successfully converted {nep_model_path} to {save_name}")
 
 def calculate_common_bias(model_bias:dict, input_type:list[int], atom_nums:list[int]):
     common_bias = 0
