@@ -4,14 +4,15 @@ from src.model.nep_fitting import FittingNet, QNEPFittingNet
 from src.model.nep_net import NEP
 
 
-def _make_nep(charge_mode, gpumd_nep4=False):
+def _make_nep(charge_mode, is_nep4=False):
     model = NEP.__new__(NEP)
     torch.nn.Module.__init__(model)
     model.dtype = torch.float64
     model.charge_mode = charge_mode
-    model.gpumd_nep4 = gpumd_nep4
+    model.is_nep4 = is_nep4
     model.q_scaler = torch.tensor([0.5, 1.5, -2.0], dtype=torch.float64)
-    model.common_bias = torch.nn.Parameter(torch.tensor(0.375, dtype=torch.float64))
+    model.common_bias = (torch.nn.Parameter(torch.tensor(0.375, dtype=torch.float64))
+                         if is_nep4 else None)
     model.fitting_net = torch.nn.ModuleList()
     for atom_type in range(3):
         torch.manual_seed(20260727 + atom_type + 10 * charge_mode)
@@ -24,7 +25,7 @@ def _make_nep(charge_mode, gpumd_nep4=False):
                 input_dim=3,
                 ener_shift=0.1 * (atom_type + 1),
                 charge_mode=2,
-                last_bias=not gpumd_nep4,
+                last_bias=not is_nep4,
             )
         else:
             fit_net = FittingNet(
@@ -34,13 +35,14 @@ def _make_nep(charge_mode, gpumd_nep4=False):
                 activation="tanh",
                 input_dim=3,
                 ener_shift=0.1 * (atom_type + 1),
+                last_bias=not is_nep4,
             )
         model.fitting_net.append(fit_net.double())
     return model
 
 
-def _compare_with_autograd(charge_mode, gpumd_nep4=False):
-    model = _make_nep(charge_mode=charge_mode, gpumd_nep4=gpumd_nep4)
+def _compare_with_autograd(charge_mode, is_nep4=False):
+    model = _make_nep(charge_mode=charge_mode, is_nep4=is_nep4)
     device = torch.device("cpu")
     imagetype_map = torch.tensor([0, 1, 0, 1, 1], dtype=torch.long)
     feats_scaled = torch.randn(5, 3, dtype=torch.float64, requires_grad=True)
@@ -67,8 +69,6 @@ def _compare_with_autograd(charge_mode, gpumd_nep4=False):
         loss = loss + charge.sum() + grad_q_scaled.square().sum()
     loss.backward()
     for name, param in model.named_parameters():
-        if name == "common_bias" and not gpumd_nep4:
-            continue
         if name.startswith("fitting_net.2."):
             continue
         assert param.grad is not None, name
@@ -83,8 +83,12 @@ def test_calculate_ei_with_grad_matches_autograd_for_charge_model():
     _compare_with_autograd(charge_mode=2)
 
 
-def test_calculate_ei_with_grad_keeps_gpumd_common_bias_behavior():
-    _compare_with_autograd(charge_mode=2, gpumd_nep4=True)
+def test_calculate_ei_with_grad_keeps_nep4_common_bias_behavior():
+    _compare_with_autograd(charge_mode=2, is_nep4=True)
+
+
+def test_calculate_ei_with_grad_keeps_noncharge_nep4_common_bias_behavior():
+    _compare_with_autograd(charge_mode=0, is_nep4=True)
 
 
 def test_calculate_ei_with_grad_uses_scaled_feature_convention():

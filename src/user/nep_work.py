@@ -14,6 +14,7 @@ from src.utils.file_operation import delete_tree, copy_tree, copy_file
 from src.utils.json_operation import get_parameter, get_required_parameter
 from src.utils.atom_type_emb_dict import get_atomic_number_from_name
 from src.utils.nep_to_gpumd import extract_model
+from src.utils.nep_model_type import nep_model_type_from_txt_header
 
 def _get_kspace_method(input_json: dict):
     kspace_method = get_parameter("kspace", input_json, None)
@@ -100,10 +101,11 @@ def nep_test(input_json: json, cmd:str):
     if model_load_path is None or not os.path.exists(model_load_path):
         raise Exception("Error! NEP test should have nep.txt files or nep_model.ckpt file!")
     input_dict = {}
-    input_dict["model_type"] = "NEP"
     # get atom_type from nep.txt file
     with open(model_load_path, 'r') as rf:
-        atom_type_str = rf.readline().split()[2:]
+        header = rf.readline()
+    input_dict["model_type"] = nep_model_type_from_txt_header(header)
+    atom_type_str = header.split()[2:]
     atom_type_list = get_atomic_number_from_name(atom_type_str)
     input_dict["atom_type"] = atom_type_list
     input_dict["nep_txt_file"] = model_load_path

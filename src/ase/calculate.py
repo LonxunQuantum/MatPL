@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from src.utils.file_operation import check_model_type
 from src.mods.infer import Inference
+from src.utils.nep_model_type import is_nep_model_type
 
 from ase.calculators.calculator import (
     Calculator,
@@ -39,7 +40,7 @@ class MatPL_calculator(Calculator):
         Calculator.__init__(self, **kwargs)
         # load model cpkts or txt
         model_type = check_model_type(model_load_path=model_file)
-        if model_type not in ["DP", "NEP"]:
+        if model_type != "DP" and not is_nep_model_type(model_type):
             raise Exception("Error! The input model type is {}! Only support DP or NEP model!".format(model_type))
         self.model_type = model_type
         
@@ -72,7 +73,7 @@ class MatPL_calculator(Calculator):
                         cart_postions = atoms.get_positions(),
                         symbols = self.atoms.get_chemical_symbols()
                         )
-        if self.model_type == "NEP":
+        if is_nep_model_type(self.model_type):
             Etot, Ei, Force, Virial, charge, bec = self.calc.ase_nep_infer(lattice = np.array(atoms.cell),
                         cart_postions = atoms.get_positions(),
                         symbols = self.atoms.get_chemical_symbols()

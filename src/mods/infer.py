@@ -12,6 +12,7 @@ from src.pre_data.dpuni_data_loader import find_neighbore
 from pwdata import Config
 from src.utils.nep_to_gpumd import extract_model, get_atomic_number_from_name
 from src.user.convert_model import get_model_type, is_nep_txt, is_nep_ckpt
+from src.utils.nep_model_type import is_nep_model_type
 
 def _get_image_total_charge(image, default_total_charge=0.0):
     charge = getattr(image, "charge", None)
@@ -57,7 +58,7 @@ class Inference(object):
         if self.model_type == "DP":
             self.model, self.input_param = self.load_dp_model(ckpt_file)
             self.model_atom_type = self.model.atom_type
-        elif self.model_type == "NEP":
+        elif is_nep_model_type(self.model_type):
             if is_nep_ckpt(ckpt_file):
                 nep_content, self.model_atom_type, atom_names = extract_model(ckpt_file)
                 self.model_atom_type = get_atomic_number_from_name(atom_names)

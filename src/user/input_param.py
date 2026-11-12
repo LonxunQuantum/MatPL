@@ -9,6 +9,7 @@ from src.user.work_file_param import WorkFileStructure
 from src.user.nn_feature_type import Descriptor
 
 from src.user.nep_param import NepParam
+from src.utils.nep_model_type import is_nep_model_type, nep_model_settings
 '''
 description: 
     covert the input json file to class
@@ -32,7 +33,7 @@ class InputParam(object):
         self.model_type = get_required_parameter("model_type", json_input).upper()
         # self.atom_type = get_required_parameter("atom_type", json_input)
         self.atom_type = get_atomic_name_from_str(get_required_parameter("atom_type", json_input))
-        if self.model_type == "NEP":
+        if is_nep_model_type(self.model_type):
             self.atom_type = validate_nep_atom_types(self.atom_type)
         self.model_num = get_parameter("model_num", json_input, 1)
         self.recover_train = get_parameter("recover_train", json_input, True)
@@ -46,7 +47,7 @@ class InputParam(object):
         if self.inference and self.model_type in ["NN", "LINEAR"]:
             self.file_paths.nn_work = os.path.join(self.file_paths.json_dir, "work_test_dir")
 
-        if self.model_type in ["DP", "NN", "NEP", "LINEAR", "CHEBY"]:
+        if self.model_type in ["DP", "NN", "LINEAR", "CHEBY"] or is_nep_model_type(self.model_type):
             self.set_model_init_params(json_input)
             self.set_default_multi_gpu_info(json_input)
             # set optimizer
@@ -95,6 +96,10 @@ class InputParam(object):
         nep_txt_file = get_parameter("nep_txt_file", json_input, None)
         if nep_txt_file is not None:
             nep_param.set_nep_nn_c_param_from_nep_txt(nep_txt_file, self.atom_type)
+            version, charge_mode = nep_model_settings(self.model_type)
+            if (nep_param.version, nep_param.charge_mode) != (version, charge_mode):
+                raise ValueError(
+                    f"model_type {self.model_type} does not match {nep_txt_file} header")
         else:
             nep_param.set_nep_param_from_json(json_input, self.atom_type)
         # if fixed
@@ -107,8 +112,6 @@ class InputParam(object):
         self.descriptor.l_max = nep_param.l_max
         self.descriptor.zbl = nep_param.zbl
         self.descriptor.use_typewise_cutoff_zbl = nep_param.use_typewise_cutoff_zbl
-        self.descriptor.charge_mode = nep_param.charge_mode
-        self.descriptor.gpumd_nep4 = nep_param.gpumd_nep4
         # self.descriptor.type_weight = nep_param.type_weight
 
 
@@ -161,7 +164,7 @@ class InputParam(object):
             self.is_dfeat_sparse = get_parameter("is_dfeat_sparse", json_input, False)  #'true' not realized
         elif self.model_type == "Linear".upper():
             pass
-        elif self.model_type == "NEP".upper():
+        elif is_nep_model_type(self.model_type):
             self.set_nep_params(json_input)
             self.file_paths.set_nep_native_file_paths()
         elif self.model_type == "CHEBY".upper():
@@ -190,7 +193,7 @@ class InputParam(object):
         # dist training by horovod, when multi GPU train, need True,
         self.hvd = get_parameter("hvd", json_input, False) # 本身不支持hvd，所以不需要设置
         self.device = get_parameter("device", json_input, "auto")
-        self.dist_backend = get_parameter("dist_backend", json_input, "auto" if self.model_type == "NEP" else "nccl")
+        self.dist_backend = get_parameter("dist_backend", json_input, "auto" if is_nep_model_type(self.model_type) else "nccl")
         # self.dist_socket_ifname = get_parameter("dist_backend_ifname", json_input, "eth0")
         self.distributed = get_parameter("distributed", json_input, False)
         self.master_addr = get_parameter("master_addr", json_input, None)
@@ -308,12 +311,12 @@ class InputParam(object):
         params_dict = {}
         params_dict["model_type"] = self.model_type
         params_dict["atom_type"] = self.atom_type
-        if self.model_type == "NEP":
+        if is_nep_model_type(self.model_type):
             if self.device != "auto":
                 params_dict["device"] = self.device
             if self.dist_backend != "auto":
                 params_dict["dist_backend"] = self.dist_backend
-        if self.model_type !="NEP":
+        if not is_nep_model_type(self.model_type):
             params_dict["max_neigh_num"] = self.max_neigh_num
         if self.seed is not None:
             params_dict["seed"] = self.seed
@@ -346,14 +349,14 @@ class InputParam(object):
             params_dict["recover_train"] = self.recover_train
         
         params_dict["model"] = {}
-        if self.model_type in ["DP", "NN", "LINEAR", "CHEBY", "NEP"]:
+        if self.model_type in ["DP", "NN", "LINEAR", "CHEBY"] or is_nep_model_type(self.model_type):
             params_dict["model"]["descriptor"] = self.descriptor.to_dict()
 
             if self.model_type == "Linear".upper():
                 params_dict["optimizer"] = self.optimizer_param.to_linear_dict()
             else:
                 params_dict["model"]["fitting_net"] = self.model_param.fitting_net.to_dict_std()
-                if (self.model_type == "NEP" and
+                if (is_nep_model_type(self.model_type) and
                         self.nep_param.use_analytical_nep_grad is False):
                     params_dict["model"]["fitting_net"]["use_analytical_nep_grad"] = False
                 params_dict["optimizer"] = self.optimizer_param.to_dict()

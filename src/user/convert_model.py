@@ -1,4 +1,5 @@
 import torch
+from src.utils.nep_model_type import is_nep_model_type, nep_model_type_from_txt_header
 # import os
 # import numpy as np
 # from src.user.input_param import InputParam
@@ -158,22 +159,19 @@ def get_model_type(model_load_path):
             return "DP"
         elif model_type == "NN":
             return "NN"
-        elif model_type == "NEP":
-            return "NEP"
+        elif is_nep_model_type(model_type):
+            return model_type.upper()
         return None
     except Exception as e:
         with open(model_load_path, 'r') as rf:
             line = rf.readline()
-        if "nep" in line:
-            return "NEP"
-        else:
-            raise Exception("ERROR! The input model file cannot be parsed!")
+        return nep_model_type_from_txt_header(line)
 
 def is_nep_ckpt(model_load_path):
     try:
         _model_checkpoint = torch.load(model_load_path, map_location=torch.device("cpu"), weights_only=False)
         model_type = _model_checkpoint['json_file']['model_type']
-        if model_type == "NEP":
+        if is_nep_model_type(model_type):
             return True
     except Exception as e:
         with open(model_load_path, 'r') as rf:

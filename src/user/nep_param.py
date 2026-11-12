@@ -3,6 +3,7 @@ import numpy as np
 from src.utils.atom_type_emb_dict import element_table
 from src.utils.json_operation import get_parameter
 from src.utils.nep_to_gpumd import get_atomic_name_from_str
+from src.utils.nep_model_type import nep_model_settings
 from src.utils.nep_limits import (
     MIN_DESCRIPTOR_SIZE, MAX_DESCRIPTOR_SIZE, MIN_HIDDEN_NEURONS,
     MAX_HIDDEN_NEURONS, MAX_FEATURES, MAX_ANGULAR_FEATURES, SUPPORTED_L_MAX,
@@ -48,20 +49,6 @@ class NepParam(object):
         self.charge_output_num = 1
         self.sqrt_epsilon_inf = None
         self.fixed_sqrt_epsilon_inf = None
-        self.gpumd_nep4 = False
-
-    def normalize_charge_mode_from_json(self, charge_mode):
-        if charge_mode is None or charge_mode is False:
-            return None
-        if charge_mode is True:
-            return 2
-        if isinstance(charge_mode, str):
-            if charge_mode.lower() == "false":
-                return None
-            charge_mode = int(charge_mode)
-        if charge_mode != 2:
-            raise Exception("ERROR! charge_mode only supports 2 now. Use \"charge_mode\": 2 or \"charge_mode\": true.")
-        return 2
 
     def normalize_charge_mode_from_nep_txt(self, charge_mode):
         charge_mode = int(charge_mode)
@@ -86,9 +73,9 @@ class NepParam(object):
 
         line_1 = lines[0].split()
         version, type_num, type_list = line_1[0], int(line_1[1]), line_1[2:]
+        self.version = int(version[3])
         self.charge_mode = 0
         self.sqrt_epsilon_inf = None
-        self.gpumd_nep4 = False
         if "charge" in version:
             charge_token = version.split("charge")[-1]
             self.charge_mode = self.normalize_charge_mode_from_nep_txt(charge_token)
@@ -164,7 +151,6 @@ class NepParam(object):
             is_gpumd_nep = False if need_line == line_num else True  #元素类型只有1个，可以认为是nep5
         else:
             is_gpumd_nep = False
-        self.gpumd_nep4 = bool(self.charge_mode and "4" in version and is_gpumd_nep)
         
         nep5_bias = []
         for i in range(0, self.type_num):
@@ -280,7 +266,8 @@ class NepParam(object):
         descriptor_dict = get_parameter("descriptor", model_dict, {})
         # optimizer_dict = get_parameter("optimizer", json_dict, {})
 
-        self.version = 5
+        self.version, self.charge_mode = nep_model_settings(
+            get_parameter("model_type", json_dict, "NEP"))
         type_str = self.set_atom_type(type_list)
         self.type = type_str # number of atom types and list of chemical species
         self.type_num = len(type_list)
@@ -288,11 +275,7 @@ class NepParam(object):
         self.type_weight = get_parameter("type_weight", descriptor_dict, type_list_weight_default) # force weights for different atom types
         self.model_type = 0 # select to train potential 0, dipole 1, or polarizability 2
         self.prediction = 0 # select between training and prediction (inference)
-        self.charge_mode = self.normalize_charge_mode_from_json(get_parameter("charge_mode", descriptor_dict, None))
         self.charge_output_num = 2 if self.charge_mode else 1
-        self.gpumd_nep4 = get_parameter("gpumd_nep4", descriptor_dict, False)
-        if self.gpumd_nep4 and not self.charge_mode:
-            raise Exception("ERROR! gpumd_nep4 can only be used with charge_mode.")
         self.zbl = get_parameter("zbl", descriptor_dict, None)
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
         if self.zbl is None and self.use_typewise_cutoff_zbl is not None:

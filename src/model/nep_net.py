@@ -16,6 +16,7 @@ from src.utils.op_loader import load_calc_ops
 sys.path.append(os.getcwd())
 from src.model.nep_fitting import FittingNet, QNEPFittingNet
 from src.model.nep_fused_fitting import fused_fitting, fused_charge_fitting, pack_fitting_parameters
+from src.utils.nep_model_type import nep_model_settings
 
 
 class _SegmentSum(torch.autograd.Function):
@@ -148,11 +149,11 @@ class NEP(nn.Module):
         self.Pi = PI
         self.half_Pi = self.Pi/2
         self.model_type = input_param.model_type.upper()
+        self.nep_version, self.charge_mode = nep_model_settings(self.model_type)
+        self.is_nep4 = self.nep_version == 4
         self.set_init_nep_param(input_param)
-        self.charge_mode = getattr(input_param.nep_param, "charge_mode", 0) or 0
         self.charge_output_num = 2 if self.charge_mode else 1
         self.use_analytical_nep_grad = bool(getattr(input_param.nep_param, "use_analytical_nep_grad", False))
-        self.gpumd_nep4 = bool(getattr(input_param.nep_param, "gpumd_nep4", False))
         self.zbl = input_param.nep_param.zbl
         self.zbl_factor = input_param.nep_param.use_typewise_cutoff_zbl
         if self.input_param.precision == "float64":
@@ -186,18 +187,20 @@ class NEP(nn.Module):
         self.atomic_bec = None
         fitting_network_size = list(self.neuron[:-1]) + [1]
         qnep_network_size = list(self.neuron[:-1])
-        if self.charge_mode:
+        if self.is_nep4:
             common_bias_value = float(np.mean(energy_shift))
-            sqrt_epsilon_inf_value = 2.0
             if input_param.nep_param.c2_param is not None:
                 bias_lastlayer = np.asarray(input_param.nep_param.bias_lastlayer)
                 if bias_lastlayer.ndim > 1:
                     common_bias_value = float(np.mean(bias_lastlayer[:, 0]))
                 else:
                     common_bias_value = float(np.mean(bias_lastlayer))
+            self.common_bias = torch.nn.Parameter(torch.tensor(common_bias_value, dtype=self.dtype), requires_grad=True)
+        if self.charge_mode:
+            sqrt_epsilon_inf_value = 2.0
+            if input_param.nep_param.c2_param is not None:
                 if getattr(input_param.nep_param, "sqrt_epsilon_inf", None) is not None:
                     sqrt_epsilon_inf_value = float(input_param.nep_param.sqrt_epsilon_inf)
-            self.common_bias = torch.nn.Parameter(torch.tensor(common_bias_value, dtype=self.dtype), requires_grad=True)
             self._configure_sqrt_epsilon_inf(
                 sqrt_epsilon_inf_value,
                 fixed_sqrt_epsilon_inf=getattr(
@@ -219,7 +222,7 @@ class NEP(nn.Module):
                                                     charge_mode = self.charge_mode,
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
-                                                    last_bias= not self.gpumd_nep4,
+                                                    last_bias= not self.is_nep4,
                                                     ))
             else:
                 self.fitting_net.append(FittingNet(network_size   = fitting_network_size, #[50, output_num]
@@ -230,7 +233,7 @@ class NEP(nn.Module):
                                                     ener_shift= energy_shift[i],
                                                     magic     = False,
                                                     nep_txt_param = nep_txt_param,
-                                                    last_bias= True,
+                                                    last_bias= not self.is_nep4,
                                                     #    self.nep_param["net_cfg"]["fitting_net"]["resnet_dt"],
                                                     #    self.nep_param["net_cfg"]["fitting_net"]["activation"], 
                                                     ))
@@ -284,19 +287,14 @@ class NEP(nn.Module):
     '''    
     def get_nn_params(self):
         nn_params = []
-        type_bias = []
         for i in range(self.ntypes):
             params, last_bias = self.fitting_net[i].get_param_list()
             nn_params.extend(params)
-            if self.charge_mode and not self.gpumd_nep4:
+            if not self.is_nep4:
                 nn_params.extend(last_bias)
-            elif len(last_bias) > 0:
-                type_bias.extend(last_bias)
         if self.charge_mode:
             nn_params.append(float(self.sqrt_epsilon_inf.cpu().detach().numpy()))
-            nn_params.append(float(-self.common_bias.cpu().detach().numpy()) if self.gpumd_nep4 else 0.0)
-        else:
-            nn_params.extend(type_bias) # for new nep.txt test
+        nn_params.append(float(-self.common_bias.cpu().detach().numpy()) if self.is_nep4 else 0.0)
         nn_params.extend(list(self.c_param_2.permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
         if self.l_max_3b > 0:
             nn_params.extend(list(self.c_param_3.permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
@@ -1245,7 +1243,7 @@ class NEP(nn.Module):
                 charge[mask] = charge_ntype.reshape(-1)
             else:
                 Ei[mask] = output_ntype.reshape(-1)
-        if self.charge_mode and self.gpumd_nep4:
+        if self.is_nep4:
             Ei = Ei + self.common_bias
         return Ei, charge
 
@@ -1267,7 +1265,7 @@ class NEP(nn.Module):
                 parameters = pack_fitting_parameters(self.fitting_net, fitting_groups.type_ids)
                 outputs, input_grads = fused_fitting(feats_scaled, *parameters, fitting_groups)
                 Ei, charge, grad_e, grad_q = outputs[0], None, input_grads[0], None
-            if self.charge_mode and self.gpumd_nep4:
+            if self.is_nep4:
                 Ei = Ei + self.common_bias
             # Every head retains the full [N,D] row stride required by the
             # existing radial/angular descriptor gradient kernels.
@@ -1299,7 +1297,7 @@ class NEP(nn.Module):
                 Ei[mask] = energy_ntype.reshape(-1)
                 grad_feat_E_scaled[indices, :] = grad_e_ntype
 
-        if self.charge_mode and self.gpumd_nep4:
+        if self.is_nep4:
             Ei = Ei + self.common_bias
         return Ei, charge, grad_feat_E_scaled, grad_feat_Q_scaled
 

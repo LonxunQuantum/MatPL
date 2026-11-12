@@ -10,6 +10,7 @@ def _make_nep(train_2b=True, l_max_3b=0):
     torch.nn.Module.__init__(model)
     model.train_2b = train_2b
     model.l_max_3b = l_max_3b
+    model.is_nep4 = False
     return model
 
 
@@ -83,7 +84,6 @@ def test_radial_analytical_force_matches_autograd_on_gpu_backend():
     model = _make_nep(train_2b=True, l_max_3b=0)
     model.dtype = dtype
     model.charge_mode = 0
-    model.gpumd_nep4 = False
     model.two_feat_num = 2
     model.multi_feat_num = 0
     model.q_scaler = torch.tensor([0.7, -1.3], dtype=dtype, device=device)

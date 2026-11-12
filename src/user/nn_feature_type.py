@@ -1,5 +1,6 @@
 import numpy as np
 from src.utils.json_operation import get_parameter, get_required_parameter
+from src.utils.nep_model_type import is_nep_model_type
 
 class Descriptor(object):
     def __init__(self, json_input:dict, model_type:str, cmd:str, feature_type:list=None, type_embedding:bool=False) -> None:
@@ -72,8 +73,6 @@ class Descriptor(object):
         self.basis_size = None
         self.l_max = None
         self.type_weight = None
-        self.charge_mode = None
-        self.gpumd_nep4 = False
     '''
     description: 
     the return dict is used to assignment for value Ftype1_para in dfault_param.py
@@ -294,7 +293,7 @@ class Descriptor(object):
             dicts["cheby_order"] = self.cheby_order
             dicts["radial_num1"] = self.radial_num1
             dicts["radial_num2"] = self.radial_num2
-        elif self.model_type.upper() == "NEP":
+        elif is_nep_model_type(self.model_type):
             dicts["cutoff"] = self.cutoff
             if self.zbl is not None:
                 dicts["zbl"] = self.zbl
@@ -303,10 +302,6 @@ class Descriptor(object):
             dicts["n_max"] = self.n_max
             dicts["basis_size"] = self.basis_size
             dicts["l_max"] = self.l_max
-            if self.charge_mode is not None:
-                dicts["charge_mode"] = self.charge_mode
-            if self.gpumd_nep4:
-                dicts["gpumd_nep4"] = self.gpumd_nep4
             # dicts["type_weight"] = self.type_weight
         else:
             raise Exception("descriptor to dict: the model type not realized:{}".format(self.model_type))

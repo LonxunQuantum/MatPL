@@ -8,16 +8,17 @@ import numpy as np
 import torch
 
 
-def make_small_model(charge=False, device='cuda', hidden=33, gpumd=None):
+def make_small_model(charge=False, device='cuda', hidden=33, shared_bias=None):
     from src.user.input_param import InputParam
     from src.model.nep_net import NEP
+    if shared_bias is None:
+        shared_bias = charge
+    model_type = ('NEP4' if shared_bias else 'NEP') + ('_charge2' if charge else '')
     config = {
-        'model_type': 'NEP', 'atom_type': [1, 8, 29], 'seed': 123,
+        'model_type': model_type, 'atom_type': [1, 8, 29], 'seed': 123,
         'precision': 'float64', 'recover_train': False,
         'model': {'descriptor': {'cutoff': [5.0, 4.0], 'n_max': [4, 4],
-                  'basis_size': [4, 4], 'l_max': [4, 2, 1], 'zbl': 1.4,
-                  'charge_mode': 2 if charge else False,
-                  'gpumd_nep4': bool(charge) if gpumd is None else gpumd},
+                  'basis_size': [4, 4], 'l_max': [4, 2, 1], 'zbl': 1.4},
                   'fitting_net': {'network_size': ([hidden] if isinstance(hidden, int) else list(hidden)) + [1]}},
         'optimizer': {'optimizer': 'ADAM', 'train_energy': True, 'train_force': True},
     }
@@ -95,10 +96,10 @@ class TestFusedFallback(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), 'requires a Slurm GPU allocation')
 class TestFusedTraining(unittest.TestCase):
-    def compare_step(self, charge):
+    def compare_step(self, charge, shared_bias=None):
         from src.model import nep_net
         from src.model.nep_fused_fitting import fused_fitting, fused_charge_fitting
-        old = make_small_model(charge)
+        old = make_small_model(charge, shared_bias=shared_bias)
         new = copy.deepcopy(old)
         sample = make_small_sample()
         neighbors = neighbor_inputs(old, sample)
@@ -133,7 +134,7 @@ class TestFusedTraining(unittest.TestCase):
         buffer = io.BytesIO()
         torch.save(new.state_dict(), buffer)
         buffer.seek(0)
-        restored = make_small_model(charge)
+        restored = make_small_model(charge, shared_bias=shared_bias)
         restored.load_state_dict(torch.load(buffer))
         self.assertEqual(new.get_nn_params(), restored.get_nn_params())
         return new, sample, neighbors
@@ -144,9 +145,15 @@ class TestFusedTraining(unittest.TestCase):
     def test_charge_bec_and_shared_bias_gradients_match_original(self):
         self.compare_step(True)
 
+    def test_noncharge_nep4_shared_bias_matches_original(self):
+        self.compare_step(False, shared_bias=True)
+
+    def test_nep5_charge2_per_element_bias_matches_original(self):
+        self.compare_step(True, shared_bias=False)
+
     def test_charge_only_step_preserves_unused_energy_head_and_adam_moments(self):
         from src.model.nep_fused_fitting import build_fitting_groups
-        model = make_small_model(charge=True, gpumd=False)
+        model = make_small_model(charge=True, shared_bias=False)
         baseline = copy.deepcopy(model)
         types = torch.tensor([1, 0, 1], device='cuda')
         groups = build_fitting_groups(types.cpu()).to('cuda')

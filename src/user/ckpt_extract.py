@@ -5,6 +5,7 @@ from src.PWMLFF.dp_network import dp_network
 from src.PWMLFF.nep_network import nep_network
 from src.PWMLFF.dp_param_extract import extract_force_field as dp_extract_force_field
 from src.PWMLFF.nn_param_extract import extract_force_field as nn_extract_force_field
+from src.utils.nep_model_type import is_nep_model_type
 
 def extract_force_field(ckpt_file, cmd_type):
     #json_file
@@ -27,7 +28,7 @@ def script_model(ckpt_file, script_save_name:None):
     model_type = model_checkpoint["json_file"]["model_type"].upper()
     if model_type == "DP":
         script_dp_model(model_checkpoint, ckpt_file, script_save_name)
-    elif model_type == "NEP":
+    elif is_nep_model_type(model_type):
         script_nep_model(model_checkpoint, ckpt_file, script_save_name)
 
 def script_dp_model(model_checkpoint, ckpt_file, script_save_name:None):

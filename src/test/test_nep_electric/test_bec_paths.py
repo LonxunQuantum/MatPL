@@ -10,9 +10,9 @@ def _make_charge_nep():
     torch.nn.Module.__init__(model)
     model.train_2b = True
     model.l_max_3b = 0
+    model.is_nep4 = False
     model.dtype = torch.float64
     model.charge_mode = 2
-    model.gpumd_nep4 = False
     model.two_feat_num = 2
     model.multi_feat_num = 0
     model._set_sqrt_epsilon_inf(torch.tensor(1.7, dtype=torch.float64))
@@ -139,13 +139,13 @@ def test_angular_analytical_bec_parameter_grad_matches_autograd_on_cuda():
     dtype = torch.float64
     model = NEP.__new__(NEP)
     torch.nn.Module.__init__(model)
+    model.is_nep4 = False
     model.train_2b = False
     model.l_max_3b = 4
     model.l_max_4b = 2
     model.l_max_5b = 1
     model.dtype = dtype
     model.charge_mode = 2
-    model.gpumd_nep4 = False
     model.two_feat_num = 0
     model.multi_feat_num = 30
     model._set_sqrt_epsilon_inf(torch.tensor(1.3, dtype=dtype, device=device))

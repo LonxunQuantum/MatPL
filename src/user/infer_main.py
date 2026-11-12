@@ -5,6 +5,7 @@ import glob
 import numpy as np
 from pwdata import Config
 from src.utils.nep_to_gpumd import get_atomic_name_from_number, check_atom_type_name
+from src.utils.nep_model_type import is_nep_model_type
 
 def _extract_infer_options(args: list[str]):
     valid_methods = ["ewald", "pppm"]
@@ -96,7 +97,7 @@ def infer_main(sys_cmd:list[str]):
         image_read = Config(data_path=traj, format=format, atom_names=atom_types).images
         if infer.model_type == "DP":
             infer.inference(image_read)
-        elif infer.model_type == "NEP":
+        elif is_nep_model_type(infer.model_type):
             infer.inference_nep_txt(image_read, kspace_method=kspace_method, total_charge=total_charge)
 
 def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list[str]=None):
@@ -146,7 +147,7 @@ def model_devi(ckpt_file_list, structure_dir, format, save_path, atom_names:list
             Etot_i[id] = []
             if model.model_type == "DP":
                 _etot_list, _ei_list, _force_list, _virial_list = model.inference(image_read, do_deviation=True)
-            elif model.model_type == "NEP":
+            elif is_nep_model_type(model.model_type):
                 _etot_list, _ei_list, _force_list, _virial_list = model.inference_nep_txt(image_read, do_deviation=True)
             
             for idj in range(0, len(_etot_list)):

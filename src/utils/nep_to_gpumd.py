@@ -1,6 +1,7 @@
 import torch
 import os 
 import sys
+from src.utils.nep_model_type import nep_model_settings
 
 element_table = [
     '', 'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
@@ -103,8 +104,8 @@ author: wuxingxing
 def extract_model(nep_path:str):
     model = torch.load(nep_path, map_location=torch.device('cpu'), weights_only=False)
     model_type = model['json_file']['model_type']
-    if model_type.upper() != "NEP":
-        raise Exception("Error! the input model is not NEP model, please check the model!")
+    version, charge_mode = nep_model_settings(model_type)
+    is_nep4 = version == 4
     model_atom_type = model['json_file']['atom_type']
 
     if "max_NN_radial" in model['state_dict'].keys():
@@ -134,12 +135,8 @@ def extract_model(nep_path:str):
     atom_names = get_atomic_name_from_number(model_atom_type)
 
     descriptor_dict = model['json_file']['model']['descriptor']
-    charge_mode = descriptor_dict.get('charge_mode', 0)
-    if charge_mode:
-        assert charge_mode == 2
     charge_suffix = f"_charge{charge_mode}" if charge_mode else ""
-    gpumd_nep4 = bool(descriptor_dict.get("gpumd_nep4", False))
-    version_suffix = "nep4" if (charge_mode and gpumd_nep4) else "nep5"
+    version_suffix = f"nep{version}"
     charge_output_num = 2 if charge_mode else 1
     zbl = descriptor_dict['zbl'] if 'zbl' in descriptor_dict.keys() else None
     if zbl is None:
@@ -171,47 +168,31 @@ def extract_model(nep_path:str):
     else:
         module = ""
         q_list.extend(list(model['q_scaler']))
-    qnep_common_bias = None
-    if charge_mode:
-        common_bias_key = f'{module}common_bias'
-        if common_bias_key in model['state_dict']:
-            qnep_common_bias = -float(model['state_dict'][common_bias_key].cpu().detach().numpy())
-    type_energy_bias = []
     for i in range(0, len(model_atom_type)):
         nn_list.extend(list(model['state_dict'][f'{module}fitting_net.{i}.layers.0.weight'].transpose(1, 0).flatten().cpu().detach().numpy()))
         nn_list.extend((-model['state_dict'][f'{module}fitting_net.{i}.layers.0.bias']).flatten().cpu().detach().numpy())
-        qnep_energy_head_key = f'{module}fitting_net.{i}.energy_head.weight'
-        if charge_mode and qnep_energy_head_key in model['state_dict']:
-            energy_weight = model['state_dict'][qnep_energy_head_key]
+        if charge_mode:
+            energy_weight = model['state_dict'][f'{module}fitting_net.{i}.energy_head.weight']
             charge_weight = model['state_dict'][f'{module}fitting_net.{i}.charge_head.weight']
             nn_list.extend(energy_weight.flatten().cpu().detach().numpy())
             nn_list.extend(charge_weight.flatten().cpu().detach().numpy())
-            energy_bias = model['state_dict'].get(f'{module}fitting_net.{i}.energy_head.bias')
-            if energy_bias is not None:
-                bias_values = (-energy_bias).flatten().cpu().detach().numpy()
-                type_energy_bias.extend(bias_values)
-                if not gpumd_nep4:
-                    nn_list.extend(bias_values)
+            if not is_nep4:
+                energy_bias = model['state_dict'][f'{module}fitting_net.{i}.energy_head.bias']
+                nn_list.extend((-energy_bias).flatten().cpu().detach().numpy())
         else:
             output_weight = model['state_dict'][f'{module}fitting_net.{i}.layers.1.weight']
-            output_bias = model['state_dict'][f'{module}fitting_net.{i}.layers.1.bias']
             nn_list.extend(output_weight.flatten().cpu().detach().numpy())
-            nn_list.extend((-output_bias).flatten().cpu().detach().numpy())
-    # W_Tn sqrt_epsilon_inf common_bias c2...
-    sqrt_epsilon_inf = 2.0
+            if not is_nep4:
+                output_bias = model['state_dict'][f'{module}fitting_net.{i}.layers.1.bias']
+                nn_list.extend((-output_bias).flatten().cpu().detach().numpy())
+    # NEP4: one shared energy bias after all element networks.
+    # Charge2: sqrt_epsilon_inf precedes that shared bias.
     if charge_mode:
-        sqrt_key = f'{module}sqrt_epsilon_inf'
-        if sqrt_key in model['state_dict']:
-            sqrt_epsilon_inf = float(model['state_dict'][sqrt_key].cpu().detach().numpy())
-    nn_list.append(sqrt_epsilon_inf if charge_mode else 0.0) # sqrt_epsilon_inf for charge mode, common bias placeholder otherwise
-    if charge_mode:
-        if gpumd_nep4:
-            if qnep_common_bias is not None:
-                nn_list.append(qnep_common_bias)
-            else:
-                nn_list.append(float(sum(type_energy_bias) / len(type_energy_bias)) if len(type_energy_bias) > 0 else 0.0)
-        else:
-            nn_list.append(0.0)
+        nn_list.append(float(model['state_dict'][f'{module}sqrt_epsilon_inf'].cpu().detach().numpy()))
+    if is_nep4:
+        nn_list.append(-float(model['state_dict'][f'{module}common_bias'].cpu().detach().numpy()))
+    else:
+        nn_list.append(0.0)
     c_list.extend(list(model['state_dict'][f'{module}c_param_2'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
     if l_max[0] > 0:
         c_list.extend(list(model['state_dict'][f'{module}c_param_3'].permute(2, 3, 0, 1).flatten().cpu().detach().numpy()))
@@ -233,14 +214,10 @@ def extract_model(nep_path:str):
         assert len(c_list) == two_c_num + three_c_num
     else:
         assert len(c_list) == two_c_num
-    has_qnep_heads = charge_mode and f'{module}fitting_net.0.energy_head.weight' in model['state_dict']
-    if has_qnep_heads:
-        nn_params = len(model_atom_type) * (feature_nums * ann + ann + ann * charge_output_num)
-        if charge_mode and not gpumd_nep4:
-            nn_params += len(model_atom_type)
-    else:
-        nn_params = len(model_atom_type) * (feature_nums * ann + ann + ann * charge_output_num + charge_output_num)
-    assert len(nn_list) == nn_params + (2 if charge_mode else 1)
+    nn_params = len(model_atom_type) * (
+        feature_nums * ann + ann + ann * charge_output_num + (0 if is_nep4 else 1)
+    ) + (2 if charge_mode else 1)
+    assert len(nn_list) == nn_params
     head_content += "\n".join(map(str, nn_list))
     head_content += "\n"
     head_content += "\n".join(map(str, c_list))
@@ -250,7 +227,7 @@ def extract_model(nep_path:str):
     return head_content, model_atom_type, atom_names
 
 def nep_ckpt_to_gpumd(cmd_list):
-    infos = "\n\nThis cmd is used to convert the nep_model.ckpt trained by MatPL to nep5.txt for Lammps or GPUMD !\n\n"
+    infos = "\n\nConvert a MatPL NEP checkpoint to a GPUMD nep4.txt or nep5.txt force field.\n\n"
     # infos += "This cmd requires installation of pytorch in your Python environment, and there is no mandatory version requirement.\n"
     infos += "The command example 'MatPL totxt nep_model.ckpt'.\n\n"
     print(infos)
@@ -260,8 +237,8 @@ def nep_ckpt_to_gpumd(cmd_list):
         save_name = cmd_list[1]
     else:
         model = torch.load(nep_model_path, map_location=torch.device('cpu'), weights_only=False)
-        descriptor_dict = model['json_file']['model']['descriptor']
-        save_name = "nep4.txt" if descriptor_dict.get("charge_mode", 0) and descriptor_dict.get("gpumd_nep4", False) else "nep5.txt"
+        version, _ = nep_model_settings(model['json_file']['model_type'])
+        save_name = f"nep{version}.txt"
     # os.chdir("/data/home/wuxingxing/datas/pwmat_mlff_workdir/hfo2/nep_lkf/model_record")
     # nep_model_path = "/data/home/wuxingxing/datas/pwmat_mlff_workdir/hfo2/nep_lkf/model_record/nep_model.ckpt"
     # atom_types = [8, 72]

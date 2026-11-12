@@ -2,6 +2,7 @@ import json
 import os
 from src.utils.json_operation import get_parameter, get_required_parameter
 from src.utils.file_operation import is_alive_atomic_energy
+from src.utils.nep_model_type import is_nep_model_type
 
 class WorkFileStructure(object):
     '''
@@ -126,7 +127,7 @@ class WorkFileStructure(object):
             model_name = get_parameter("model_name", json_input, "nn_model.ckpt")
         elif self.model_type == "DP":
             model_name = get_parameter("model_name", json_input, "dp_model.ckpt")
-        elif self.model_type == "NEP":
+        elif is_nep_model_type(self.model_type):
             model_name = get_parameter("model_name", json_input, "nep_model.ckpt")
         elif self.model_type == "CHEBY":
             model_name = get_parameter("model_name", json_input, "chey_model.ckpt")

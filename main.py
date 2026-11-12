@@ -8,6 +8,7 @@ from src.user.dp_work import dp_train, dp_test
 # from src.user.cheby_work import cheby_train, cheby_test
 from src.user.envs import comm_info, matpl_help
 from src.utils.json_operation import get_parameter, get_required_parameter
+from src.utils.nep_model_type import is_nep_model_type
 from src.user.ckpt_extract import extract_force_field, script_model
 from src.user.ckpt_compress import compress_force_field
 from src.user.infer_main import infer_main, model_devi
@@ -116,7 +117,7 @@ if __name__ == "__main__":
                 elif model_type == "Linear".upper():
                     from src.user.linear_work import linear_train
                     linear_train(json_file, cmd_type)
-                elif model_type == "NEP".upper():
+                elif is_nep_model_type(model_type):
                     nep_train(json_file, cmd_type)
                 # elif model_type == "CHEBY".upper():
                 #     cheby_train(json_file, cmd_type)
@@ -131,7 +132,7 @@ if __name__ == "__main__":
                 elif model_type == "Linear".upper():
                     from src.user.linear_work import linear_test
                     linear_test(json_file, cmd_type)
-                elif model_type == "NEP".upper():
+                elif is_nep_model_type(model_type):
                     nep_test(json_file, cmd_type)
                     # nep_test_ckpt(json_file, cmd_type) # 用于debug，做ckpt文件的推理，测试pytorch端正确性
                     pass
@@ -154,4 +155,4 @@ if __name__ == "__main__":
                 from src.user.active_work import ff2lmps_explore
                 ff2lmps_explore(json_file)
     
-        
+
