@@ -4,6 +4,7 @@ from src.utils.atom_type_emb_dict import element_table
 from src.utils.json_operation import get_parameter
 from src.utils.nep_to_gpumd import get_atomic_name_from_str
 from src.utils.nep_model_type import nep_model_settings
+from src.utils.nep_zbl import read_zbl_in, validate_zbl_parameters, reorder_zbl_parameters
 from src.utils.nep_limits import (
     MIN_DESCRIPTOR_SIZE, MAX_DESCRIPTOR_SIZE, MIN_HIDDEN_NEURONS,
     MAX_HIDDEN_NEURONS, MAX_FEATURES, MAX_ANGULAR_FEATURES, SUPPORTED_L_MAX,
@@ -49,6 +50,8 @@ class NepParam(object):
         self.charge_output_num = 1
         self.sqrt_epsilon_inf = None
         self.fixed_sqrt_epsilon_inf = None
+        self.zbl_in = None
+        self.zbl_parameters = None
 
     def normalize_charge_mode_from_nep_txt(self, charge_mode):
         charge_mode = int(charge_mode)
@@ -93,20 +96,22 @@ class NepParam(object):
             print(f"the target atom type:\n {atom_type_train}")
         self.type_num = type_num
         self.zbl = None
+        self.zbl_parameters = None
+        self.zbl_in = None
         use_zbl = False
         self.use_typewise_cutoff_zbl = None
-        self.use_fixed_zbl = False
+        self.use_flexible_zbl = False
         if "zbl" in lines[1]:
             zbl_line = lines[1].split()
             if float(zbl_line[1]) < 1e-04 and float(zbl_line[2]) < 1e-04:
-                self.use_fixed_zbl = True
-                raise Exception("ERROR! The fixed zbl is not supported!")
+                self.use_flexible_zbl = True
+                self.zbl = 0.0
             else:
                 self.zbl = float(zbl_line[2])
                 if len(zbl_line) > 3:
                     self.use_typewise_cutoff_zbl = float(zbl_line[3])
-                lines[1:-1] = lines[2:]
             use_zbl = True
+            lines[1:-1] = lines[2:]
             
         cutoffs = lines[1].split()
         self.cutoff = [float(cutoffs[1]), float(cutoffs[2])]
@@ -143,11 +148,13 @@ class NepParam(object):
                 ann_nums += 2
         need_line = 6 + ann_nums + self.c_num + self.feature_nums
         if use_zbl:
-            if self.use_fixed_zbl:
-                need_line += 1 + (self.type_num+1)*self.type_num/2
+            if self.use_flexible_zbl:
+                need_line += 1 + 10 * (self.type_num + 1) * self.type_num // 2
             else:
                 need_line += 1
-        if "4" in version:
+        if "4" in version and self.use_flexible_zbl:
+            is_gpumd_nep = True
+        elif "4" in version:
             is_gpumd_nep = False if need_line == line_num else True  #元素类型只有1个，可以认为是nep5
         else:
             is_gpumd_nep = False
@@ -228,7 +235,16 @@ class NepParam(object):
 
         self.q_scaler = np.array([float(_) for _ in lines[start_index:start_index + self.feature_nums]])
         start_index += self.feature_nums
-        if use_zbl:
+        if self.use_flexible_zbl:
+            count = 10 * self.type_num * (self.type_num + 1) // 2
+            self.zbl_parameters = validate_zbl_parameters(
+                [float(v) for v in lines[start_index:start_index + count]],
+                self.type_num, self.cutoff[1])
+            self.zbl = float(self.zbl_parameters[:, 1].max())
+            start_index += count
+            if start_index + 1 != line_num:
+                raise ValueError("invalid flexible ZBL parameter count in nep.txt")
+        elif use_zbl:
             if start_index + 1 != line_num:
                 raise Exception("extract the nep.txt {} error! the params need {} but has {}\n".format(nep_txt_file, start_index + 1, len(lines)))
         else:
@@ -248,9 +264,12 @@ class NepParam(object):
                 _nn_param.append(self.model_wb[_index*3+2])
             self.model_wb = _nn_param
             self.c2_param = self.c2_param[index, :, :, :][:, index, :, :]
-            self.c3_param = self.c3_param[index, :, :, :][:, index, :, :]
+            if self.c3_param is not None:
+                self.c3_param = self.c3_param[index, :, :, :][:, index, :, :]
             self.type_num = len(atom_type_train)
             self.bias_lastlayer = self.bias_lastlayer[index]
+            if self.zbl_parameters is not None:
+                self.zbl_parameters = reorder_zbl_parameters(self.zbl_parameters, index, type_num)
 
     '''
     description: 
@@ -261,7 +280,7 @@ class NepParam(object):
     return {*}
     author: wuxingxing
     '''
-    def set_nep_param_from_json(self, json_dict:dict, type_list:list[int]=[]):
+    def set_nep_param_from_json(self, json_dict:dict, type_list:list[int]=[], base_dir=None):
         model_dict = get_parameter("model", json_dict, {})
         descriptor_dict = get_parameter("descriptor", model_dict, {})
         # optimizer_dict = get_parameter("optimizer", json_dict, {})
@@ -277,6 +296,8 @@ class NepParam(object):
         self.prediction = 0 # select between training and prediction (inference)
         self.charge_output_num = 2 if self.charge_mode else 1
         self.zbl = get_parameter("zbl", descriptor_dict, None)
+        self.zbl_in = get_parameter("zbl_in", descriptor_dict, None)
+        stored_zbl = get_parameter("zbl_parameters", descriptor_dict, None)
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
         if self.zbl is None and self.use_typewise_cutoff_zbl is not None:
             raise Exception("ERROR! The use_typewise_cutoff_zbl parameter must be used in conjunction with the zbl parameter.")
@@ -284,9 +305,19 @@ class NepParam(object):
         # if self.zbl is not None:
         #     if self.zbl > 5 or self.zbl < 1.0:
         #         raise Exception("ERROR! the 'zbl' in json file should be between 1.0 and 2.5")
-        self.use_fixed_zbl = False
+        self.use_flexible_zbl = False
 
         self.cutoff = get_parameter("cutoff", descriptor_dict, [8.0, 4.0]) # radial () and angular () cutoffs # use dp rcut, default to 6
+        if self.zbl_in is not None or stored_zbl is not None:
+            if self.zbl is None or self.use_typewise_cutoff_zbl is not None:
+                raise ValueError("zbl_in requires zbl and excludes use_typewise_cutoff_zbl")
+            if stored_zbl is not None:
+                self.zbl_parameters = validate_zbl_parameters(stored_zbl, self.type_num, self.cutoff[1])
+            else:
+                path = self.zbl_in
+                if not os.path.isabs(path):
+                    path = os.path.join(base_dir or os.getcwd(), path)
+                self.zbl_parameters = read_zbl_in(path, self.type_num, self.cutoff[1])
         self.n_max = get_parameter("n_max", descriptor_dict, [4, 4]) # size of radial () and angular () basis
                 
         self.basis_size = get_parameter("basis_size", descriptor_dict, [12, 12]) # number of radial () and angular () basis functions

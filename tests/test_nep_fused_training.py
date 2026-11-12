@@ -151,6 +151,27 @@ class TestFusedTraining(unittest.TestCase):
     def test_nep5_charge2_per_element_bias_matches_original(self):
         self.compare_step(True, shared_bias=False)
 
+    def test_flexible_zbl_full_force_training_step(self):
+        model = make_small_model(shared_bias=True)
+        values = torch.zeros((6, 10), dtype=torch.float64, device='cuda')
+        values[:, 0] = 0.2
+        values[:, 1] = 2.5
+        values[:, 2] = 1.0
+        values[:, 3] = 1.0
+        model.flexible_zbl = values
+        model.zbl = 2.5
+        sample = make_small_sample()
+        neighbors = neighbor_inputs(model, sample)
+        baseline = evaluate(model, sample, neighbors, False)
+        actual = evaluate(model, sample, neighbors, True)
+        for expected, observed in zip(baseline, actual):
+            if expected is not None:
+                torch.testing.assert_close(observed, expected, rtol=2e-9, atol=2e-10)
+        training_loss(actual).backward()
+        gradient = model.fitting_net[0].layers[0].weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertTrue(torch.isfinite(gradient).all())
+
     def test_charge_only_step_preserves_unused_energy_head_and_adam_moments(self):
         from src.model.nep_fused_fitting import build_fitting_groups
         model = make_small_model(charge=True, shared_bias=False)

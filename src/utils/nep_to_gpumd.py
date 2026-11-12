@@ -2,6 +2,7 @@ import torch
 import os 
 import sys
 from src.utils.nep_model_type import nep_model_settings
+from src.utils.nep_zbl import validate_zbl_parameters
 
 element_table = [
     '', 'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
@@ -139,12 +140,15 @@ def extract_model(nep_path:str):
     version_suffix = f"nep{version}"
     charge_output_num = 2 if charge_mode else 1
     zbl = descriptor_dict['zbl'] if 'zbl' in descriptor_dict.keys() else None
+    flexible_zbl = descriptor_dict.get('zbl_parameters')
     if zbl is None:
         head_content =  "{}{}   {} {}\n".format(version_suffix, charge_suffix, len(atom_names), " ".join(map(str, atom_names)))
     else:
         zbl_factor = descriptor_dict['use_typewise_cutoff_zbl'] if 'use_typewise_cutoff_zbl' in descriptor_dict.keys() else None
         head_content =  "{}_zbl{}   {} {}\n".format(version_suffix, charge_suffix, len(atom_names), " ".join(map(str, atom_names)))
-        if zbl_factor is None:
+        if flexible_zbl is not None:
+            head_content += "zbl 0 0\n"
+        elif zbl_factor is None:
             head_content +=  "zbl   {} {}\n".format(zbl/2, zbl)
         else:
             head_content +=  "zbl   {} {} {}\n".format(zbl/2, zbl, zbl_factor)
@@ -223,6 +227,11 @@ def extract_model(nep_path:str):
     head_content += "\n".join(map(str, c_list))
     head_content += "\n"
     head_content += "\n".join(map(str, q_list))
+    if flexible_zbl is not None:
+        values = validate_zbl_parameters(flexible_zbl, len(atom_names), cutoff[1])
+        head_content += "\n"
+        head_content += "\n".join(map(str, values.flatten()))
+        head_content += "\n"
 
     return head_content, model_atom_type, atom_names
 

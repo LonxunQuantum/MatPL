@@ -155,6 +155,9 @@ class NEP(nn.Module):
         self.charge_output_num = 2 if self.charge_mode else 1
         self.use_analytical_nep_grad = bool(getattr(input_param.nep_param, "use_analytical_nep_grad", False))
         self.zbl = input_param.nep_param.zbl
+        self._flexible_zbl_values = input_param.nep_param.zbl_parameters
+        if self._flexible_zbl_values is not None:
+            self.zbl = float(self._flexible_zbl_values[:, 1].max())
         self.zbl_factor = input_param.nep_param.use_typewise_cutoff_zbl
         if self.input_param.precision == "float64":
             self.dtype = torch.double
@@ -262,6 +265,12 @@ class NEP(nn.Module):
         # zbl
         self.K_C_SP = 14.399645 # 1/(4*PI*epsilon_0)
         self.zbl_para = [0.18175, 3.1998, 0.50986, 0.94229, 0.28022, 0.4029, 0.02817, 0.20162]
+        self.register_buffer(
+            "flexible_zbl",
+            None if self._flexible_zbl_values is None else
+            torch.as_tensor(self._flexible_zbl_values, dtype=dtype, device=device),
+            persistent=False,
+        )
         self.atom_type_device = torch.tensor(self.atom_type, dtype=torch.int64, device=device)
         if self.zbl_factor is not None:
             self.COVALENT_RADIUS = torch.tensor(
@@ -1703,7 +1712,14 @@ class NEP(nn.Module):
         valid_z = type_j_idx != -1
         Z_j[valid_z] = self.atom_type_device[type_j_idx[valid_z]]
 
-        if self.zbl_factor is not None:
+        if self.flexible_zbl is not None:
+            ti = type_map.unsqueeze(1).expand_as(type_j_idx)
+            tj = type_j_idx.clamp_min(0)
+            lo = torch.minimum(ti, tj)
+            hi = torch.maximum(ti, tj)
+            pair = lo * self.ntypes - lo * (lo - 1) // 2 + hi - lo
+            rcut_per_pair = self.flexible_zbl[pair, 1]
+        elif self.zbl_factor is not None:
             # 计算每对 (i,j) 的 new_rcut = min(self.zbl, (cov_i + cov_j) * factor)
             cov_i = self.COVALENT_RADIUS[Z_i]                        # [n_atoms, 1]
             cov_j = self.COVALENT_RADIUS[Z_j]                        # [n_atoms, n_neigh]
@@ -1750,7 +1766,19 @@ class NEP(nn.Module):
         safe_rij = torch.where(rij.abs() > 1e-8, rij, torch.tensor(1e-8, dtype=rij.dtype, device=rij.device))
         
         fc = torch.zeros_like(rij, dtype=rij.dtype)
-        if self.zbl_factor is not None:
+        if self.flexible_zbl is not None:
+            ti = type_map.unsqueeze(1).expand_as(type_zbl)
+            tj = type_zbl.clamp_min(0)
+            lo = torch.minimum(ti, tj)
+            hi = torch.maximum(ti, tj)
+            pair = lo * self.ntypes - lo * (lo - 1) // 2 + hi - lo
+            params = self.flexible_zbl[pair]
+            inner = params[..., 0]
+            outer = params[..., 1]
+            switch = 0.5 + 0.5 * torch.cos(self.Pi * (rij - inner) / (outer - inner))
+            fc = torch.where(rij < inner, 1.0,
+                             torch.where(rij < outer, switch, 0.0))
+        elif self.zbl_factor is not None:
             # fc = 0.5 + 0.5 * cos(π * r / rcut_per_pair)   for r < rcut_per_pair
             # fc = 0                                        for r >= rcut_per_pair
             # inner = 0, outer = rcut_per_pair
@@ -1787,12 +1815,19 @@ class NEP(nn.Module):
         ) * 2.134563
         
         phi = torch.zeros_like(rij, dtype=rij.dtype)
-        phi[mask_compute] = (
-            self.zbl_para[0] * torch.exp(-self.zbl_para[1] * x[mask_compute]) +
-            self.zbl_para[2] * torch.exp(-self.zbl_para[3] * x[mask_compute]) +
-            self.zbl_para[4] * torch.exp(-self.zbl_para[5] * x[mask_compute]) +
-            self.zbl_para[6] * torch.exp(-self.zbl_para[7] * x[mask_compute])
-        )
+        if self.flexible_zbl is not None:
+            p = params[mask_compute]
+            xx = x[mask_compute]
+            phi[mask_compute] = sum(
+                p[:, 2 + 2*k] * torch.exp(-p[:, 3 + 2*k] * xx)
+                for k in range(4))
+        else:
+            phi[mask_compute] = (
+                self.zbl_para[0] * torch.exp(-self.zbl_para[1] * x[mask_compute]) +
+                self.zbl_para[2] * torch.exp(-self.zbl_para[3] * x[mask_compute]) +
+                self.zbl_para[4] * torch.exp(-self.zbl_para[5] * x[mask_compute]) +
+                self.zbl_para[6] * torch.exp(-self.zbl_para[7] * x[mask_compute])
+            )
         
         ei_zbl = torch.zeros_like(rij, dtype=rij.dtype)
         ei_zbl[mask_compute] = (

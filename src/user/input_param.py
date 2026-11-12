@@ -101,7 +101,7 @@ class InputParam(object):
                 raise ValueError(
                     f"model_type {self.model_type} does not match {nep_txt_file} header")
         else:
-            nep_param.set_nep_param_from_json(json_input, self.atom_type)
+            nep_param.set_nep_param_from_json(json_input, self.atom_type, self.file_paths.json_dir)
         # if fixed
         nep_param.set_fixed_params(json_input)
         self.nep_param = nep_param
@@ -111,6 +111,9 @@ class InputParam(object):
         self.descriptor.basis_size = nep_param.basis_size
         self.descriptor.l_max = nep_param.l_max
         self.descriptor.zbl = nep_param.zbl
+        self.descriptor.zbl_in = nep_param.zbl_in
+        self.descriptor.zbl_parameters = (None if nep_param.zbl_parameters is None
+                                          else nep_param.zbl_parameters.tolist())
         self.descriptor.use_typewise_cutoff_zbl = nep_param.use_typewise_cutoff_zbl
         # self.descriptor.type_weight = nep_param.type_weight
 
