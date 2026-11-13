@@ -53,3 +53,30 @@ def test_virial_log_metrics_match_inference_validity_and_six_components():
     assert count == 12
     assert raw.item() == pytest.approx(4.0)
     assert per_atom.item() == pytest.approx((1.0 + 0.0625) / 2)
+
+
+def test_nep_energy_and_virial_objective_uses_per_atom_mse():
+    from types import SimpleNamespace
+    from src.loss.loss import get_loss
+
+    atoms = torch.tensor([[2.0], [8.0]], dtype=torch.float64)
+    energy = torch.tensor([[2.0], [8.0]], dtype=torch.float64, requires_grad=True)
+    virial = torch.tensor([[2.0] * 6, [8.0] * 6], dtype=torch.float64,
+                          requires_grad=True)
+    criterion = torch.nn.MSELoss()
+    energy_mse = criterion(energy / atoms, torch.zeros_like(energy))
+    virial_mse = criterion(virial / atoms, torch.zeros_like(virial))
+    optimizer = SimpleNamespace(
+        train_force=False, train_energy=True, train_egroup=False,
+        train_charge=False, train_bec=False,
+        start_pre_fac_etot=2.0, end_pre_fac_etot=2.0,
+        start_pre_fac_virial=3.0, end_pre_fac_virial=3.0)
+    loss = get_loss(SimpleNamespace(optimizer_param=optimizer), 0.001, 1,
+                    torch.zeros_like(energy_mse), energy_mse, virial_mse,
+                    train_virial=True)
+    assert loss.item() == pytest.approx(5.0)
+    loss.backward()
+    torch.testing.assert_close(energy.grad[:, 0],
+                               torch.tensor([1.0, 0.25], dtype=torch.float64))
+    torch.testing.assert_close(virial.grad[:, 0],
+                               torch.tensor([0.25, 0.0625], dtype=torch.float64))

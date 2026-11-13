@@ -424,7 +424,6 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
 
         data_time.update(time.time() - end)
         batch_size = sample["num_atom"].shape[0]
-        avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
         global_update = optimizer_update_step(completed_updates, i)
         lr_update = optimizer_update_step(
             completed_updates if lr_completed_updates is None
@@ -495,6 +494,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         loss_BEC_val, bec_mask = get_bec_loss(Bec_predict, sample, criterion, args)
         loss_Egroup_val = None
         loss_Virial_val = None
+        loss_Virial_per_atom_val = None
 
         if args.optimizer_param.train_egroup:
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
@@ -502,6 +502,9 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
             _Virial_label = Virial_label[:, [0, 1, 2, 4, 5, 8]][data_mask]
             if train_virial:
                 loss_Virial_val = criterion(Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]], _Virial_label)
+                loss_Virial_per_atom_val = criterion(
+                    Virial_predict[data_mask][:, [0, 1, 2, 4, 5, 8]] / sample["num_atom"][data_mask],
+                    _Virial_label / sample["num_atom"][data_mask])
                 update_virial_log_meters(
                     loss_Virial, loss_Virial_per_atom, Virial_predict,
                     Virial_label, sample["num_atom"], criterion)
@@ -509,10 +512,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch,
         loss = get_loss(
             args,
             optimizer_lr,
-            avg_atom_number,
+            1,  # per-atom MSE is already normalized for each structure
             loss_F_val,
-            loss_Etot_val,
-            loss_Virial_val,
+            loss_Etot_per_atom_val,
+            loss_Virial_per_atom_val,
             loss_Egroup_val,
             loss_Charge_val,
             loss_BEC_val,
@@ -751,7 +754,7 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
         loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
-                    args.optimizer_param.pre_fac_etot * loss_Etot_val
+                    args.optimizer_param.pre_fac_etot * loss_Etot_per_atom_val
         if loss_Charge_val is not None:
             loss_val += args.optimizer_param.pre_fac_charge * loss_Charge_val
         if loss_BEC_val is not None:
@@ -762,10 +765,13 @@ def train_KF(train_loader, model, criterion, optimizer, epoch, device, args:Inpu
             _Virial_label = Virial_label[:, [0,1,2,4,5,8]][data_mask]
             if data_mask.any().item():
                 loss_Virial_val = criterion(Virial_predict[data_mask][:,[0,1,2,4,5,8]], _Virial_label)
+                loss_Virial_per_atom_val = criterion(
+                    Virial_predict[data_mask][:,[0,1,2,4,5,8]] / sample["num_atom"][data_mask],
+                    _Virial_label / sample["num_atom"][data_mask])
                 update_virial_log_meters(
                     loss_Virial, loss_Virial_per_atom, Virial_predict,
                     Virial_label, sample["num_atom"], criterion)
-                loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
+                loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_per_atom_val
 
         if args.optimizer_param.lambda_2 is not None:
             loss_val += L2
@@ -858,7 +864,6 @@ def valid(val_loader, model, criterion, device, args:InputParam):
 
             # measure data loading time
             batch_size =  sample["num_atom"].shape[0]
-            avg_atom_number = (sample['num_atom_sum'][-1] / batch_size).item()
             nr_batch_sample = sample["num_atom"].shape[0]
 
             # if args.optimizer_param.train_egroup is True:
@@ -899,7 +904,7 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                 loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
             loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
-                    args.optimizer_param.pre_fac_etot * loss_Etot_val
+                    args.optimizer_param.pre_fac_etot * loss_Etot_per_atom_val
 
             if loss_Charge_val is not None:
                 loss_val += args.optimizer_param.pre_fac_charge * loss_Charge_val
@@ -912,10 +917,13 @@ def valid(val_loader, model, criterion, device, args:InputParam):
                 _Virial_label = Virial_label[:, [0,1,2,4,5,8]][data_mask]
                 if data_mask.any().item():
                     loss_Virial_val = criterion(Virial_predict[data_mask][:,[0,1,2,4,5,8]], _Virial_label)
+                    loss_Virial_per_atom_val = criterion(
+                        Virial_predict[data_mask][:,[0,1,2,4,5,8]] / sample["num_atom"][data_mask],
+                        _Virial_label / sample["num_atom"][data_mask])
                     update_virial_log_meters(
                         loss_Virial, loss_Virial_per_atom, Virial_predict,
                         Virial_label, sample["num_atom"], criterion)
-                    loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
+                    loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_per_atom_val
                 if args.optimizer_param.lambda_2 is not None:
                     loss_val += L2
                 if args.optimizer_param.lambda_1 is not None:
@@ -1119,7 +1127,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
             loss_Egroup_val = criterion(Egroup_predict, Egroup_label)
 
         loss_val = args.optimizer_param.pre_fac_force * loss_F_val + \
-                args.optimizer_param.pre_fac_etot * loss_Etot_val
+                args.optimizer_param.pre_fac_etot * loss_Etot_per_atom_val
 
         if args.optimizer_param.train_virial is True:
             # loss_Virial_val = criterion(Virial_predict, Virial_label.squeeze(1))  #115.415137283393
@@ -1130,7 +1138,7 @@ def predict(val_loader, model, criterion, device, args:InputParam, isprofile=Fal
                 loss_Virial_per_atom_val = criterion(Virial_predict[data_mask][:,virial_index]/sample["num_atom"][data_mask], _Virial_label/sample["num_atom"][data_mask])
                 # loss_Virial.update(loss_Virial_val.item(), _Virial_label.shape[0])
                 # loss_Virial_per_atom.update(loss_Virial_per_atom_val.item(), _Virial_label.shape[0])
-                loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_val
+                loss_val += args.optimizer_param.pre_fac_virial * loss_Virial_per_atom_val
 
         # rmse
         Etot_rmse = loss_Etot_val ** 0.5
