@@ -297,8 +297,6 @@ class Descriptor(object):
             dicts["cutoff"] = self.cutoff
             if self.zbl is not None:
                 dicts["zbl"] = self.zbl
-                if getattr(self, "zbl_in", None) is not None:
-                    dicts["zbl_in"] = self.zbl_in
                 if getattr(self, "zbl_parameters", None) is not None:
                     dicts["zbl_parameters"] = self.zbl_parameters
                 if self.use_typewise_cutoff_zbl is not None:

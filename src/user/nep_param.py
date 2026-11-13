@@ -50,7 +50,6 @@ class NepParam(object):
         self.charge_output_num = 1
         self.sqrt_epsilon_inf = None
         self.fixed_sqrt_epsilon_inf = None
-        self.zbl_in = None
         self.zbl_parameters = None
 
     def normalize_charge_mode_from_nep_txt(self, charge_mode):
@@ -97,7 +96,6 @@ class NepParam(object):
         self.type_num = type_num
         self.zbl = None
         self.zbl_parameters = None
-        self.zbl_in = None
         use_zbl = False
         self.use_typewise_cutoff_zbl = None
         self.use_flexible_zbl = False
@@ -296,8 +294,9 @@ class NepParam(object):
         self.prediction = 0 # select between training and prediction (inference)
         self.charge_output_num = 2 if self.charge_mode else 1
         self.zbl = get_parameter("zbl", descriptor_dict, None)
-        self.zbl_in = get_parameter("zbl_in", descriptor_dict, None)
         stored_zbl = get_parameter("zbl_parameters", descriptor_dict, None)
+        if descriptor_dict.get("zbl_in") is not None and stored_zbl is None:
+            raise ValueError("set zbl to the zbl.in file path instead of using zbl_in")
         self.use_typewise_cutoff_zbl = get_parameter("use_typewise_cutoff_zbl", descriptor_dict, None)
         if self.zbl is None and self.use_typewise_cutoff_zbl is not None:
             raise Exception("ERROR! The use_typewise_cutoff_zbl parameter must be used in conjunction with the zbl parameter.")
@@ -308,16 +307,17 @@ class NepParam(object):
         self.use_flexible_zbl = False
 
         self.cutoff = get_parameter("cutoff", descriptor_dict, [8.0, 4.0]) # radial () and angular () cutoffs # use dp rcut, default to 6
-        if self.zbl_in is not None or stored_zbl is not None:
+        if isinstance(self.zbl, str) or stored_zbl is not None:
             if self.zbl is None or self.use_typewise_cutoff_zbl is not None:
-                raise ValueError("zbl_in requires zbl and excludes use_typewise_cutoff_zbl")
+                raise ValueError("flexible zbl requires zbl and excludes use_typewise_cutoff_zbl")
             if stored_zbl is not None:
                 self.zbl_parameters = validate_zbl_parameters(stored_zbl, self.type_num, self.cutoff[1])
             else:
-                path = self.zbl_in
+                path = self.zbl
                 if not os.path.isabs(path):
                     path = os.path.join(base_dir or os.getcwd(), path)
                 self.zbl_parameters = read_zbl_in(path, self.type_num, self.cutoff[1])
+            self.zbl = float(self.zbl_parameters[:, 1].max())
         self.n_max = get_parameter("n_max", descriptor_dict, [4, 4]) # size of radial () and angular () basis
                 
         self.basis_size = get_parameter("basis_size", descriptor_dict, [12, 12]) # number of radial () and angular () basis functions

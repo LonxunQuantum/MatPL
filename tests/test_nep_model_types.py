@@ -44,6 +44,15 @@ def test_model_type_is_the_only_serialized_version_and_charge_setting(
     assert "gpumd_nep4" not in saved["model"]["descriptor"]
 
 
+def test_nep5_json_alias_is_saved_as_nep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    params = InputParam(_config("nep5"), "TRAIN")
+    assert params.model_type == "NEP"
+    assert params.nep_param.version == 5
+    assert params.nep_param.charge_mode == 0
+    assert params.to_dict()["model_type"] == "NEP"
+
+
 @pytest.mark.parametrize("model_type,is_nep4,has_charge", [
     ("NEP", False, False),
     ("NEP4", True, False),

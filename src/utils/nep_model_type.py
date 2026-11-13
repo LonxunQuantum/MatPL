@@ -1,7 +1,7 @@
 """Canonical NEP model types used by configuration, training and export."""
 
 
-NEP_MODEL_TYPES = frozenset({"NEP", "NEP4", "NEP_CHARGE2", "NEP4_CHARGE2"})
+NEP_MODEL_TYPES = frozenset({"NEP", "NEP5", "NEP4", "NEP_CHARGE2", "NEP4_CHARGE2"})
 
 
 def is_nep_model_type(model_type):

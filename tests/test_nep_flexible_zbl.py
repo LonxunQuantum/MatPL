@@ -15,7 +15,7 @@ def _config():
         "model": {
             "descriptor": {"cutoff": [6, 4], "n_max": [4, 4],
                            "basis_size": [4, 4], "l_max": [4, 0, 0],
-                           "zbl": 2, "zbl_in": "zbl.in"},
+                           "zbl": "zbl.in"},
             "fitting_net": {"network_size": [30, 1]},
         },
         "optimizer": {"optimizer": "ADAM"},
@@ -36,6 +36,8 @@ def test_zbl_file_order_and_checkpoint_snapshot(tmp_path, monkeypatch):
                                   values[[2, 1, 0]])
     params = InputParam(_config(), "TRAIN")
     saved = params.to_dict()
+    assert saved["model"]["descriptor"]["zbl"] == 2.4
+    assert "zbl_in" not in saved["model"]["descriptor"]
     np.testing.assert_array_equal(saved["model"]["descriptor"]["zbl_parameters"], values)
     (tmp_path / "zbl.in").unlink()
     restored = InputParam(saved, "TRAIN")
@@ -56,6 +58,24 @@ def test_zbl_file_order_and_checkpoint_snapshot(tmp_path, monkeypatch):
     from_txt = NepParam()
     from_txt.set_nep_nn_c_param_from_nep_txt(str(txt), [1, 2])
     np.testing.assert_array_equal(from_txt.zbl_parameters, values)
+
+
+def test_numeric_zbl_keeps_universal_behavior(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _config()
+    config["model"]["descriptor"]["zbl"] = 2.0
+    params = InputParam(config, "TRAIN")
+    assert params.nep_param.zbl == 2.0
+    assert params.nep_param.zbl_parameters is None
+    assert params.to_dict()["model"]["descriptor"]["zbl"] == 2.0
+
+
+def test_zbl_file_excludes_typewise_cutoff(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _config()
+    config["model"]["descriptor"]["use_typewise_cutoff_zbl"] = 1.0
+    with pytest.raises(ValueError, match="excludes use_typewise_cutoff_zbl"):
+        InputParam(config, "TRAIN")
 
 
 def test_zbl_file_validation(tmp_path):

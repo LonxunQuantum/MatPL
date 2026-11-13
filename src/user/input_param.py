@@ -31,6 +31,8 @@ class InputParam(object):
         self.cmd = cmd
         self.inference = True if self.cmd == "test".upper() else False
         self.model_type = get_required_parameter("model_type", json_input).upper()
+        if self.model_type == "NEP5":
+            self.model_type = "NEP"
         # self.atom_type = get_required_parameter("atom_type", json_input)
         self.atom_type = get_atomic_name_from_str(get_required_parameter("atom_type", json_input))
         if is_nep_model_type(self.model_type):
@@ -111,7 +113,6 @@ class InputParam(object):
         self.descriptor.basis_size = nep_param.basis_size
         self.descriptor.l_max = nep_param.l_max
         self.descriptor.zbl = nep_param.zbl
-        self.descriptor.zbl_in = nep_param.zbl_in
         self.descriptor.zbl_parameters = (None if nep_param.zbl_parameters is None
                                           else nep_param.zbl_parameters.tolist())
         self.descriptor.use_typewise_cutoff_zbl = nep_param.use_typewise_cutoff_zbl
