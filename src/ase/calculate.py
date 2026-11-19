@@ -48,7 +48,7 @@ class MatPL_calculator(Calculator):
             self.device = torch.device("cuda")
         else:
             self.device = torch.device("cpu")
-
+        print("DEVICE: {}".format(self.device))
         self.calc = Inference(model_file, self.device)
 
     def __repr__(self):
