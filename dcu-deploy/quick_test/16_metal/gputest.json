@@ -1,0 +1,10 @@
+{
+    "model_type": "NEP",
+    "format": "extxyz",
+    "model_load_file":"nep.txt",
+    "test_dir_name":"gpu_test_result",
+    "test_data": [
+        "mini-1comp.xyz",  "mini-2comp.xyz"
+    ]
+}
+

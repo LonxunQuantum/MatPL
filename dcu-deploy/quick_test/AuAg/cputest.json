@@ -1,0 +1,10 @@
+{
+    "model_type": "NEP",
+    "model_load_file":"nep.txt",
+    "test_dir_name":"cpu_test_result",
+    "format":"extxyz",
+    "test_data": [
+	"train.xyz"
+    ]
+}
+
