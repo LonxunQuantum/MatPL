@@ -1,3 +1,5 @@
+import importlib
+
 import torch
 from torch.autograd import Variable
 import numpy as np
@@ -77,8 +79,11 @@ class Inference(object):
                 self.calc = FindNeigh()
                 self.calc.init_model(self.ckpt_file)
             else:
-                from src.feature.NEP_GPU.build.cuda.nep_gpu import NEP
-                self.calc = NEP()
+                build_backend = "hip" if getattr(torch.version, "hip", None) else "cuda"
+                NEP_GPU = importlib.import_module(
+                    f"src.feature.NEP_GPU.build.{build_backend}.nep_gpu"
+                ).NEP
+                self.calc = NEP_GPU()
                 self.calc.init_from_file(self.ckpt_file, 1, 0)
             
             if "tmp_matpl_nep" in self.ckpt_file:
