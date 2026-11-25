@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+runs/
+candidates/
+baselines/
+.tmp/
+.cache/
+!/quick_test/*/train.xyz

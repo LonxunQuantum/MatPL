@@ -1,0 +1,444 @@
+{
+  "version": 1,
+  "id": "20261120-132417-832ab19c",
+  "entries": {
+    "regression/16_metal/batch1": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "1dc1a82ce1fcca1b793d9f85a378e6a08d661fba5da44916d4c2cba1158c5e77",
+        "mini-1comp.xyz": "c51312720a8bdf01d8f2f97f743b74fa4aae65aaf44da4037caefbf9e7a9b8ca",
+        "mini-2comp.xyz": "a8e4c5413f5f06991a5ff6e177613143d95d83477edad59fb1f77b3673931f50"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn31"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 150.85774421,
+            "RMSE_Etot(eV/atom)": 1.4507594692,
+            "RMSE_F(eV/Å)": 1.1055736208,
+            "RMSE_virial(eV/atom)": 3.9755829614,
+            "last_lr_used": 0.0005002413023
+          }
+        },
+        "optimizer_updates": 3510
+      }
+    },
+    "regression/16_metal/batch32": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "1dc1a82ce1fcca1b793d9f85a378e6a08d661fba5da44916d4c2cba1158c5e77",
+        "mini-1comp.xyz": "c51312720a8bdf01d8f2f97f743b74fa4aae65aaf44da4037caefbf9e7a9b8ca",
+        "mini-2comp.xyz": "a8e4c5413f5f06991a5ff6e177613143d95d83477edad59fb1f77b3673931f50"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn30"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 112.71287092,
+            "RMSE_Etot(eV/atom)": 1.4313489457,
+            "RMSE_F(eV/Å)": 1.1228909388,
+            "RMSE_virial(eV/atom)": 3.9456839232,
+            "last_lr_used": 0.002869203405
+          }
+        },
+        "optimizer_updates": 109
+      }
+    },
+    "regression/MPtraj/batch1": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "1c58d4f21f164dc02baf782c16f715fbd3fda62684a8739f311104e3b873bd52",
+        "mini-MP.xyz": "e3a6fcb50bfcc099bc64d6ad34ceeeafbc946e20807b2ff0c264eecea14e1426"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn31"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 26429.977269,
+            "RMSE_Etot(eV/atom)": 1.0010209358,
+            "RMSE_F(eV/Å)": 4.7919090407,
+            "RMSE_virial(eV/atom)": 505.75429747,
+            "last_lr_used": 0.00050236193125
+          }
+        },
+        "optimizer_updates": 335
+      }
+    },
+    "regression/MPtraj/batch32": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "1c58d4f21f164dc02baf782c16f715fbd3fda62684a8739f311104e3b873bd52",
+        "mini-MP.xyz": "e3a6fcb50bfcc099bc64d6ad34ceeeafbc946e20807b2ff0c264eecea14e1426"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn31"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 27549.360523,
+            "RMSE_Etot(eV/atom)": 0.99631813768,
+            "RMSE_F(eV/Å)": 4.8490757887,
+            "RMSE_virial(eV/atom)": 505.90306433,
+            "last_lr_used": 0.0032709054135
+          }
+        },
+        "optimizer_updates": 10
+      }
+    },
+    "regression/AuAg/batch1": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "a0874d91b808bda85ed01777129092fff7af373ff092bdbce06f234a67620a26",
+        "train.xyz": "db54d5cc16590c61b5820e624423320767ee249b8c409a51ac1304c3ca6b43a8"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn32"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 293.57411333,
+            "RMSE_Etot(eV/atom)": 0.5700091621,
+            "RMSE_F(eV/Å)": 1.577009677,
+            "RMSE_virial(eV/atom)": 3.4860663203,
+            "last_lr_used": 0.00050221131558
+          }
+        },
+        "optimizer_updates": 358
+      }
+    },
+    "regression/AuAg/batch32": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "a0874d91b808bda85ed01777129092fff7af373ff092bdbce06f234a67620a26",
+        "train.xyz": "db54d5cc16590c61b5820e624423320767ee249b8c409a51ac1304c3ca6b43a8"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn32"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 440.19654598,
+            "RMSE_Etot(eV/atom)": 0.98576199217,
+            "RMSE_F(eV/Å)": 2.2591610318,
+            "RMSE_virial(eV/atom)": 4.0150911001,
+            "last_lr_used": 0.00057117247151
+          }
+        },
+        "optimizer_updates": 11
+      }
+    },
+    "regression/LiSiC/batch1": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "7be84177958276c6e02261312d7c3e6a6ce65cb623c1f7e63e12b78ffb786981",
+        "train.xyz": "9b1535244b7c2ab24e348a12567b2d366787354b2796eb9dbbab1418054b00e8"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn32"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 662.74948567,
+            "RMSE_Etot(eV/atom)": 0.85850851963,
+            "RMSE_F(eV/Å)": 0.90513308865,
+            "RMSE_virial(eV/atom)": 0.39420123355,
+            "last_lr_used": 0.00050063256206
+          }
+        },
+        "optimizer_updates": 1277
+      }
+    },
+    "regression/LiSiC/batch32": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "7be84177958276c6e02261312d7c3e6a6ce65cb623c1f7e63e12b78ffb786981",
+        "train.xyz": "9b1535244b7c2ab24e348a12567b2d366787354b2796eb9dbbab1418054b00e8"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn31"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 1227.0232108,
+            "RMSE_Etot(eV/atom)": 1.1476221591,
+            "RMSE_F(eV/Å)": 1.2095727017,
+            "RMSE_virial(eV/atom)": 0.44721484802,
+            "last_lr_used": 0.00052014981339
+          }
+        },
+        "optimizer_updates": 39
+      }
+    },
+    "regression/BaTiO/batch1": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "689a245981871de1471c082f5d8f514c67c1b07e360f2c765c98dee562bb3f56",
+        "reference-structures-BaTiO-R2SCAN.xyz": "7fdc1a57b05c06224084464afe389771d3d9cc570a00bad35287dae3438951b9"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn32"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 24.274123924,
+            "RMSE_Etot(eV/atom)": 0.063290576368,
+            "RMSE_F(eV/Å)": 0.56354661609,
+            "RMSE_charge": 0.039765661024,
+            "RMSE_BEC": 0.60983260508,
+            "RMSE_virial(eV/atom)": 0.54616668368,
+            "last_lr_used": 0.001
+          }
+        },
+        "optimizer_updates": 1832
+      }
+    },
+    "regression/BaTiO/batch32": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "689a245981871de1471c082f5d8f514c67c1b07e360f2c765c98dee562bb3f56",
+        "reference-structures-BaTiO-R2SCAN.xyz": "7fdc1a57b05c06224084464afe389771d3d9cc570a00bad35287dae3438951b9"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn32"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 63.257741818,
+            "RMSE_Etot(eV/atom)": 0.13185708005,
+            "RMSE_F(eV/Å)": 0.81002468227,
+            "RMSE_charge": 0.05426751741,
+            "RMSE_BEC": 1.4354183686,
+            "RMSE_virial(eV/atom)": 0.51356388414,
+            "last_lr_used": 0.001
+          }
+        },
+        "optimizer_updates": 57
+      }
+    },
+    "regression/Si-SiO2-La2O3-HfO2-TiN/batch1": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "17f0bdef80a0e6f6fa32d102e68f5348808703eb9560f4f23d4555f5a21bce2c",
+        "mini_1420.xyz": "b2811adf6c618319a8ce2ba873f98e71d4508f7fc7d137bb8e2277035aa25fad"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn30"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 161.68801612,
+            "RMSE_Etot(eV/atom)": 0.71875420747,
+            "RMSE_F(eV/Å)": 1.2722736707,
+            "RMSE_virial(eV/atom)": 0.42366746033,
+            "last_lr_used": 0.00050057101754
+          }
+        },
+        "optimizer_updates": 1419
+      }
+    },
+    "regression/Si-SiO2-La2O3-HfO2-TiN/batch32": {
+      "candidate": "20261120-132417-832ab19c",
+      "code": {
+        "commit": "941d15ac53a25343ba38d40c804efdc8aa3107dc",
+        "status": "",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "inputs": {
+        "nep.json": "17f0bdef80a0e6f6fa32d102e68f5348808703eb9560f4f23d4555f5a21bce2c",
+        "mini_1420.xyz": "b2811adf6c618319a8ce2ba873f98e71d4508f7fc7d137bb8e2277035aa25fad"
+      },
+      "runtime": {
+        "backend": "cuda",
+        "torch": "2.2.0+cu118",
+        "binary_hashes": {
+          "src/feature/nep_find_neigh/findneigh.so": "8ff0d222aa153ce698217480b92090b12441f0f2ceac38731d198a6da9ab3b59",
+          "src/feature/NEP_GPU/build/cuda/nep_gpu.so": "9f4bfdb06db6f5f9edff6e1af1e6309cee25342fd830f4727298974085e834ab"
+        },
+        "device_names": [
+          "NVIDIA GeForce RTX 3090"
+        ],
+        "node": "gn30"
+      },
+      "values": {
+        "epochs": {
+          "1": {
+            "loss": 177.31531672,
+            "RMSE_Etot(eV/atom)": 0.80378418485,
+            "RMSE_F(eV/Å)": 1.4610994256,
+            "RMSE_virial(eV/atom)": 0.41761293905,
+            "last_lr_used": 0.00051786309052
+          }
+        },
+        "optimizer_updates": 44
+      }
+    }
+  }
+}

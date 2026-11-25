@@ -27,6 +27,7 @@ src/GPUMD/src/gpumd
 src/GPUMD/src/nep
 __pycache__
 .gitignore
+!/src/auto_test/.gitignore
 src/md/fortran_code/*.a
 src/md/fortran_code/*.o
 src/md/fortran_code/iotk/src/*.o

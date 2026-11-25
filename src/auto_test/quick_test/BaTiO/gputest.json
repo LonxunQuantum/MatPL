@@ -1,0 +1,11 @@
+{
+    "model_type": "NEP",
+    "model_load_file":"nep.txt",
+    "test_dir_name":"gpu_test_result",
+    "format":"extxyz",
+    "test_data": [
+        "reference-structures-BaTiO-R2SCAN.xyz"
+    ]
+
+}
+

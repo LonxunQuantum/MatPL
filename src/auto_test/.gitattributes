@@ -1,0 +1,2 @@
+# Reference input hashes use the exact fixture bytes on every checkout.
+quick_test/** -text
