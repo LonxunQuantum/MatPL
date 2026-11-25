@@ -285,7 +285,11 @@ python3 -B src/auto_test/auto_test.py run \
 
 ## 重建、发布与复用基线
 
-内置基线来自提交 `941d15a`。下面用当前干净 checkout 的提交生成 12 项候选基线。只重建 BaTiO batch 32 时，追加 `--case BaTiO --variant batch32`。
+内置基线来自提交 `941d15a`，随源码放在 `src/auto_test/reference/manifest.json`。重建时，在 `--work-dir` 下先生成候选结果，再单独发布。下面以 `/data/home/wuxingxing/tmp` 为例。
+
+### 生成候选基线
+
+用当前干净 checkout 的提交重新训练 12 个回归用例。只重建 BaTiO batch 32 时，追加 `--case BaTiO --variant batch32`。
 
 ```bash
 python3 -B src/auto_test/auto_test.py base build \
@@ -294,20 +298,52 @@ python3 -B src/auto_test/auto_test.py base build \
   --reference "$(git rev-parse HEAD)"
 ```
 
-构建成功后，在同一个工作目录发布候选基线。把 `CANDIDATE_ID` 换成上一步输出的候选 ID。局部发布会继承其余基线条目。
+每次构建生成新的 `CANDIDATE_ID`，即终端 `Candidate` 行里的 ID。以 BaTiO batch 32 为例，候选目录里的主要文件如下。
+
+```text
+/data/home/wuxingxing/tmp/candidates/CANDIDATE_ID/
+├── summary.json                         # 构建提交、输入指纹和各用例状态
+└── regression/BaTiO/batch32/
+    ├── case.json、train.json             # 用例信息和实际训练配置
+    ├── submit.log、slurm-*.log、train.log
+    ├── result.json                      # 提取出的训练指标和优化器更新次数
+    └── model_record/                   # 训练日志、checkpoint 和导出模型
+```
+
+构建完成后，候选结果留在 `candidates/`，当前使用的基线仍由现有的默认选择决定。
+
+### 发布候选基线
+
+构建成功后，在同一个工作目录发布。把 `CANDIDATE_ID` 换成上一步输出的候选 ID。
 
 ```bash
 python3 -B src/auto_test/auto_test.py base promote CANDIDATE_ID \
   --work-dir /data/home/wuxingxing/tmp
 ```
 
-用内置基线重新比较已有结果。把 `RUN_ID` 换成先前运行的 ID，此命令复用训练产物。
+发布会从候选的 `result.json` 提取数值，写成新的版本清单，再切换工作目录的默认基线。原始作业记录和模型留在候选目录。`manifest.json` 中保存基线数值、输入指纹、参考提交和运行环境等信息。
+
+```text
+/data/home/wuxingxing/tmp/baselines/
+├── current.json                         # 此工作目录当前默认使用的基线 ID
+├── 旧基线 ID/manifest.json
+└── CANDIDATE_ID/manifest.json          # 新发布的版本
+```
+
+例如，旧版本 A 有 12 项，只重建 BaTiO batch 32 并发布为 B。B 的清单采用这个用例的新数值，其余 11 项继承 A，`current.json` 指向 B。旧版 A 的清单和源码里的内置基线均保留。之后不指定 `--base` 时默认使用 B，指定 `--base` 加旧版本 ID 仍可用 A。再次发布已是当前版本的候选时会提示该版本已生效。
+
+### 用已有结果重新比较
+
+把 `RUN_ID` 换成先前通过 `run` 获得的 ID。下面用内置基线对照该次运行中保存的训练结果。
 
 ```bash
 python3 -B src/auto_test/auto_test.py compare RUN_ID \
   --work-dir /data/home/wuxingxing/tmp \
   --base 20261120-132417-832ab19c
 ```
+
+`compare` 从 `runs/RUN_ID/` 读取已有回归结果，比较报告写到同一目录的 `comparison-*.json`。
+
 
 ## 设置 Slurm 分区和运行环境
 

@@ -1,2 +1,0 @@
-# epoch              loss   RMSE_Etot(eV/atom)         RMSE_F(eV/Å)   RMSE_virial(eV/atom)      last_lr_used        time(s)
-    1    1.1271287092e+02     1.4313489457e+00     1.1228909388e+00       3.9456839232e+00  2.8692034050e-03        10.9718
